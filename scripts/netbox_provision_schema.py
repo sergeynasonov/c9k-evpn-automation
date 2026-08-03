@@ -41,6 +41,12 @@ except ImportError:
 
 # --- Device identity -------------------------------------------------------
 #
+# SLUGS USE UNDERSCORES. Ansible's TRANSFORM_INVALID_GROUP_CHARS defaults to
+# 'never', so a hyphen is NOT rewritten: slug 'fabric-border' produces the group
+# 'device_roles_fabric-border' while the playbooks look for
+# 'device_roles_fabric_border'. Nothing matches, nothing renders, nothing errors.
+# Do not "tidy" these into kebab-case.
+#
 # Borders and leaves are DEVICE ROLES; spines are a TAG. A spine is a control-
 # plane role rather than a hardware class -- often the same platform as a
 # distribution switch -- so a tag composes with whatever device role a site's
@@ -48,9 +54,9 @@ except ImportError:
 # playbooks branch on: device_roles_fabric_border, device_roles_fabric_leaf,
 # tags_fabric_spine.
 DEVICE_ROLES = {
-    "fabric-border": ("Fabric Border",
+    "fabric_border": ("Fabric Border",
                       "EVPN border: VRF handoff SVIs, eBGP to upstream, border-to-border mesh"),
-    "fabric-leaf": ("Fabric Leaf",
+    "fabric_leaf": ("Fabric Leaf",
                     "EVPN leaf: tenant SVIs, EVPN instances, NVE interface"),
 }
 
@@ -62,7 +68,7 @@ DEVICE_ROLES = {
 # which selects which border renders it; those are per-fabric and are NOT
 # created here because they depend on your device names.
 TAGS = {
-    "fabric-spine": ("Fabric Spine",
+    "fabric_spine": ("Fabric Spine",
                      "EVPN/MVPN route reflector and anycast RP. Identifies spines to the inventory."),
     "dag_routed": ("DAG Routed",
                    "Routed-only distributed anycast gateway: ingress replication, no multicast group needed"),
@@ -217,7 +223,7 @@ def main() -> int:
               "script will not overwrite data it does not own.")
 
     print("\nNext: model your sites (buildings) and site groups (campuses), then devices\n"
-          "with role fabric-border / fabric-leaf or the fabric-spine tag, status Active,\n"
+          "with role fabric_border / fabric_leaf or the fabric_spine tag, status Active,\n"
           "and primary IPv4 set to the Loopback0 address. See the data-model contract in\n"
           "roles/acm_evpn/README.md.")
 

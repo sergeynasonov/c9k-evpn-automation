@@ -198,7 +198,7 @@ Then model your fabric. The minimum for a device to be provisioned at all:
 
 | | |
 |---|---|
-| Device role | `fabric-border` or `fabric-leaf` — or the `fabric-spine` **tag** for spines |
+| Device role | `fabric_border` or `fabric_leaf` — or the `fabric_spine` **tag** for spines |
 | Status | **Active** (the inventory filters on it) |
 | Primary IPv4 | **The `Loopback0`/VTEP address** — asserted on every run |
 | Site | Required; drives which VLANs reach the device |
