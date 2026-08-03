@@ -43,9 +43,15 @@ looks provisioned and is not.
 
 | What | NetBox object | Slug | Effect |
 |---|---|---|---|
-| Border | Device role | `fabric-border` | Renders the handoff SVIs, eBGP handoff and border-to-border mesh. Allocated first by `trm_allocate.yml`. |
-| Leaf | Device role | `fabric-leaf` | Renders tenant SVIs, EVPN instances and the NVE interface. |
-| Spine | **Tag** | `fabric-spine` | Route reflector: EVPN and MVPN clients, anycast RP. |
+| Border | Device role | `fabric_border` | Renders the handoff SVIs, eBGP handoff and border-to-border mesh. Allocated first by `trm_allocate.yml`. |
+| Leaf | Device role | `fabric_leaf` | Renders tenant SVIs, EVPN instances and the NVE interface. |
+| Spine | **Tag** | `fabric_spine` | Route reflector: EVPN and MVPN clients, anycast RP. |
+
+**Underscores, not hyphens.** Ansible's `TRANSFORM_INVALID_GROUP_CHARS`
+defaults to `never`, so the inventory plugin does not rewrite a hyphen: a slug
+`fabric-border` yields the group `device_roles_fabric-border`, while the
+playbooks look for `device_roles_fabric_border`. The two never meet, and the
+symptom is silence. Every slug in this contract uses underscores.
 
 Note the asymmetry: borders and leaves are **device roles**, spines are a
 **tag**. A spine is a role a device plays in the control plane rather than a
