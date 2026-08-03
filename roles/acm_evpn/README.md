@@ -30,6 +30,63 @@ Everything below is read from NetBox. Objects that do not carry the required
 marker are **not part of the fabric** and are silently ignored — enrolment is
 opt-in throughout.
 
+`scripts/netbox_provision_schema.py` creates every custom field, tag and role
+named in this section. Run it once against a new NetBox rather than clicking
+twenty objects into the UI and hoping the slugs match.
+
+### Devices
+
+**Slugs must match exactly.** A device whose role is spelled differently is not
+in the group, produces no configuration, and raises no error — the run simply
+does not mention it. This is the single most common way to get a fabric that
+looks provisioned and is not.
+
+| What | NetBox object | Slug | Effect |
+|---|---|---|---|
+| Border | Device role | `fabric-border` | Renders the handoff SVIs, eBGP handoff and border-to-border mesh. Allocated first by `trm_allocate.yml`. |
+| Leaf | Device role | `fabric-leaf` | Renders tenant SVIs, EVPN instances and the NVE interface. |
+| Spine | **Tag** | `fabric-spine` | Route reflector: EVPN and MVPN clients, anycast RP. |
+
+Note the asymmetry: borders and leaves are **device roles**, spines are a
+**tag**. A spine is a role a device plays in the control plane rather than a
+distinct hardware class — often the same platform as a distribution switch —
+and a tag composes with whatever device role the site's own conventions already
+use. It is deliberate, and it is not guessable, hence this table.
+
+Every managed device additionally needs:
+
+| Requirement | Why |
+|---|---|
+| Status **Active** | `netbox_inv.yml` filters on it; anything else is invisible to the inventory. |
+| **Primary IPv4 = the `Loopback0`/VTEP address** | EVPN peers are addressed from each device's primary IP, so a peer outside the current play still gets a correct address. Asserted on every host — see [Safety guards](#safety-guards). |
+| A **site** | Drives VLAN scope, below. |
+
+### Sites, site groups and VLAN scope
+
+The fabric's own convention, and the part with no substitute in code:
+
+- **Site = building.** Each switch belongs to one.
+- **Site group = campus.** Sites are grouped into it.
+
+A VLAN is rendered on a switch when **any** of these hold:
+
+| VLAN in NetBox | Renders on |
+|---|---|
+| No site and no group scope | **Every switch in the fabric** |
+| `site` set | Switches in that site (building) |
+| Group whose scope is a **site group** | Switches whose site is in that campus |
+| Group whose scope is a **site** | Switches in that site |
+
+So a tenant VLAN that exists only in one building gets a site; one stretched
+across the campus gets a group scoped to the site group; one that must reach
+every switch gets neither. Fabric-wide is the *default* for an unscoped VLAN —
+worth knowing before adding a VLAN with no scope and finding it on all 500
+switches.
+
+Scope decides **where** a VLAN is rendered. Its **role**, below, decides
+**what** is rendered. A VLAN in scope with no recognised role produces nothing
+and is reported in the run output rather than dropped silently.
+
 ### VRF custom fields
 
 | Field | Type | Required | Meaning |

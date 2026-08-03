@@ -56,13 +56,14 @@ Then, per switch, in order:
 | Step | Command | What it does |
 |---|---|---|
 | 1 | *(by hand)* | Build the underlay — see [Phase 1](#phase-1--day-0-hand-build-the-underlay). Ansible never touches it |
-| 2 | *(in NetBox)* | Model the device, then the tenants. **[The role README is the data contract](roles/acm_evpn/README.md)** |
-| 3 | `ansible-playbook readiness.yml` | Assert the underlay is fit to provision; report what is not |
-| 4 | `ansible-playbook generate_evpn.yml` | Render candidates to `switch-configuration/`. **No device changes** |
-| 5 | *(read the diff)* | Compare against the previous render — see [Rendering](#rendering-safe--no-device-changes) |
-| 6 | `ansible-playbook deploy_evpn.yml` | Apply under a rollback timer, confirm, save |
+| 2 | `scripts/netbox_provision_schema.py --apply` | Create the custom fields, tags and roles NetBox must carry. Once per NetBox |
+| 3 | *(in NetBox)* | Model the device, then the tenants. **[The role README is the data contract](roles/acm_evpn/README.md)** |
+| 4 | `ansible-playbook readiness.yml` | Assert the underlay is fit to provision; report what is not |
+| 5 | `ansible-playbook generate_evpn.yml` | Render candidates to `switch-configuration/`. **No device changes** |
+| 6 | *(read the diff)* | Compare against the previous render — see [Rendering](#rendering-safe--no-device-changes) |
+| 7 | `ansible-playbook deploy_evpn.yml` | Apply under a rollback timer, confirm, save |
 
-**Step 4 is the one to get into the habit of.** It touches nothing, and the
+**Step 5 is the one to get into the habit of.** It touches nothing, and the
 candidate it produces is exactly what a deploy would push — so reading that diff
 is how you find out what a change actually does before it reaches a switch.
 
@@ -80,7 +81,7 @@ the role refuses. See [Deploying](#deploying) for why.
 | `netbox_inv.yml` | NetBox dynamic inventory |
 | `roles/acm_evpn/` | The fabric role. **[Its README](roles/acm_evpn/README.md) is the NetBox data-model contract** |
 | `roles/underlay_readiness/` | Day-0 assertions, platform baseline and SNMPv3. Run at onboarding, and as an `acm_evpn` pre-flight |
-| `scripts/` | One-off NetBox provisioning helpers |
+| `scripts/` | One-off NetBox provisioning helpers — `netbox_provision_schema.py` (the schema) and `netbox_multicast_carve.py` (the multicast carve) |
 | `switch-configuration/` | Rendered candidate configs (regenerated every run) |
 | `commit-results/` | ACM net-diffs and validation failures from the last deploy |
 | `readiness-results/` | One `<hostname>-readiness.cfg` per unready switch — paste-ready remediation |

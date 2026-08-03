@@ -176,6 +176,42 @@ ansible_network_os: cisco.ios.ios
 
 ---
 
+## Step 6: Prepare NetBox
+
+NetBox is the source of truth, and the automation reads a specific vocabulary
+from it — custom fields, tags, device roles and VLAN roles, all matched **by
+slug**. A device whose role is spelled differently is not in the inventory
+group, renders nothing, and raises no error, so this step is not optional.
+
+Create the schema once:
+
+```bash
+scripts/netbox_provision_schema.py            # dry run — shows what is missing
+scripts/netbox_provision_schema.py --apply    # create it
+```
+
+It is create-only: anything already present is left untouched, never renamed or
+re-described. It creates the *vocabulary*, not your data — no sites, devices,
+VLANs or VRFs, because those are your network.
+
+Then model your fabric. The minimum for a device to be provisioned at all:
+
+| | |
+|---|---|
+| Device role | `fabric-border` or `fabric-leaf` — or the `fabric-spine` **tag** for spines |
+| Status | **Active** (the inventory filters on it) |
+| Primary IPv4 | **The `Loopback0`/VTEP address** — asserted on every run |
+| Site | Required; drives which VLANs reach the device |
+
+Sites are buildings and site groups are campuses, which is what decides whether
+a VLAN lands on one building or the whole campus.
+
+**[roles/acm_evpn/README.md](roles/acm_evpn/README.md) is the full data-model
+contract** — every field, role and tag with its meaning. Read it before
+modelling tenants; it is the reference this step summarises.
+
+---
+
 ## 🚀 Daily Workflow
 
 You do not need to manually activate virtual environments, decrypt vaults, or export tokens. 
