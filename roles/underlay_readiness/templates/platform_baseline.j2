@@ -1,0 +1,300 @@
+{#
+  PLATFORM BASELINE
+  =================
+  Fabric-wide switch settings: local user, AAA, logging, timestamps, clock,
+  VTY/console, routing and multicast globals, archive, VTP, spanning-tree,
+  errdisable, UDLD, CoPP class-maps and policy, licensing, redundancy, Vlan1,
+  the management VRF and port, and NTP.
+
+  APPLIED, NOT RENDERED. This is pushed once at onboarding by
+  tasks/04_apply_baseline.yml via 'ios_config', which merges: it installs what
+  is missing and leaves everything else alone. acm_evpn no longer renders any
+  of it -- the candidate preserves whatever the device reports instead.
+
+  That move fixed two things. It is set once for the life of a switch and only
+  revisited on a deliberate fabric-wide event (rotating credentials, changing a
+  timezone), so re-rendering it on every overlay change was pure churn: this is
+  where nearly all the residual ACM diff came from, because IOS-XE renders back
+  platform defaults this template does not model. And the readiness assertions
+  in 02_check.yml can now hard-fail on these lines honestly -- while acm_evpn
+  still rendered them, a failure blocked the very deploy that would have
+  installed them.
+
+  Anything IOS-XE hides from 'show running-config' MUST live here rather than
+  in the acm_evpn render, for the same reason SNMPv3 does: a full-replace
+  candidate can never converge on a line the device will not read back.
+
+  The corollary, learned the expensive way: if such a line is also POINTLESS,
+  drop it rather than finding a home for it. The VTP password and version were
+  both removed on exactly that basis -- unverifiable, and meaningless in
+  transparent mode.
+
+  Device-native hardware lines (hw-module / switch / power) are deliberately
+  absent: they are facts about the chassis, never something to push, and the
+  candidate preserves them from the device.
+#}
+! --- 2. LOCAL USER & SSH ---
+! The password below is injected securely from Infisical.
+{#
+  Prefer a pre-hashed secret. 'secret 0 <plaintext>' is re-hashed by the device
+  to type 9, so the candidate never matches the running config: every deploy
+  shows the username as changed and rewrites the password on a live device.
+  Generate the hash once on any switch and store it in Infisical:
+      username tmp privilege 15 secret <plaintext>
+      show running-config | include ^username tmp
+  then copy the $9$... value into ios_password_secret_hash.
+#}
+{% if local_admin_secret_hash %}
+username {{ local_admin_user }} privilege 15 secret 9 {{ local_admin_secret_hash }}
+{% else %}
+username {{ local_admin_user }} privilege 15 secret 0 {{ local_admin_password }}
+{% endif %}
+!
+aaa new-model
+aaa authentication login default local
+aaa authorization exec default local
+!
+ip scp server enable
+!
+! --- 3. BASELINE CONFIGURATION ---
+logging buffered 1000000
+service timestamps debug datetime msec localtime
+service timestamps log datetime msec localtime
+{# '10 0', not '+10': IOS stores hours and minutes separately and
+   re-renders it that way, so '+10' never matches and churns. #}
+clock timezone AEST 10 0
+clock summer-time AEDT recurring 1 Sun Oct 2:00 1 Sun Apr 3:00
+!
+{#
+  Every VTY line has to be hardened, not just the first five. A line outside
+  what this template renders is reset to platform defaults by 'acm replace',
+  and on modern IOS-XE that default is 'transport input none' -- so once VTY
+  0-4 are occupied, further SSH sessions are refused. With forks set high, a
+  fabric-wide run can occupy five lines on its own.
+#}
+line vty 0 4
+ exec-timeout 60 0
+ privilege level 15
+ logging synchronous
+ transport preferred none
+ transport input ssh
+line vty 5 {{ vty_line_max }}
+ exec-timeout 60 0
+ privilege level 15
+ logging synchronous
+ transport preferred none
+ transport input ssh
+line con 0
+ exec-timeout 60 0
+ privilege level 15
+ logging synchronous
+ transport preferred none
+ stopbits 1
+!
+
+{#
+  'ip routing' only when the switch is not already routing.
+
+  It is default-ON for the C9400/9500/9600, which never print it, so pushing it
+  there changed nothing and was reported on every single run -- the last
+  remaining line in the apply count. The C9300 has it off by default and does
+  need it.
+
+  The condition is evidence-based rather than platform-based, so there is no
+  model table to maintain: skip only when routing is demonstrably already on
+  (see 01_gather.yml). An explicit 'no ip routing' forces it back, and a switch
+  that shows no evidence either way gets the line -- harmless where it is
+  already the default.
+#}
+{# default(false) so that if these facts are ever missing the line is emitted
+   rather than the render failing -- pushing it is harmless. #}
+{% if (_readiness_routing_disabled | default(false) | bool)
+      or not (_readiness_routing_enabled | default(false) | bool) %}
+ip routing
+{% endif %}
+ipv6 unicast-routing
+ip multicast-routing
+ip pim ssm default
+ip pim rp-address {{ underlay_rp_address }} override
+ip pim register-source {{ vtep_source_intf }}
+!
+ip cef load-sharing algorithm include-ports source destination
+ipv6 cef load-sharing algorithm include-ports source destination
+ip multicast multipath s-g-hash next-hop-based
+port-channel load-balance src-dst-mixed-ip-port
+!
+ip tcp path-mtu-discovery
+ip tcp mss 8000
+{# 'ip tcp window-size 131072' removed: 131072 IS the platform default, so
+   pushing it changed nothing and the device never rendered it back -- an
+   unconvergeable no-op reported on every run. A NON-default value does render,
+   so 02_check.yml checks for that instead. #}
+!
+no ip forward-protocol nd
+no ip forward-protocol udp tftp
+no ip telnet comport enable
+no ip http server
+ip http authentication local
+no ip http secure-server
+!
+ip ftp passive
+ip tftp blocksize 8192
+ip ssh bulk-mode 131072
+ip ssh source-interface {{ vtep_source_intf }}
+ntp source {{ vtep_source_intf }}
+ip domain lookup source-interface {{ vtep_source_intf }}
+ip http client source-interface {{ vtep_source_intf }}
+ip radius source-interface {{ vtep_source_intf }}
+logging source-interface {{ vtep_source_intf }}
+snmp-server trap-source {{ vtep_source_intf }}
+!
+ntp server {{ ntp_server_1 }}
+ntp server {{ ntp_server_2 }}
+!
+{#
+  SNMPv3 -- the ACL, the group and the user -- moved to roles/underlay_readiness.
+
+  'snmp-server user' is hidden from 'show running-config', so this block could
+  never converge: it was pushed, accepted, and then appeared in the next deploy
+  diff again because the device would not read it back. It also wrote the auth
+  and priv passwords in plaintext into every rendered candidate.
+
+  Dropping it from the render does not remove it from a switch. It stops being
+  template-owned, so the candidate now preserves whatever the device already
+  has -- and the readiness role asserts it is there.
+
+  'snmp-server trap-source' above stays: it is source-interface hygiene along
+  with the ip http / ip radius / logging lines, not an SNMP credential.
+#}
+system mtu 9100
+!
+archive
+ log config
+  logging enable
+  logging size 500
+{# 'hidekeys' removed for the same reason as 'ip tcp window-size': it is the
+   default, so it never renders back and was re-pushed forever. Its absence is
+   checked negatively in 02_check.yml. #}
+!
+vtp mode transparent
+vtp domain {{ vtp_domain }}
+{# 'vtp version 3' and 'vtp password' both removed entirely. Neither is a
+   prerequisite for transparent mode or the domain, neither is rendered into the
+   running config, and in transparent mode neither has any functional effect
+   here -- so both were unverifiable lines reported changed on every run for no
+   benefit. Only the two lines above matter, and both converge normally.
+
+   Switches that already carry a VTP password keep it: it is invisible to
+   'show running-config', so nothing preserves it and nothing removes it. #}
+!
+spanning-tree mode rapid-pvst
+spanning-tree logging
+spanning-tree portfast default
+spanning-tree portfast bpduguard default
+spanning-tree extend system-id
+spanning-tree vlan 1-4094 priority 0
+!
+errdisable detect cause security-violation shutdown vlan
+errdisable detect cause bpduguard shutdown vlan
+errdisable recovery cause udld
+errdisable recovery cause bpduguard
+errdisable recovery cause security-violation
+errdisable recovery cause channel-misconfig
+errdisable recovery cause pagp-flap
+errdisable recovery cause dtp-flap
+errdisable recovery cause link-flap
+errdisable recovery cause psecure-violation
+errdisable recovery cause port-mode-failure
+errdisable recovery cause dhcp-rate-limit
+errdisable recovery cause mac-limit
+errdisable recovery cause storm-control
+errdisable recovery cause inline-power
+errdisable recovery cause arp-inspection
+errdisable recovery interval 120
+!
+udld aggressive
+udld recovery
+udld recovery interval 120
+!
+class-map match-any system-cpp-police-ewlc-control
+ description EWLC Control 
+class-map match-any system-cpp-police-topology-control
+ description Topology control
+class-map match-any system-cpp-police-sw-forward
+ description Sw forwarding, L2 LVX data packets, LOGGING, Transit Traffic
+class-map match-any system-cpp-default
+ description EWLC Data, Inter FED Traffic 
+class-map match-any system-cpp-police-sys-data
+ description Openflow, Exception, EGR Exception, NFL Sampled Data, RPF Failed
+class-map match-any system-cpp-police-punt-webauth
+ description Punt Webauth
+class-map match-any system-cpp-police-l2lvx-control
+ description L2 LVX control packets
+class-map match-any system-cpp-police-forus
+ description Forus traffic
+class-map match-any system-cpp-police-multicast-end-station
+ description MCAST END STATION
+class-map match-any system-cpp-police-forus-addr-resolution
+ description Forus address resolution
+class-map match-any system-cpp-police-high-rate-app
+ description High Rate Applications 
+class-map match-any system-cpp-police-multicast
+ description MCAST Data
+class-map match-any system-cpp-police-meraki-next-tunnel
+ description Meraki Next tunnel
+class-map match-any system-cpp-police-l2-control
+ description L2 control
+class-map match-any system-cpp-police-dot1x-auth
+ description DOT1X Auth
+class-map match-any system-cpp-police-data
+ description ICMP redirect, ICMP_GEN and BROADCAST
+class-map match-any system-cpp-police-stackwise-virt-control
+ description Stackwise Virtual OOB
+class-map match-any non-client-nrt-class
+class-map match-any system-cpp-police-routing-control
+ description Routing control and Low Latency
+class-map match-any system-cpp-police-protocol-snooping
+ description Protocol snooping
+class-map match-any system-cpp-police-dhcp-snooping
+ description DHCP snooping
+class-map match-any system-cpp-police-ios-routing
+ description L2 control, Topology control, Routing control, Low Latency
+class-map match-any system-cpp-police-system-critical
+ description System Critical and Gold Pkt
+class-map match-any system-cpp-police-ios-feature
+ description ICMPGEN,BROADCAST,ICMP,L2LVXCntrl,ProtoSnoop,PuntWebauth,MCASTData,Transit,DOT1XAuth,Swfwd,LOGGING,L2LVXData,ForusTraffic,ForusARP,McastEndStn,Openflow,Exception,EGRExcption,NflSampled,RpfFailed
+!
+policy-map system-cpp-policy
+!
+license boot level network-advantage addon dna-advantage
+!
+redundancy
+ mode sso
+!
+crypto engine compliance shield disable
+!
+transceiver type all
+ monitoring
+!
+control-plane
+ service-policy input system-cpp-policy
+!
+interface Vlan1
+ shutdown
+ no ip proxy-arp
+!
+vrf definition Mgmt-vrf
+ !
+ address-family ipv4
+ exit-address-family
+ !
+ address-family ipv6
+ exit-address-family
+!
+interface GigabitEthernet0/0
+ vrf forwarding Mgmt-vrf
+ no ip address
+ ip proxy-arp
+ shutdown
+ negotiation auto
+!

@@ -1,0 +1,54 @@
+---
+# Redact plaintext credentials from the rendered candidate configs, AFTER they
+# have been pushed to the device.
+#
+# Searches for every copy rather than naming one directory, so a stray copy (a
+# .before snapshot kept for diffing, say) is redacted too. Redacting only the
+# canonical path once left credentials in plaintext in a second directory.
+#
+# 'find' rather than the fileglob lookup: fileglob resolves the DIRECTORY part
+# of its pattern through the search path instead of globbing it, so
+# 'switch-configuration*/<host>-candidate-config.cfg' silently matched nothing
+# and this task skipped for every host. depth 2 keeps the search to the
+# candidate directories beside the playbook.
+- name: 11a. Locate every rendered copy of this host's candidate configuration
+  ansible.builtin.find:
+    paths: "{{ playbook_dir }}"
+    patterns: "{{ inventory_hostname }}-candidate-config.cfg"
+    recurse: true
+    depth: 2
+    file_type: file
+  register: _candidate_copies
+  delegate_to: localhost
+
+# A redaction step that quietly does nothing is worse than no redaction step,
+# because the reassurance is what stops anyone checking. The render always
+# produces at least the canonical copy, so finding none means the search is
+# broken, not that there was nothing to do.
+- name: 11b. Fail if no candidate configuration was found to redact
+  ansible.builtin.assert:
+    that:
+      - _candidate_copies.files | length > 0
+    fail_msg: >-
+      Found no candidate configuration for {{ inventory_hostname }} under
+      {{ playbook_dir }} to redact, but one was just rendered. The search is
+      broken - do not treat these files as redacted.
+    quiet: true
+
+- name: 11. Redact plaintext passwords in local candidate configuration files
+  ansible.builtin.replace:
+    path: "{{ item.0 }}"
+    regexp: "{{ item.1.regexp }}"
+    replace: "{{ item.1.replace }}"
+  loop: "{{ _candidate_copies.files | map(attribute='path') | product(_rules) | list }}"
+  vars:
+    _rules:
+      - name: "Local Admin Password"
+        regexp: '^(username .* secret 0 ).*$'
+        replace: '\g<1>REDACTED'
+      - name: "SNMPv3 Passwords"
+        regexp: '^(snmp-server user \S+ \S+ v3 auth \S+ )\S+( priv [a-zA-Z0-9]+(?: \d+)? )\S+(.*)$'
+        replace: '\g<1>REDACTED\g<2>REDACTED\g<3>'
+  loop_control:
+    label: "{{ item.1.name }} -> {{ item.0 | basename }}"
+  delegate_to: localhost

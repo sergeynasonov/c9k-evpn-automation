@@ -1,0 +1,59 @@
+---
+# Site-specific configuration for YOUR fabric.
+#
+#   cp group_vars/all/fabric.yml.example group_vars/all/fabric.yml
+#   $EDITOR group_vars/all/fabric.yml
+#
+# fabric.yml is gitignored. Everything below describes one particular fabric --
+# its addressing, its ASNs, its naming -- so it must never be committed, and the
+# roles carry no defaults for it. A wrong value here is better than a plausible
+# default pointing at somebody else's network, so the roles assert these are set
+# and fail with a pointer to this file rather than rendering something wrong.
+#
+# Addresses use RFC 5737 documentation ranges. Replace all of them.
+
+# --- BGP ------------------------------------------------------------------
+# The fabric's iBGP ASN. Every EVPN session runs inside it, and it is also how
+# the role decides which BGP neighbours it owns: a neighbour in this ASN is
+# automation-managed, anything else belongs to the device.
+evpn_bgp_asn: 65001
+# The ASN upstream of the borders, used for the eBGP handoff sessions.
+evpn_ext_bgp_asn: 65000
+
+# --- Underlay -------------------------------------------------------------
+# The interface every VTEP sources VXLAN, BGP and PIM from. Its address must
+# match the device's NetBox primary IP -- the role asserts this on every run.
+vtep_source_intf: "Loopback0"
+
+# The fabric's anycast RP for UNDERLAY multicast (L2VNI BUM replication). Every
+# spine carries this address on a dedicated loopback.
+# NOTE: unrelated to TRM's per-VRF RPs, which are tenant addresses from NetBox.
+underlay_rp_address: "192.0.2.1"
+# The interface spines are expected to carry it on. Used only to validate that
+# the generated 'ip pim rp-address' points at an address the fabric owns.
+anycast_rp_interface: "Loopback60000"
+# Range the VTEP loopbacks are allocated from. Documentation only.
+fabric_loopbacks_range: "192.0.2.0/26"
+
+# --- Platform baseline (roles/underlay_readiness) -------------------------
+ntp_server_1: "198.51.100.10"
+ntp_server_2: "198.51.100.11"
+
+# SNMPv3. The passwords come from the environment, never from here --
+# see SETUP.md. Only the identity lives in this file.
+snmp_v3_user: "example-snmpv3"
+snmp_v3_group: "AuthPrivGroup"
+snmp_acl_name: "SNMP-ACL"
+snmp_acl:
+  - "198.51.100.20"
+
+# VTP domain. Every switch runs transparent mode, so this is cosmetic; the
+# password and version are deliberately not managed at all (see the role
+# README -- IOS-XE never reports them back, so they could never converge).
+vtp_domain: "EXAMPLE"
+
+# --- NetBox ---------------------------------------------------------------
+# Verify the NetBox TLS certificate. Leave true unless your NetBox uses a
+# self-signed certificate, in which case you are accepting a MITM on the
+# channel that carries your fabric's intent.
+netbox_validate_certs: true

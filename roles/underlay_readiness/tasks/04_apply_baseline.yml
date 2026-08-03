@@ -1,0 +1,88 @@
+---
+# Install the platform baseline. Merge semantics: ios_config diffs the rendered
+# template against the running config and pushes only what is missing, so this
+# adds and never removes.
+#
+# Standalone path only -- the acm_evpn pre-flight (assert_only.yml) never gets
+# here. A switch is baselined once at onboarding; after that the acm_evpn
+# candidate preserves these lines from the device.
+
+# Checked on the CONTROL NODE, before anything is pushed, because this is the
+# one failure mode nothing downstream can catch. A wrong type-9 hash is accepted
+# by the device (it is opaque, so there is nothing to reject), reports 'changed'
+# with no error, leaves the current SSH session up, and is never rendered back
+# into the running config -- so no assertion, no batch boundary and no
+# reconnect probe sees it. The lockout appears on the NEXT connection, by which
+# point every switch in the run has it.
+#
+# Both values already come from Infisical, so verifying one against the other
+# costs nothing and needs no device. See filter_plugins/ios_secret.py.
+- name: Readiness — verify the local admin hash before pushing it
+  ansible.builtin.assert:
+    that:
+      - local_admin_secret_hash | ios_type9_problem(local_admin_password) == ''
+    fail_msg: >-
+      Refusing to apply the platform baseline: ios_password_secret_hash
+      {{ local_admin_secret_hash | ios_type9_problem(local_admin_password) }}
+      Fix it in Infisical, or clear it to fall back to 'secret 0 <plaintext>',
+      which the device hashes itself. Generate a correct value on any switch:
+      'username tmp privilege 15 secret <plaintext>' then
+      'show running-config | include ^username tmp'.
+    success_msg: "local admin hash verified against the login password"
+    quiet: true
+  run_once: true
+  delegate_to: localhost
+  when: readiness_apply_baseline | bool
+
+- name: Readiness — apply the platform baseline
+  cisco.ios.ios_config:
+    src: platform_baseline.j2
+    # Report what changed without putting the local admin hash into the play
+    # output.
+    diff_against: running
+    # ios_config defaults to save_when: never, which would leave the baseline in
+    # the running config only -- a switch baselined but not yet deployed to
+    # would lose it at the next reboot. 'changed' saves only when this task
+    # actually pushed something, so the steady-state run still writes nothing.
+    save_when: changed
+  when: readiness_apply_baseline | bool
+  no_log: true
+  register: _baseline_applied
+
+# The steady state is now NO CHANGE AT ALL, so this task should not fire on an
+# established switch -- which makes anything it does report a real signal rather
+# than a number to remember.
+#
+# Getting here took removing every line the device would never report back:
+# 'ip tcp window-size' and 'hidekeys' (platform defaults -- asserted negatively
+# in 02_check.yml instead), 'vtp version 3' and the VTP password (meaningless
+# in transparent mode), and 'ip routing' is now conditional on the switch not
+# already routing. See the config-visibility note in the README.
+#
+# Set readiness_apply_baseline=false to check without configuring anything.
+- name: Readiness — report platform baseline changes
+  ansible.builtin.debug:
+    msg: |-
+      {{ inventory_hostname }}: platform baseline applied ({{ _updates | length }} line(s)).
+      A stable count on re-run is expected. A count that grows, or a line you do
+      not recognise, is worth investigating.
+      {% for line in _shown %}
+        {{ line }}
+      {% endfor %}
+      {% if _withheld > 0 %}
+        ({{ _withheld }} line(s) withheld -- they carry credentials)
+      {% endif %}
+  vars:
+    _updates: "{{ _baseline_applied.updates | default([]) }}"
+    # The task above is no_log, so this is the only visibility into what was
+    # pushed -- which is the whole point, since 'investigate an unfamiliar line'
+    # is useless advice if the lines are never shown. Credential-bearing lines
+    # are counted rather than printed.
+    _secret_re: "username |secret |password | user |authentication"
+    _shown: "{{ _updates | reject('search', _secret_re) | list }}"
+    _withheld: "{{ _updates | select('search', _secret_re) | list | length }}"
+  # noqa: no-handler -- this reports what the previous task pushed, it does not
+  # react to it. A handler would run at the end of the play, detached from the
+  # host and the task whose output it is explaining, and would be skipped
+  # entirely if a later task failed first -- exactly when the report matters.
+  when: _baseline_applied is changed

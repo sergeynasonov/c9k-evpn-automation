@@ -1,0 +1,34 @@
+---
+# Standalone entry point: run at onboarding, before the switch is ever handed to
+# acm_evpn. Checks the hand-built underlay, and configures the two things this
+# role owns -- SNMPv3 and the platform baseline -- in merge mode, so it adds and
+# never removes.
+#
+#   ansible-playbook readiness.yml
+#   ansible-playbook readiness.yml -e deploy_target=access1-1
+#
+# acm_evpn imports assert_only.yml instead, which gathers and checks only.
+
+- name: Gather underlay state
+  ansible.builtin.import_tasks: 01_gather.yml
+
+# Applying comes BEFORE checking. Several checks cover lines the baseline
+# installs, so checking first would fail a switch that this very run is about to
+# fix -- the same trap that had the checks blocking acm_evpn while acm_evpn
+# still rendered the baseline.
+- name: Configure SNMPv3
+  ansible.builtin.import_tasks: 03_apply_snmp.yml
+
+- name: Apply the platform baseline
+  ansible.builtin.import_tasks: 04_apply_baseline.yml
+
+# Re-read the device so the checks judge the state we just left it in, rather
+# than the state we found it in.
+- name: Re-gather underlay state after configuring
+  ansible.builtin.import_tasks: 01_gather.yml
+
+- name: Check the underlay
+  ansible.builtin.import_tasks: 02_check.yml
+
+- name: Report and write remediation
+  ansible.builtin.import_tasks: 05_report.yml

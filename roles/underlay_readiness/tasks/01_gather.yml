@@ -1,0 +1,127 @@
+---
+# Two device round-trips, then everything else is derived locally. Kept to as
+# few tasks as possible: at fabric scale each task costs a console line per
+# host, and 500 switches x 15 tasks is not something anyone reads.
+#
+# The running config is reused when acm_evpn has already fetched it, so running
+# this as a pre-flight costs one extra round-trip and no extra config fetch.
+
+- name: Verify site configuration
+  ansible.builtin.import_tasks: assert_site_config.yml
+
+- name: Readiness — fetch running configuration
+  cisco.ios.ios_command:
+    commands: "show running-config"
+  register: _readiness_run
+  # Read-only: must run under --check, or the registered result is a skip stub
+  # and everything downstream fails resolving .stdout.
+  check_mode: false
+  when: current_run_config is not defined
+  # A switch that is down must not abort a fabric-wide run. It is reported as
+  # unreachable in the summary instead; see 05_report.yml.
+  ignore_unreachable: true
+
+# SNMPv3 users and groups are hidden from 'show running-config', so operational
+# state is the only place they are visible. Neither command reveals a password.
+#
+# 'database database-summary' rather than 'database router': a handful of lines
+# instead of one LSA dump per router, and it reports the per-area router count
+# directly, which is the only thing wanted.
+- name: Readiness — read SNMPv3 and OSPF operational state
+  cisco.ios.ios_command:
+    commands:
+      - "show snmp user"
+      - "show snmp group"
+      - "show ip ospf {{ readiness_ospf_process }} database database-summary"
+  register: _readiness_state
+  check_mode: false
+  ignore_unreachable: true
+  when: current_run_config is defined or _readiness_run is not failed
+
+# Split the config into {top-level line: [trimmed child lines]}. Every check
+# downstream is then an exact membership test, which beats a regex per command:
+# no escaping, and 'ip pim sparse-mode' cannot satisfy itself by appearing as a
+# substring of some longer line.
+#
+# Indentation is tested before '!' deliberately. An indented '!' is a separator
+# INSIDE a stanza (router bgp is full of them) and must not end it -- getting
+# this backwards silently truncated stanza parsing once already.
+- name: Readiness — index the running configuration by stanza
+  ansible.builtin.set_fact:
+    _run: "{{ _cfg }}"
+    _stanzas: "{{ _idx | from_json }}"
+  vars:
+    _cfg: >-
+      {{ current_run_config.stdout[0] if current_run_config is defined
+         else _readiness_run.stdout[0] }}
+    _idx: >-
+      {%- set ns = namespace(cur=none) -%}
+      {%- set stanzas = {} -%}
+      {%- for raw in _cfg.splitlines() -%}
+      {%-   set line = raw.rstrip() -%}
+      {%-   if line.startswith(' ') -%}
+      {%-     if ns.cur is not none -%}
+      {%-       set _ = stanzas[ns.cur].append(line.strip()) -%}
+      {%-     endif -%}
+      {%-   elif not line.strip() or line.startswith('!')
+              or line.strip() == 'end'
+              or line.startswith('Building configuration')
+              or line.startswith('Current configuration') -%}
+      {%-     set ns.cur = none -%}
+      {%-   else -%}
+      {%-     set ns.cur = line.strip() -%}
+      {%-     set _ = stanzas.setdefault(ns.cur, []) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ stanzas | to_json }}
+  when: _readiness_state is not skipped and _readiness_state is not failed
+
+- name: Readiness — derive underlay facts
+  ansible.builtin.set_fact:
+    # Routers in the fabric's OSPF area: one router-LSA per router.
+    # 'default([], true)' before 'first' is load-bearing -- regex_search returns
+    # None when it does not match (a switch with no OSPF, or a different output
+    # format) and 'first' raises on None before a trailing default can help.
+    _readiness_ospf_routers: >-
+      {{ (_readiness_state.stdout[2]
+          | regex_search('Area ' ~ readiness_ospf_area
+                         ~ ' database summary[\s\S]*?Router\s+(\d+)', '\1')
+          | default([], true) | first | default(0)) | int }}
+    # Is this switch routing? Derived once because three places need the same
+    # answer: the assertions, the remediation file, and platform_baseline.j2,
+    # which uses it to decide whether pushing 'ip routing' is worth doing.
+    #
+    # ABSENCE of 'ip routing' proves nothing -- it is the default state on the
+    # C9400/9500/9600. PRESENCE of 'no ip routing' proves it is off, since a
+    # running config states deviations from the default.
+    _readiness_routing_disabled: "{{ 'no ip routing' in _stanzas }}"
+    _readiness_routing_enabled: >-
+      {{ 'no ip routing' not in _stanzas
+         and ('ip routing' in _stanzas
+              or ('router ospf ' ~ readiness_ospf_process) in _stanzas
+              or (_readiness_ospf_routers | int) >= 1) }}
+    # A fabric uplink is any routed interface enrolled in the fabric's OSPF
+    # process. Derived rather than named, so nothing depends on an interface
+    # naming convention. Matched on the process alone, not the area: an uplink
+    # in the wrong area must be FOUND so it can be reported, rather than
+    # dropping out of the check. Loopbacks are checked separately; SVIs are
+    # never fabric uplinks and would fail 'no switchport' for the wrong reason.
+    _readiness_uplinks: "{{ _uplinks | from_json }}"
+    _readiness_lo0: "{{ _lo0 }}"
+  vars:
+    _uplinks: >-
+      {%- set out = [] -%}
+      {%- for name, body in _stanzas.items() if name.startswith('interface ') -%}
+      {%-   set intf = name.split(' ', 1)[1] -%}
+      {%-   if not intf.startswith('Loopback') and not intf.startswith('Vlan')
+              and body | select('match', 'ip ospf ' ~ readiness_ospf_process ~ ' area ')
+                       | list | length > 0 -%}
+      {%-     set _ = out.append(intf) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    _lo0: >-
+      {%- set addrs = _stanzas.get('interface ' ~ vtep_source_intf, [])
+                      | select('match', 'ip address ') | list -%}
+      {{ addrs[0].split()[2] if addrs else '' }}
+  when: _stanzas is defined

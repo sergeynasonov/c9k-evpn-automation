@@ -1,0 +1,53 @@
+# =============================================================================
+#  network-automation — git ignore rules
+# =============================================================================
+
+# --- Secrets & local project binding -----------------------------------------
+.infisical.json
+
+# --- Python virtual environment ----------------------------------------------
+venv/
+__pycache__/
+*.pyc
+
+# --- OS / editor cruft -------------------------------------------------------
+.DS_Store
+*.swp
+
+# --- Rendered device candidate configs (regenerated on every run) ------------
+switch-configuration/
+switch-configuration-inverted/
+switch-configuration.before/
+
+# --- ACM deploy results ------------------------------------------------------
+#     The commit-results/ directory is intentionally kept in the repo (via its
+#     own .gitignore keeper), but its contents — ACM net-diffs and validation-
+#     failure logs — are runtime artifacts and are never committed.
+#     See commit-results/.gitignore.
+
+# --- Underlay readiness results ----------------------------------------------
+#     Same treatment as commit-results/: the directory is kept in the repo (via
+#     its own .gitignore keeper) but the per-switch remediation files written
+#     into it describe live device state and are never committed.
+#     See readiness-results/.gitignore.
+
+# --- YOUR fabric's configuration --------------------------------------------
+#     Site-specific addressing, ASNs and naming. Never committed: the repo
+#     ships fabric.yml.example with documentation-range placeholders instead,
+#     so publishing can never leak a real network and you never have to
+#     re-add your own values after a push.
+group_vars/all/fabric.yml
+
+# --- Local environment -------------------------------------------------------
+.envrc
+.vscode/
+.claude/
+host_vars/
+
+# --- Archived, reference & scratch material (not part of the shipped roles) ---
+old files/
+CLI examples/
+testing/
+
+# --- Ansible runtime artifacts -----------------------------------------------
+*.retry

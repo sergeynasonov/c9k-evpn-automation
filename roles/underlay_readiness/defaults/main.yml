@@ -1,0 +1,139 @@
+---
+# Site-specific values -- ASNs, addresses, NTP/SNMP/VTP identity -- are NOT here.
+# They live in group_vars/all/fabric.yml, which is gitignored, with a documented
+# template in fabric.yml.example. A default pointing at somebody else's network
+# is worse than no default, so the role asserts they are set instead.
+#
+# Expected underlay state. These are ASSERTIONS, not configuration: the underlay
+# is hand-built at day 0 (see the root README) and this role never changes it.
+# A failure means the switch is not fit for fabric provisioning and a human
+# should fix it -- silently remediating would reintroduce exactly the risk that
+# keeping the underlay device-owned was meant to avoid.
+#
+# SNMPv3, at the bottom of this file, is the one exception: it is the only thing
+# this role configures, and only on the standalone path.
+
+
+# Global single-line settings every fabric switch must carry.
+#
+# Only lines that are NOT platform defaults belong here. Absence from
+# 'show running-config' means one of two things -- not configured, or
+# configured as the platform default -- and a text match cannot tell them
+# apart. 'ip routing' is the worked example: default-ON for the C9400/9500/9600
+# so they never print it, default-off on the C9300 so it does. access2-2 (a
+# C9400) reported it missing while passing every OSPF check on the same run,
+# which is impossible. It is now derived instead; see 02_check.yml.
+#
+# Before adding a line here, check it is not a default on every platform in the
+# fabric. If it might be, derive it from something observable instead.
+readiness_global_lines:
+  - "system mtu 9100"
+  - "ip multicast-routing"
+  - "ip pim register-source {{ vtep_source_intf }}"
+  - "ip pim ssm default"
+  - "ip pim rp-address {{ underlay_rp_address }} override"
+
+# Loopback0 is the VTEP source, the OSPF router-id and the PIM register source.
+readiness_loopback_lines:
+  - "ip pim sparse-mode"
+  - "ip ospf {{ readiness_ospf_process }} area {{ readiness_ospf_area }}"
+
+# Platform defaults that must not be overridden. NOT pushed -- the default is
+# already in effect, so pushing it is a no-op the device never renders back.
+# 02_check.yml checks for a non-default value instead, which IS rendered.
+readiness_tcp_window_size: 131072
+
+readiness_ospf_process: 1
+readiness_ospf_area: 0
+
+# 'router ospf' body. Convergence behaviour, not preference: max-metric holds
+# the node out of the topology until it has converged, nsf/fast-reroute cover
+# restart and failover, and bfd all-interfaces arms sub-second detection --
+# which only actually runs where the interface also has 'bfd interval'.
+#
+# router-id is NOT listed here: it is per-device, so it is checked separately
+# against the Loopback0 address read off this same switch.
+readiness_ospf_lines:
+  - "max-metric router-lsa include-stub summary-lsa external-lsa on-startup 60"
+  - "nsf cisco"
+  - "fast-reroute per-prefix enable prefix-priority low"
+  - "bfd all-interfaces"
+
+# Borders originate the default route into the fabric.
+readiness_ospf_border_lines:
+  - "default-information originate"
+
+# Every fabric uplink -- any routed (non-loopback, non-SVI) interface enrolled
+# in the fabric OSPF process; see 01_gather.yml for how they are discovered.
+# All mandatory. 'bfd interval' is what makes 'bfd all-interfaces' do anything:
+# without it the process-level statement arms nothing.
+readiness_uplink_lines:
+  - "no switchport"
+  - "no ip redirects"
+  - "no ip unreachables"
+  - "no ip proxy-arp"
+  - "ip pim sparse-mode"
+  - "ip ospf network point-to-point"
+  - "ip ospf {{ readiness_ospf_process }} area {{ readiness_ospf_area }}"
+  - "load-interval 30"
+  - "carrier-delay msec 0"
+  - "bfd interval 250 min_rx 250 multiplier 3"
+  - "hold-queue 4094 in"
+  - "hold-queue 4094 out"
+
+# Topology-driven, so a warning rather than a failure: nothing in the config is
+# wrong, the area has simply grown. C9K supports 250 routers in a single area.
+readiness_ospf_routers_warn: 200
+readiness_ospf_routers_max: 250
+
+snmp_v3_auth_password: "{{ lookup('env', 'ios_snmp_auth') }}"
+snmp_v3_priv_password: "{{ lookup('env', 'ios_snmp_priv') }}"
+
+# Set false to check without configuring anything at all.
+readiness_apply_snmp: true
+
+# Fail on an unready switch (the deploy path). generate_evpn.yml sets this
+# false so it reports the same findings and still produces the candidate.
+readiness_enforce: true
+
+# One <hostname>-readiness.cfg per unready switch, so remediating tens or
+# hundreds of switches is a directory of paste-ready files rather than a scroll
+# back through console output. Tracked in git but kept empty, and wiped at the
+# start of every run so its contents always describe the latest run.
+readiness_results_dir: "{{ playbook_dir }}/readiness-results"
+
+# The fabric-wide CSV is a readiness-campaign artifact, so only readiness.yml
+# writes it. assert_only.yml (the acm_evpn pre-flight) sets this false: a
+# deploy scoped to a few switches must not replace a fabric-wide record with a
+# three-row subset.
+readiness_write_csv: true
+
+# ---------------------------------------------------------------------------
+# Platform baseline (templates/platform_baseline.j2)
+#
+# Moved here from acm_evpn: this is set once for the life of a switch, so
+# rendering it on every overlay change was pure churn -- and while acm_evpn
+# still rendered it, the assertions above could not honestly hard-fail on it,
+# because a failure blocked the very deploy that would have installed it.
+# ---------------------------------------------------------------------------
+
+# Set false to check a switch without configuring anything at all.
+readiness_apply_baseline: true
+
+# Highest VTY line number to harden, beyond the first five. Must cover every VTY
+# line the platform actually has: any line left unhardened falls back to the
+# IOS-XE default of 'transport input none' -- an unusable line. Check with
+# 'show running-config | include ^line vty' and raise this if the platform
+# instantiates more.
+vty_line_max: 31
+
+
+# Injected via Infisical.
+local_admin_user: "{{ lookup('env', 'ios_username') }}"
+local_admin_password: "{{ lookup('env', 'ios_password') }}"
+# Optional pre-hashed (type 9) form of the same secret, preferred when set:
+# 'secret 0 <plaintext>' is re-hashed by the device and so never matches what
+# it reports back. Generate once on any switch:
+#   username tmp privilege 15 secret <plaintext>
+#   show running-config | include ^username tmp
+local_admin_secret_hash: "{{ lookup('env', 'ios_password_secret_hash') }}"

@@ -1,0 +1,204 @@
+{% include 'common_base.j2' %}
+!
+! --- 6. CORE & EDGE VLANS ---
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+{% for vid, vlan in vrf_data.core_vlans.items() %}
+vlan {{ vid }}
+ name {{ vlan.name }}
+!
+vlan configuration {{ vid }}
+ member vni {{ vrf_data.l3vni }}
+!
+{% endfor %}
+{% endfor %}
+
+{% for vid, vlan in all_edge_vlans.items() %}
+vlan {{ vid }}
+ name {{ vlan.name }}
+!
+vlan configuration {{ vid }}
+ member evpn-instance {{ vid }} vni {{ vlan.l2vni }}
+!
+l2vpn evpn instance {{ vid }} vlan-based
+ encapsulation vxlan
+ replication-type {{ vlan.replication_mode }}
+{% if 'dag_routed' in vlan.tags %}
+{# Routed-only DAG: EVPN proxy-ARP handles resolution, so the ARP-cache
+   flooding suppression is disabled. Bridged segments keep the default. #}
+ flooding-suppression address-resolution disable
+{% endif %}
+ advertise mac enable
+!
+{% endfor %}
+!
+! --- 7. DHCP RELAY & SNOOPING ---
+ip dhcp relay information option vpn
+ip dhcp relay information option
+ip dhcp compatibility suboption link-selection standard
+ip dhcp compatibility suboption server-override standard
+ip dhcp-relay source-interface {{ vtep_source_intf }}
+ip dhcp snooping
+{% set dhcp_vids = [] %}
+{% for vid, vlan in all_edge_vlans.items() %}
+{% if vlan.get('dhcp_servers_ipv4') or vlan.get('dhcp_servers_ipv6') %}
+{% set _ = dhcp_vids.append(vid | string) %}
+{% endif %}
+{% endfor %}
+{% if dhcp_vids %}
+{# Sorted and range-collapsed to match how IOS re-renders the list;
+   '101,100' would otherwise be rewritten as '100-101' every run. #}
+ip dhcp snooping vlan {{ dhcp_vids | ios_vlan_range }}
+{% endif %}
+!
+! --- 8. CORE & EDGE SVIs ---
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+{% for vid, vlan in vrf_data.core_vlans.items() %}
+interface Vlan{{ vid }}
+ vrf forwarding {{ vrf_name }}
+ ip unnumbered {{ vtep_source_intf }}
+ no autostate
+ no ip proxy-arp
+{% if vrf_data.trm is defined and vrf_data.trm.enabled %}
+ ip pim sparse-mode
+{% endif %}
+!
+{% endfor %}
+{% endfor %}
+
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+{% for vid, vlan in vrf_data.edge_vlans.items() %}
+interface Vlan{{ vid }}
+ vrf forwarding {{ vrf_name }}
+{% if vlan.get('prefix_ipv4') %}
+ ip address {{ vlan.get('prefix_ipv4') | ansible.utils.ipaddr('1') | ansible.utils.ipaddr('address') }} {{ vlan.get('prefix_ipv4') | ansible.utils.ipaddr('netmask') }}
+{% endif %}
+{% if vlan.get('prefix_ipv6') %}
+ ipv6 address {{ vlan.get('prefix_ipv6') | ansible.utils.ipaddr('1') }}
+{% endif %}
+{% for ip in vlan.get('dhcp_servers_ipv4', []) %}
+ ip helper-address global {{ ip }}
+{% endfor %}
+{% if vlan.get('dhcp_servers_ipv6') %}
+{% for ip in vlan.get('dhcp_servers_ipv6', []) %}
+ ipv6 dhcp relay destination global {{ ip }}
+{% endfor %}
+ ipv6 dhcp relay source-interface {{ vtep_source_intf }}
+ ipv6 nd managed-config-flag
+{% endif %}
+{#
+  Proxy ARP is on by default on an IOS SVI, so the negative case has to be
+  stated explicitly or 'acm replace' flaps it between 'default ip proxy-arp'
+  and 'no ip proxy-arp' on every run.
+
+  The rule: EVPN proxy-ARP is required exactly where the EVI disables ARP-cache
+  flooding suppression -- i.e. a routed-only DAG. A bridged DAG floods ARP
+  normally and must not proxy it.
+#}
+{% if 'dag_routed' in vlan.tags %}
+ ip proxy-arp
+ ip local-proxy-arp
+{% else %}
+ no ip proxy-arp
+{% endif %}
+{% if vrf_data.trm is defined and vrf_data.trm.enabled and 'multicast_enabled' in vlan.tags %}
+{# Independent of dag_routed: a routed-only DAG segment still has hosts that
+    can be multicast receivers, and its L3 multicast rides the MDT rather than
+    the L2VNI's ingress replication, so the two do not interact. #}
+ ip pim sparse-mode
+ ip igmp version 3
+{% endif %}
+!
+{% endfor %}
+{% endfor %}
+!
+! --- 9. NVE VTEP ---
+{# 'no shutdown' is omitted deliberately: nve1 comes up on its own once its
+   dependencies are met, and IOS does not render the line back in the running
+   config -- so including it made ACM re-apply it on every single deploy. #}
+interface nve1
+ no ip proxy-arp
+ source-interface {{ vtep_source_intf }}
+ host-reachability protocol bgp
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+ member vni {{ vrf_data.l3vni }} vrf {{ vrf_name }}
+{% endfor %}
+{#
+  Both this and the EVI 'replication-type' above are driven by the single
+  replication_mode value computed in filter_plugins/netbox_evpn_data.py, so
+  they cannot disagree. They previously came from two separate template
+  branches and were paired back to front.
+    routed-only DAG (dag_routed)      -> ingress
+    bridged, group available          -> static + mcast-group
+    L2-only with no VRF to inherit    -> ingress
+#}
+{% for vid, vlan in all_edge_vlans.items() %}
+{% if vlan.replication_mode == 'static' %}
+ member vni {{ vlan.l2vni }} mcast-group {{ vlan.mcast_group }}
+{% else %}
+ member vni {{ vlan.l2vni }} ingress-replication
+{% endif %}
+{% endfor %}
+!
+! --- 10. BGP ROUTING ---
+router bgp {{ evpn_bgp_asn }}
+ bgp router-id interface {{ vtep_source_intf }}
+ bgp log-neighbor-changes
+ bgp graceful-restart
+ no bgp default ipv4-unicast
+ neighbor {{ evpn_peer_group_name }} peer-group
+ neighbor {{ evpn_peer_group_name }} remote-as {{ evpn_bgp_asn }}
+ neighbor {{ evpn_peer_group_name }} update-source {{ vtep_source_intf }}
+ neighbor {{ evpn_peer_group_name }} fall-over host-route
+{% for ip in peer_ips %}
+ neighbor {{ ip }} peer-group {{ evpn_peer_group_name }}
+{% endfor %}
+{# Underlay BGP preserved verbatim from the device; empty on a pure leaf/spine
+   whose underlay is OSPF-only. See filter_plugins/ios_underlay.py. #}
+{% for line in underlay.bgp.direct %}
+{{ line }}
+{% endfor %}
+ !
+ address-family ipv4
+{% for line in underlay.bgp.af_ipv4 %}
+{{ line }}
+{% endfor %}
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  neighbor {{ evpn_peer_group_name }} send-community both
+{% for ip in peer_ips %}
+  neighbor {{ ip }} activate
+{% endfor %}
+ exit-address-family
+ !
+{% set _trm_on = [] %}
+{% for _n, _d in netbox_vlan_groups.vrfs.items() if _d.l3vni and _d.trm is defined and _d.trm.enabled %}
+{%   set _ = _trm_on.append(_n) %}
+{% endfor %}
+{% if _trm_on %}
+{# MVPN carries TRM's overlay signalling -- auto-discovery and the Source-Active
+    routes that replace MSDP. Activated only where the device actually carries a
+    multicast-enabled VRF, so a fabric without TRM gains no dead config. Peering
+    follows l2vpn evpn exactly: same peer-group, route-reflector-client on
+    spines. #}
+ address-family ipv4 mvpn
+  neighbor {{ evpn_peer_group_name }} send-community both
+{% if 'tags_fabric_spine' in group_names %}
+  neighbor {{ evpn_peer_group_name }} route-reflector-client
+{% endif %}
+{% for ip in peer_ips %}
+  neighbor {{ ip }} activate
+{% endfor %}
+ exit-address-family
+ !
+{% endif %}
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+ address-family ipv4 vrf {{ vrf_name }}
+  advertise l2vpn evpn
+  redistribute connected
+  maximum-paths ibgp 2
+ exit-address-family
+ !
+{% endfor %}
+!
+end

@@ -1,0 +1,51 @@
+{#
+  now() rather than ansible_date_time: the readiness play runs with
+  gather_facts disabled, so ansible_date_time does not exist.
+#}
+! =============================================================================
+! {{ inventory_hostname }} — underlay readiness remediation
+! generated {{ now().strftime('%Y-%m-%d %H:%M:%S') }} — {{ readiness_failures | length }} finding(s)
+!
+! NOTHING BELOW HAS BEEN APPLIED. This role deliberately does not change the
+! underlay, which is hand-built at day 0. Review this, then paste it into the
+! switch. Findings shown only as comments need a human decision and have no
+! safe automatic fix.
+! =============================================================================
+!
+{% set remediable = readiness_failures | selectattr('lines') | list %}
+{% set manual = readiness_failures | rejectattr('lines') | list %}
+{% if manual %}
+! --- needs a decision, not a paste ------------------------------------------
+{% for f in manual %}
+! {{ f.msg }}
+{% endfor %}
+!
+{% endif %}
+{% if remediable %}
+! --- paste-ready -------------------------------------------------------------
+{#
+  Grouped by config context so an interface missing five commands produces one
+  stanza rather than five. Ordering follows the checks, so globals land before
+  the interfaces and protocols that depend on them.
+#}
+{% set contexts = [] %}
+{% for f in remediable %}
+{%   if f.parents not in contexts %}{% set _ = contexts.append(f.parents) %}{% endif %}
+{% endfor %}
+{% for ctx in contexts %}
+{%   for parent in ctx %}
+{{ parent }}
+{%   endfor %}
+{%   for f in remediable if f.parents == ctx %}
+{%     for line in f.lines %}
+{{ ' ' * (ctx | length) }}{{ line }}
+{%     endfor %}
+{%   endfor %}
+!
+{% endfor %}
+{% endif %}
+! --- what was wrong ----------------------------------------------------------
+{% for f in readiness_failures %}
+!  {{ loop.index }}. {{ f.msg }}
+{% endfor %}
+! end

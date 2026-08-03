@@ -1,0 +1,136 @@
+---
+# --limit silently removes hosts from the play, and a fabric node that is not
+# in the play cannot have its peer list updated -- so a spine would keep
+# advertising a leaf that has gone, or miss one that has arrived. Scope runs
+# with -e deploy_target=<pattern> instead: that goes through the playbook's
+# host pattern, which unions the spines back in.
+- name: 0. Refuse to run under --limit
+  ansible.builtin.fail:
+    msg: |-
+      This playbook must not be scoped with --limit, because --limit can drop
+      spines (or other leaves) out of the play and leave their EVPN peer lists
+      stale on the device.
+
+      Use the deploy_target variable instead, which always keeps the spines in:
+        ansible-playbook {{ (ansible_play_name | default('deploy_evpn.yml')) }} -e deploy_target={{ ansible_limit }}
+  when:
+    - ansible_limit is defined
+    - ansible_limit | default('') | length > 0
+  run_once: true
+  delegate_to: localhost
+
+# NetBox queries and the transform live in netbox_facts.yml, which
+# trm_allocate.yml imports too. Nothing below this line is shared: it all
+# touches the device.
+- name: Verify site configuration
+  ansible.builtin.import_tasks: assert_site_config.yml
+
+- name: Gather NetBox facts
+  ansible.builtin.import_tasks: netbox_facts.yml
+
+- name: 9. Fetch current running configuration from the switch
+  cisco.ios.ios_command:
+    commands: "show running-config"
+  register: current_run_config
+  # Read-only: must run under --check, or the registered result is a skip stub
+  # and everything downstream fails resolving .stdout.
+  check_mode: false
+
+# hw_baseline (hw-module / switch / power lines) was extracted here and fed to
+# platform_baseline.j2. That template moved to underlay_readiness and no longer
+# takes it: those lines are facts about the chassis, never something to push,
+# and the candidate preserves them from the device like any other config this
+# role does not own.
+- name: 10. Extract Loopback IP, IOS version and the underlay
+  ansible.builtin.set_fact:
+    ios_version: "{{ ns.ver }}"
+    loopback0_ip: "{{ ns.ip if ns.ip else ansible_host }}"
+    underlay: >-
+      {{ current_run_config.stdout[0]
+         | ios_underlay_config(evpn_peer_group_name, evpn_bgp_asn) }}
+  vars:
+    ns: >-
+      {%- set ns = namespace(ip='', in_lo=false, ver='17.3') -%}
+      {%- for line in current_run_config.stdout[0].splitlines() -%}
+      {%-   if line.startswith('version ') -%}
+      {%-     set ns.ver = line.split(' ', 1)[1] -%}
+      {%-   elif line.startswith('interface ' ~ vtep_source_intf) -%}
+      {%-     set ns.in_lo = true -%}
+      {%-   elif line.startswith('!') -%}
+      {%-     set ns.in_lo = false -%}
+      {%-   elif ns.in_lo and line.strip().startswith('ip address ') -%}
+      {%-     set ns.ip = line.strip().split()[2] -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ ns }}
+
+# The underlay is intentionally NOT modelled in NetBox: it changes only when
+# switches are added or removed, and a mistake there costs the management
+# plane. The device stays its own source of truth and its underlay is carried
+# forward verbatim. Rules and parsing live in filter_plugins/ios_underlay.py.
+# The three device-state assertions in one, accumulating into a list so a
+# switch with several problems reports all of them rather than the first. Same
+# pattern as roles/underlay_readiness/tasks/02_check.yml.
+- name: 12. Verify this device is addressed and configured as the fabric expects
+  ansible.builtin.assert:
+    that:
+      - _fabric_problems | from_json | length == 0
+    fail_msg: |-
+      {{ inventory_hostname }} cannot be provisioned as configured:
+      {% for problem in _fabric_problems | from_json %}
+        - {{ problem }}
+      {% endfor %}
+    quiet: true
+  vars:
+    _fabric_problems: >-
+      {%- set bad = [] -%}
+
+      {#- The generated 'ip pim rp-address' must point at an address the fabric
+          actually owns, so where this interface exists it has to agree. -#}
+      {%- if anycast_rp_interface in underlay.addresses
+             and underlay.addresses[anycast_rp_interface] != underlay_rp_address -%}
+      {%-   set _ = bad.append(anycast_rp_interface ~ ' carries '
+                               ~ underlay.addresses[anycast_rp_interface]
+                               ~ ' but underlay_rp_address is ' ~ underlay_rp_address
+                               ~ ' -- correct the device, or update the variable,'
+                               ~ ' since "ip pim rp-address" is generated from it') -%}
+      {%- endif -%}
+
+      {#- A spine that does not carry the anycast RP cannot be one. The RP
+          loopback is day-0 topology and is no longer generated. -#}
+      {%- if 'tags_fabric_spine' in group_names
+             and underlay_rp_address not in (underlay.addresses.values() | list) -%}
+      {%-   set _ = bad.append('tagged fabric_spine but no global-table interface carries'
+                               ~ ' the anycast RP address ' ~ underlay_rp_address
+                               ~ ' (previously created as ' ~ anycast_rp_interface ~ ')') -%}
+      {%- endif -%}
+
+      {#- EVPN peers are addressed from NetBox, so a device managed on anything
+          other than its VTEP loopback would have peers built from the wrong
+          addresses -- sessions rendered to unreachable neighbours. -#}
+      {%- if (fabric_verify_peer_addressing | bool) and loopback0_ip != ansible_host -%}
+      {%-   set _ = bad.append(vtep_source_intf ~ ' is ' ~ loopback0_ip
+                               ~ ' but the NetBox primary IP is ' ~ ansible_host
+                               ~ ' -- these must agree, or set'
+                               ~ ' fabric_verify_peer_addressing=false if this fabric'
+                               ~ ' deliberately peers on another address') -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+
+- name: 15. Determine Local Role and Peer IPs
+  ansible.builtin.set_fact:
+    is_spine: "{{ 'tags_fabric_spine' in group_names }}"
+    peer_ips: >-
+      {{ inventory_hostname | evpn_peer_ips(
+           groups['site_group_evpn_campus'] | intersect(groups['tags_fabric_spine']),
+           groups['site_group_evpn_campus'] | intersect(groups['device_roles_fabric_leaf']),
+           groups['site_group_evpn_campus'] | intersect(groups['device_roles_fabric_border']),
+           _fabric_addresses | from_json) }}
+  vars:
+    _fabric_addresses: >-
+      {%- set out = {} -%}
+      {%- for host in groups['site_group_evpn_campus'] | default([]) -%}
+      {%-   set addr = hostvars[host].get('ansible_host') -%}
+      {%-   if addr -%}{%- set _ = out.update({host: addr}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}

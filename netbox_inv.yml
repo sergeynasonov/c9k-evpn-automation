@@ -1,0 +1,25 @@
+# netbox_inv
+
+plugin: netbox.netbox.nb_inventory
+# Read from the environment so no NetBox instance is hardcoded in the repo.
+# direnv/Infisical already export NETBOX_API for the roles; see SETUP.md.
+api_endpoint: "{{ lookup('env', 'NETBOX_API') }}"
+validate_certs: true
+use_extra_vars: true
+flatten_custom_fields: true
+
+
+# Filter to only include devices with an 'active' status
+query_filters:
+  - status: active
+
+site_data: true
+prefixes: true
+
+compose:
+  ansible_host: primary_ip4.address | ipaddr('address')
+group_by:
+  - device_roles
+  - site_group
+  - sites
+  - tags

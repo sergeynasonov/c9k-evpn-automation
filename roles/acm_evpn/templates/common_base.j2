@@ -1,0 +1,124 @@
+version {{ ios_version }}
+! ==============================================================================
+! FABRIC CONFIGURATION FOR {{ inventory_hostname | upper }}
+! ==============================================================================
+!
+hostname {{ inventory_hostname }}
+!
+! --- 1. VRF DEFINITIONS ---
+{# RD and route-targets are both keyed on the VRF's explicit L3VNI from NetBox.
+   Previously they were derived by stripping non-digits out of the NetBox RD
+   string, which silently produced invalid values for any standards-form RD
+   (e.g. "64513:199" -> 64513199, well past both the 16-bit RD field and the
+   24-bit VNI ceiling). The L3VNI is validated in the filter plugin. #}
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+vrf definition {{ vrf_name }}
+ rd {{ loopback0_ip }}:{{ vrf_data.l3vni }}
+ !
+ address-family ipv4
+  route-target export {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }}
+  route-target export {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }} stitching
+  route-target import {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }}
+  route-target import {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }} stitching
+{% if vrf_data.trm is defined and vrf_data.trm.enabled %}
+{# TRM. Enabled by DATA, not a flag: an ACTIVE 'default_mdt' prefix inside
+    this VRF's own 239.<index>.0.0/16. See filter_plugins/netbox_evpn_data.py.
+    'mdt overlay use-bgp' is what lets MVPN Source-Active routes carry source
+    discovery, which is why this fabric needs no MSDP between anycast RPs. #}
+  mdt auto-discovery vxlan
+  mdt default vxlan {{ vrf_data.trm.mdt_default_group }}
+{% if vrf_data.trm.mdt_data_network is defined %}
+  mdt data vxlan {{ vrf_data.trm.mdt_data_network }} {{ vrf_data.trm.mdt_data_wildcard }}
+{% endif %}
+  mdt overlay use-bgp
+{% endif %}
+ exit-address-family
+!
+{% endfor %}
+!
+{#
+  The platform baseline used to be included here. It now lives in
+  roles/underlay_readiness/templates/platform_baseline.j2 and is APPLIED once at
+  onboarding with 'ios_config' (a merge) rather than rendered on every overlay
+  change.
+
+  Two reasons. It is set once for the life of a switch, so re-rendering it every
+  deploy was where nearly all the residual ACM diff churn came from -- IOS-XE
+  renders back platform defaults the template did not model. And the readiness
+  role asserts those same lines: while this role still rendered them, a
+  readiness failure blocked the very deploy that would have installed them.
+
+  Nothing is lost from a running switch. Those lines simply stop being
+  template-owned, so candidate_config.j2 now preserves whatever the device
+  reports -- the same mechanism that already carries the underlay forward.
+#}
+!
+! --- 3. TRM (TENANT ROUTED MULTICAST) ---
+{% set trm_vrfs = [] %}
+{% for _n, _d in netbox_vlan_groups.vrfs.items() if _d.l3vni and _d.trm is defined and _d.trm.enabled %}
+{%   set _ = trm_vrfs.append([_n, _d]) %}
+{% endfor %}
+{% if trm_vrfs %}
+{# NOTE THE TRAILING SPACE on 'ip multicast-routing vrf <X> '. IOS-XE renders
+    it that way, and the candidate is compared against the running config
+    verbatim -- without it the line churns on every single deploy. The global
+    form has the same quirk. #}
+{% for _n, _d in trm_vrfs %}
+ip multicast-routing vrf {{ _n }} 
+ip pim vrf {{ _n }} ssm default
+{% endfor %}
+!
+{# The RP loopback is a VTEP concern: leaves and borders only. A pure spine
+    carries the VRF but has no locally attached sources or receivers, so it
+    never needs to act as an RP. Numbered Loopback<l3vni> so one number keeps
+    identifying the VRF everywhere. #}
+{% set _is_vtep = inventory_hostname in groups.get('device_roles_fabric_leaf', [])
+                  or inventory_hostname in groups.get('device_roles_fabric_border', []) %}
+{% if _is_vtep %}
+{% for _n, _d in trm_vrfs if _d.trm.rp_mode != 'ssm-only' %}
+interface Loopback{{ _d.l3vni }}
+{# Description first: that is the order IOS-XE renders an interface block in,
+   and the candidate is compared against the running config verbatim. #}
+{% if _d.trm.rp_mode == 'anycast' %}
+ description Fabric Anycast RP for VRF {{ _n }}
+{% else %}
+ description PIM Register Source for VRF {{ _n }}
+{% endif %}
+ vrf forwarding {{ _n }}
+{% if _d.trm.rp_mode == 'anycast' %}
+ ip address {{ _d.trm.anycast_rp }} 255.255.255.255
+{% else %}
+ ip address {{ _d.trm.register_source }} 255.255.255.255
+{% endif %}
+{# Stated explicitly, and positioned here, for two separate reasons.
+   Proxy ARP is ON by default, so omitting the line makes 'acm replace' apply
+   'no ip proxy-arp' on EVERY deploy -- the same flap this role already guards
+   against on SVIs and nve1. And IOS-XE renders an interface block in a fixed
+   order (address, then proxy-arp, then pim), so the line has to sit here to
+   match what the device reports back. Proxy ARP is meaningless on a loopback. #}
+ no ip proxy-arp
+ ip pim sparse-mode
+!
+{% endfor %}
+{% for _n, _d in trm_vrfs %}
+{% if _d.trm.rp_mode == 'anycast' %}
+{# Every VTEP shares this address. BGP MVPN distributes active-source state
+    between the instances, so no MSDP is configured or needed. #}
+ip pim vrf {{ _n }} rp-address {{ _d.trm.anycast_rp }}
+{% elif _d.trm.rp_mode == 'external' %}
+ip pim vrf {{ _n }} register-source Loopback{{ _d.l3vni }}
+{% for _rp in _d.trm.external_rps %}
+ip pim vrf {{ _n }} rp-address {{ _rp }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endif %}
+!
+! --- 4. GLOBAL EVPN ---
+l2vpn evpn
+ replication-type ingress
+ router-id {{ vtep_source_intf }}
+ anycast-gateway mac auto
+ advertise mac disable
+!

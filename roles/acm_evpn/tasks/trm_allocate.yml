@@ -1,0 +1,193 @@
+---
+# Allocate one unique PIM register source per VTEP, per external-RP VRF.
+#
+# WRITES TO NETBOX. It is the only thing in this project that does, and it is
+# deliberately NOT part of deploy_evpn.yml:
+#
+#   * generate_evpn.yml must stay a pure function of NetBox -- if allocation
+#     happened at deploy time the candidate you reviewed would not be the one
+#     deployed, and if it happened at generate time a casual render would mutate
+#     the source of truth;
+#   * "borders first" is unenforceable across forks=50 parallel hosts;
+#   * a half-failed write-back leaves devices and NetBox disagreeing, whereas a
+#     failed allocation run changes no device state at all.
+#
+# Allocation is an ONBOARDING activity (phase 2 of the lifecycle in the root
+# README), which is where this belongs. acm_evpn stays read-only and fails
+# loudly, naming this playbook, when a VTEP has no address.
+#
+# Ordering is expressed as two plays in trm_allocate.yml, not a sort key here.
+
+- name: Gather NetBox facts
+  ansible.builtin.import_tasks: netbox_facts.yml
+  vars:
+    # The one caller that legitimately runs against un-allocated VRFs: it
+    # exists to fix that state, so it must not be blocked by it.
+    trm_require_register_source: false
+
+- name: TRM — work out which VRFs need a register source on this switch
+  ansible.builtin.set_fact:
+    trm_needs: "{{ _needs | from_json }}"
+  vars:
+    _needs: >-
+      {%- set out = [] -%}
+      {%- for name, d in netbox_vlan_groups.vrfs.items()
+            if d.trm is defined and d.trm.enabled
+               and d.trm.rp_mode == 'external'
+               and d.trm.needs_register_source | default(false) -%}
+      {%-   set pool = [] -%}
+      {%-   for p in (trm_netbox.pools | default([]))
+              if p.vrf == name and 'trm_register_source' in p.tags -%}
+      {%-     set _ = pool.append(p.prefix) -%}
+      {%-   endfor -%}
+      {%-   set _ = out.append({'vrf': name, 'l3vni': d.l3vni,
+                                'pool': (pool | first | default('')),
+                                'pools_found': pool | length}) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+# Fail before writing anything rather than half-allocating. A pool that cannot
+# cover every VTEP is a planning error, and finding out at switch 340 of 500 is
+# considerably worse than finding out now.
+- name: TRM — verify a usable pool exists for every VRF that needs one
+  ansible.builtin.assert:
+    that:
+      - _problems | from_json | length == 0
+    fail_msg: |-
+      {{ inventory_hostname }}: cannot allocate PIM register sources.
+      {% for p in _problems | from_json %}
+        - {{ p }}
+      {% endfor %}
+    quiet: true
+  vars:
+    _problems: >-
+      {%- set bad = [] -%}
+      {%- for n in trm_needs -%}
+      {%-   if n.pools_found == 0 -%}
+      {%-     set _ = bad.append('VRF ' ~ n.vrf ~ ' uses an external RP but has no'
+                                 ~ ' prefix tagged trm_register_source in NetBox.'
+                                 ~ ' Create one in that VRF, sized for every VTEP'
+                                 ~ ' that carries it.') -%}
+      {%-   elif n.pools_found > 1 -%}
+      {%-     set _ = bad.append('VRF ' ~ n.vrf ~ ' has ' ~ n.pools_found ~ ' prefixes'
+                                 ~ ' tagged trm_register_source; exactly one is'
+                                 ~ ' required.') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ bad | to_json }}
+  when: trm_needs | length > 0
+
+- name: TRM — check each pool is large enough for the switches that need it
+  ansible.builtin.assert:
+    that:
+      # FREE capacity, not total. The earlier version compared pool size against
+      # demand and ignored _already, so a pool that was full of existing
+      # allocations still passed -- and the borders play consuming addresses
+      # before the leaves play runs is exactly the normal case.
+      - ((_pool | ansible.utils.ipaddr('size') | int) - 2 - (_already | int)) >= (_wanted | int)
+    fail_msg: >-
+      VRF {{ item.vrf }}: pool {{ _pool }} holds
+      {{ (_pool | ansible.utils.ipaddr('size') | int) - 2 }} usable address(es),
+      {{ _already }} already allocated, leaving
+      {{ (_pool | ansible.utils.ipaddr('size') | int) - 2 - (_already | int) }}
+      free -- but {{ _wanted }} switch(es) in this play still need one. Enlarge
+      the pool before re-running; nothing has been written.
+    quiet: true
+  vars:
+    _pool: "{{ item.pool }}"
+    _already: >-
+      {{ (trm_netbox.addresses | default([]))
+         | selectattr('vrf', 'equalto', item.vrf)
+         | selectattr('tags', 'contains', 'trm_register_source') | list | length }}
+    _wanted: >-
+      {%- set n = [] -%}
+      {%- for h in ansible_play_hosts
+            if item.vrf in (hostvars[h].trm_needs | default([]) | map(attribute='vrf') | list) -%}
+      {%-   set _ = n.append(h) -%}
+      {%- endfor -%}
+      {{ n | length }}
+  loop: "{{ trm_needs }}"
+  loop_control:
+    label: "{{ item.vrf }}"
+  run_once: true
+  when: trm_needs | length > 0
+
+# The interface IS the binding. NetBox expresses "this address belongs to this
+# device" through IPAddress -> Interface -> Device, so the loopback has to exist
+# before the address can be attached to it.
+#
+# This is the one interface this project models, and deliberately so: its
+# address is ALLOCATED by NetBox, so NetBox has to know what holds it. Other
+# overlay interfaces (SVIs, the VTEP loopback) take addresses from prefixes
+# NetBox already has, and belong in a post-deploy documentation write-back --
+# which runs the other way round, recording what was applied rather than
+# declaring what should be.
+#
+# Named Loopback<l3vni> to match what common_base.j2 renders, so NetBox and the
+# device agree on the name as well as the address.
+- name: TRM — create the register-source loopback on the device in NetBox
+  netbox.netbox.netbox_device_interface:
+    netbox_url: "{{ lookup('env', 'NETBOX_API') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    validate_certs: "{{ netbox_validate_certs }}"
+    data:
+      device: "{{ inventory_hostname }}"
+      name: "Loopback{{ item.l3vni }}"
+      type: Virtual
+      enabled: true
+      description: "TRM PIM Register Source for VRF {{ item.vrf }}"
+    state: present
+  loop: "{{ trm_needs }}"
+  loop_control:
+    label: "{{ inventory_hostname }} Loopback{{ item.l3vni }} ({{ item.vrf }})"
+  delegate_to: localhost
+  when: not ansible_check_mode
+
+- name: TRM — allocate the next available address from the pool
+  netbox.netbox.netbox_ip_address:
+    netbox_url: "{{ lookup('env', 'NETBOX_API') }}"
+    netbox_token: "{{ lookup('env', 'NETBOX_TOKEN') }}"
+    validate_certs: "{{ netbox_validate_certs }}"
+    data:
+      prefix: "{{ item.pool }}"
+      vrf: "{{ item.vrf }}"
+      # NetBox's built-in IPAddress role, so these read the same as every other
+      # loopback address in IPAM rather than looking like unclassified hosts.
+      role: Loopback
+      assigned_object:
+        device: "{{ inventory_hostname }}"
+        name: "Loopback{{ item.l3vni }}"
+      # The tag stays, doing what a tag should: classifying what this address
+      # IS. Whose it is comes from assigned_object above.
+      tags:
+        - trm_register_source
+      description: "TRM PIM register source - {{ inventory_hostname }} - VRF {{ item.vrf }}"
+    # 'new' forces next-available from the prefix rather than reusing a match.
+    # Idempotency comes from trm_needs, which only lists switches that have
+    # none -- not from the module.
+    state: new
+  loop: "{{ trm_needs }}"
+  loop_control:
+    label: "{{ item.vrf }} <- {{ item.pool }}"
+  delegate_to: localhost
+  # One at a time: allocation is a one-off onboarding activity, and serialising
+  # keeps the assignment order legible in NetBox rather than interleaved.
+  throttle: 1
+  register: trm_allocated
+  # netbox.netbox 3.23.0 cannot do this under --check: netbox_ipam.py calls
+  # _create_netbox_object() then .serialize() on the result, but in check mode
+  # that helper returns the raw data DICT, which has no serialize(). The real
+  # run is unaffected. Check mode reports the plan below instead -- which is all
+  # it could ever report anyway, since NetBox picks the address at allocation.
+  when: not ansible_check_mode
+
+- name: TRM — what a real run would allocate (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} would be allocated {{ trm_needs | length }}
+      register source(s):
+      {% for n in trm_needs %}{{ n.vrf }} from {{ n.pool }}{{ ', ' if not loop.last }}{% endfor %}
+      -- address chosen by NetBox at allocation time.
+  when:
+    - ansible_check_mode
+    - trm_needs | length > 0

@@ -1,0 +1,106 @@
+---
+# Allocate PIM register-source addresses for TRM's external-RP VRFs.
+#
+#   dry run : ansible-playbook trm_allocate.yml --check --diff
+#   apply   : ansible-playbook trm_allocate.yml
+#   scoped  : ansible-playbook trm_allocate.yml -e deploy_target=access1-1
+#
+# This is the ONLY playbook that writes to NetBox. It touches no device.
+#
+# Run it at onboarding, before deploy_evpn.yml. acm_evpn is read-only and will
+# refuse to render a VTEP that needs a register source and has none, naming this
+# playbook in the failure.
+#
+# ORDERING IS TWO PLAYS, not a sort key. NetBox's available-ips endpoint is
+# atomic per call, so parallel hosts get different addresses rather than
+# duplicates -- but "borders first, then leaves in any order" is only
+# expressible by running the borders to completion first. Within each play the
+# order genuinely does not matter.
+#
+# Check mode reports WHICH switches need an address and how many, but cannot
+# report the value: the address is chosen by NetBox at allocation time.
+
+- name: Allocate TRM register sources — borders first
+  hosts: >-
+    {{ deploy_target | default('device_roles_fabric_border') }}:&device_roles_fabric_border
+  gather_facts: false
+  strategy: linear
+  tasks:
+    - name: Allocate
+      ansible.builtin.import_role:
+        name: acm_evpn
+        tasks_from: trm_allocate.yml
+
+- name: Allocate TRM register sources — then leaves
+  hosts: >-
+    {{ deploy_target | default('device_roles_fabric_leaf') }}:&device_roles_fabric_leaf
+  gather_facts: false
+  strategy: linear
+  tasks:
+    - name: Allocate
+      ansible.builtin.import_role:
+        name: acm_evpn
+        tasks_from: trm_allocate.yml
+
+# Reported once, after both plays, so the picture is fabric-wide. Orphans are
+# reported and never deleted: an address tagged for a switch that is no longer
+# in inventory may belong to a device that is temporarily out of the play, and
+# reclaiming it automatically would hand its address to someone else.
+- name: Report allocation state
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Re-read the register sources now in NetBox
+      ansible.builtin.uri:
+        url: "{{ lookup('env', 'NETBOX_API') }}/graphql/"
+        method: POST
+        headers:
+          Authorization: "Token {{ lookup('env', 'NETBOX_TOKEN') }}"
+          Accept: "application/json"
+        validate_certs: "{{ netbox_validate_certs }}"
+        body_format: json
+        body:
+          query: >
+            query {
+              ip_address_list(filters: {tags: {slug: {in_list: ["trm_register_source"]}}}) {
+                address vrf { name } description
+                assigned_object { ... on InterfaceType { name device { name } } }
+              }
+            }
+      register: _trm_after
+      # Read-only: must run under --check, or the report below says
+      # "0 allocated" because the query was skipped rather than because none
+      # exist -- which would be actively misleading on a re-run.
+      check_mode: false
+
+    - name: TRM register sources
+      ansible.builtin.debug:
+        msg: "{{ _lines | from_json }}"
+      vars:
+        _rows: "{{ _trm_after.json.data.ip_address_list | default([]) }}"
+        _known: "{{ groups['all'] | default([]) }}"
+        _lines: >-
+          {%- set out = [] -%}
+          {%- set _ = out.append('TRM register sources: ' ~ _rows | length ~ ' allocated') -%}
+          {%- set orphans = [] -%}
+          {%- for r in _rows | sort(attribute='address') -%}
+          {%-   set owner = (r.assigned_object.device.name
+                             if (r.assigned_object and r.assigned_object.device)
+                             else '') -%}
+          {%-   set intf = (r.assigned_object.name if r.assigned_object else '') -%}
+          {%-   set _ = out.append('  ' ~ '%-18s' | format(r.address)
+                                   ~ '%-10s' | format(r.vrf.name if r.vrf else '-')
+                                   ~ ('%s (%s)' | format(owner, intf) if owner
+                                      else 'UNASSIGNED — no interface holds it')) -%}
+          {%-   if owner and owner not in _known -%}
+          {%-     set _ = orphans.append(r.address ~ ' -> ' ~ owner) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- if orphans -%}
+          {%-   set _ = out.append('  ORPHANED (owner not in inventory; not reclaimed):') -%}
+          {%-   for o in orphans -%}
+          {%-     set _ = out.append('    ' ~ o) -%}
+          {%-   endfor -%}
+          {%- endif -%}
+          {{ out | to_json }}

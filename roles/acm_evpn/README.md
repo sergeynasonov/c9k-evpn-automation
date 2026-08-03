@@ -1,0 +1,301 @@
+# acm_evpn
+
+Renders and deploys the complete IOS-XE configuration for a campus EVPN/VXLAN
+fabric, driven by NetBox, and applies it with `acm replace`.
+
+- **Overlay** (VRFs, SVIs, EVPN instances, NVE, overlay BGP) is **generated** from NetBox.
+- **Underlay** (global-table interfaces, OSPF, MSDP, static routes, border GRT BGP)
+  is **preserved verbatim** from the device — see [Underlay](#underlay).
+
+## Running it
+
+Scope a run with `deploy_target`, **never `--limit`**:
+
+```bash
+ansible-playbook generate_evpn.yml                          # render only, no device changes
+ansible-playbook deploy_evpn.yml                            # whole fabric
+ansible-playbook deploy_evpn.yml -e deploy_target=access1-1 # one leaf (spines included automatically)
+```
+
+`--limit` is refused by task 0. It can drop spines out of the play, leaving their
+EVPN peer lists stale on the device; the playbooks union `tags_fabric_spine` into
+the host pattern so that cannot happen. Peer *addresses* come from inventory
+(`fabric_peers.py`), so a narrowly scoped run still renders correct peer lists.
+
+---
+
+## NetBox data-model contract
+
+Everything below is read from NetBox. Objects that do not carry the required
+marker are **not part of the fabric** and are silently ignored — enrolment is
+opt-in throughout.
+
+### VRF custom fields
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `l3vni` | Integer | no | **Enrols the VRF in the fabric.** Blank ⇒ not a fabric VRF (WAN, out-of-band, other platforms) and ignored entirely. Drives the L3VNI, the RD (`<loopback>:<l3vni>`) and all route-targets (`<asn>:<l3vni>`). Allocate from **20001–20254**. The floor keeps it clear of the derived L2VNI range; the ceiling is set by the multicast index (`l3vni - 20000`), which must fit in an octet. A Type-1 RD would independently cap it at 65535, since its second field is 16 bits. |
+| `mcast_base_group` | Text (IPv4) | no | Underlay multicast group used by every **bridged** segment in this VRF. Required if the VRF has any bridged segment; see [Multicast](#multicast). |
+
+### VLAN custom fields
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `l2vni` | Integer | no | Override for the derived L2VNI. Leave blank — L2VNI is `evpn_l2vni_base + vid` (10001–14094). Set only to pin a brownfield VNI. |
+| `mcast_group` | Text (IPv4) | no | Overrides the VRF's `mcast_base_group` for this VLAN alone. An escape hatch; most VLANs inherit. |
+
+### VLAN roles
+
+Overlay enrolment is **opt-in**: a VLAN is configured only if its role is one of
+these. A VLAN with no role produces nothing and is listed in the run output.
+
+| Role | Renders as |
+|---|---|
+| `edge` | An EVPN segment: `vlan`, `vlan configuration`, `l2vpn evpn instance`, NVE member, and (if in a VRF with a prefix) an anycast-gateway SVI. |
+| `core_vlan` | The VRF's L3VNI transit VLAN + `ip unnumbered` SVI. |
+| `vrf_l3_handoff_vlan` | A border handoff SVI + eBGP neighbour. Lowest usable address ⇒ remote peer, highest ⇒ local SVI. |
+
+### VLAN tags
+
+| Tag | Effect |
+|---|---|
+| `dag_routed` | **Routed-only** distributed anycast gateway: `flooding-suppression address-resolution disable` on the EVI, `ip proxy-arp` + `ip local-proxy-arp` on the SVI, and **ingress replication** (no multicast group needed). Untagged ⇒ **bridged** DAG using multicast replication. |
+| `<hostname>` | On a `vrf_l3_handoff_vlan`, selects which border renders it. |
+
+### Prefix custom fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `dhcp_servers_ipv4` / `dhcp_servers_ipv6` | Object list → IP addresses | Relay destinations rendered as `ip helper-address global` / `ipv6 dhcp relay destination global`. |
+
+---
+
+## Underlay
+
+The underlay is deliberately **not** modelled in NetBox. It changes only when
+switches are added or removed, and getting it wrong costs the management plane —
+so the device stays its own source of truth and its underlay is carried forward
+verbatim into each candidate config. Rules live in
+`filter_plugins/ios_underlay.py`.
+
+An interface is underlay when it is in the **global routing table** (no
+`vrf forwarding`) **and** carries an address (`ip address`, `ipv6 address` or
+`ip unnumbered`). Tenant SVIs are excluded automatically, since they all sit in
+a VRF and are rendered from NetBox instead.
+
+Also preserved: the `vlan <id>` definition backing any underlay SVI (without it
+the VLAN does not exist in the VLAN database and the SVI never comes up);
+`router ospf` / `router ospfv3`; global statements (`ip msdp …`, `ip route …`);
+the global-routing-table half of `router bgp` on borders; and the definitions of
+any route-map, prefix-list or ACL that preserved config references, resolved
+transitively so nothing is left dangling.
+
+Global multicast (`ip multicast-routing`, `ip pim ssm default`,
+`ip pim rp-address`, `ip pim register-source`) is *not* extracted — it is static
+and rendered unconditionally by `common_base.j2`, so extracting it too would
+emit it twice.
+
+Nothing is special-cased. The anycast RP loopback and the MSDP mesh used to be
+generated and are now ordinary underlay, which removed both the exception and
+the requirement that an exclusion list stay in step with a template condition.
+
+---
+
+## Multicast
+
+### Carve vs allocation
+
+Two distinct things, deliberately kept in different places:
+
+| | What it says | Where it lives |
+|---|---|---|
+| **The carve** | "this *range* serves this *function*" | IPAM prefix + role, in the **global table** |
+| **The allocation** | "this *VRF* uses this *value*" | Custom field on the VRF |
+
+The validator joins them: an allocated value must fall **inside** a range roled
+for its function, and **outside** every reserved range. Re-carving is therefore a
+NetBox data change, not a code edit.
+
+Prefixes stay in the **global table**. `Prefix.vrf` in NetBox means "this prefix
+exists in that VRF's routing table", which is false for an underlay multicast
+group — the group lives in the underlay and the tenant's data plane never routes
+to it. Assigning one to a VRF also breaks NetBox's prefix hierarchy, since VRFs
+are separate address spaces. Record the VRF association in the prefix
+*description* instead; the machine-readable link is the VRF custom field.
+
+### Address plan
+
+`239.0.0.0/8` (administratively scoped, RFC 2365), **VRF-major** — one `/16` per
+VRF so that a single `show ip mroute | include 239.<index>.` returns everything
+for that VRF:
+
+```
+239.<index>.0.0/16      Container   "VRF <NAME> — multicast"      (no role)
+├── 239.<index>.1.0/24  role: l2vni_replication   L2VNI BUM replication
+├── 239.<index>.2.0/24  role: default_mdt         MVPN/TRM default MDT
+├── 239.<index>.3.0/24  role: data_mdt            MVPN/TRM data MDT
+└── 239.<index>.4.0/22  status: Reserved          future (L2 TRM, IPv6, DCI)
+```
+
+`<index>` is **derived**, not stored: `l3vni - evpn_l3vni_base` (default 20000),
+so `l3vni 20003` owns `239.3.0.0/16`. One number therefore identifies a VRF
+everywhere — RD and route-targets `:20003`, multicast block `239.3.x`.
+
+It is deliberately *not* read from NetBox's VRF `id`. That is a database
+surrogate key: it changes when an object is deleted and recreated or when an
+instance is rebuilt through the API, and it climbs past 254 as objects churn.
+Seeding `l3vni` from the id when first allocating is fine — the id is then out
+of the loop.
+
+Valid indexes are 1–254. `239.0.0.0/16` and `239.255.0.0/16` are left unused
+(the latter is IPv4 Local Scope).
+
+Conventional allocations within a VRF's block:
+
+| Value | Held in | Example (l3vni 20003 → index 3) |
+|---|---|---|
+| Base replication group | VRF `mcast_base_group` | `239.3.1.1` |
+| Per-VLAN overrides | VLAN `mcast_group` | `239.3.1.2`, `.3`, … |
+| Default MDT | first address of the **Active** `default_mdt` prefix | `239.3.2.1` |
+| Data MDT range | the **Active** `data_mdt` prefix | `239.3.3.0/24` |
+
+### Replication modes
+
+| Case | EVI `replication-type` | NVE member |
+|---|---|---|
+| `dag_routed` | `ingress` | `ingress-replication` |
+| bridged, group available | `static` | `mcast-group <group>` |
+| bridged, in a VRF with **no** group | — | **render fails** |
+| L2-only, no VRF to inherit from | `ingress` | `ingress-replication` |
+
+Both columns are driven by one `replication_mode` value computed in
+`filter_plugins/netbox_evpn_data.py`, so they cannot disagree.
+
+---
+
+## TRM — tenant routed multicast
+
+Optional per VRF, and enabled by **data rather than a flag**.
+
+### What enables it
+
+A VRF is multicast-enabled when a prefix with role `default_mdt` inside its own
+`239.<index>.0.0/16` has status **Active**. The carve creates that range for
+every VRF as **Reserved** — a carve is a plan, and status is what turns a plan
+into a decision. Exactly one Active `default_mdt` per VRF; two fails the render.
+
+`data_mdt` works the same way and is optional. Both must be IPv4: the MDT is an
+underlay construct and stays IPv4 even once the overlay carries IPv6.
+
+MDT prefixes live in the **global table**, associated by index, not assigned to
+the NetBox VRF — see the note in `scripts/netbox_multicast_carve.py` for why.
+
+### RP mode, also derived
+
+Tagged IPAM objects **inside the tenant VRF**:
+
+| Object | Tag | Count | Effect |
+|---|---|---|---|
+| IP address | `trm_anycast_rp` | 1 | anycast RP; ASM stays inside the fabric |
+| IP address | `trm_external_rp` | 1..n | RP outside the fabric |
+| Prefix | `trm_register_source` | 1, external only | allocation pool |
+| IP address | `trm_register_source` | 1 per VTEP | that switch's register source |
+
+Both RP tags on one VRF is a data error. **Neither is legal** — `ip pim vrf X ssm
+default` renders regardless, so SSM (232/8) works with no RP at all; only ASM
+needs one.
+
+**No MSDP is configured, deliberately.** The usual reason anycast RP needs it is
+that each RP instance only learns sources that registered to it — in TRM, MVPN
+Source-Active routes carry that over the EVPN control plane instead, which is
+what `mdt overlay use-bgp` enables. If multicast must leave the fabric, use
+external RP mode rather than bridging anycast RPs with MSDP.
+
+### Register sources are allocated, not hand-entered
+
+External RP mode needs a **unique** address per VTEP. Those are allocated by
+`trm_allocate.yml` from the pool — borders first, then leaves — and written back
+to NetBox, so the allocation is durable rather than re-derived.
+
+Ownership is the **interface the address is assigned to**: the allocator creates
+`Loopback<l3vni>` on the device in NetBox and attaches the address to it, which
+is how NetBox natively binds an address to a device. Tags stay classification
+(*what* it is); the interface is identity (*whose* it is).
+
+This is the only interface this role models, and only because NetBox allocates
+the address so NetBox must know what holds it. `acm_evpn` itself stays
+read-only: it refuses to render a VTEP that needs a register source and has
+none, naming the playbook.
+
+### VLANs
+
+Tag an `edge` VLAN `multicast_enabled` and its SVI gets `ip pim sparse-mode` and
+`ip igmp version 3`. The VLAN's VRF **must** be multicast-enabled — tagging one
+in a VRF with no Active `default_mdt` fails the render rather than producing
+silently non-functional multicast.
+
+Independent of `dag_routed`: a routed-only DAG segment still has hosts that can
+be receivers, and its L3 multicast rides the MDT rather than the L2VNI's ingress
+replication, so the two do not interact.
+
+Handoff SVIs (`vrf_l3_handoff_vlan`) get PIM automatically when their VRF has
+any `multicast_enabled` edge VLAN **anywhere in the fabric** — a border has no
+local edge VLANs, so a per-device test would never fire.
+
+### What renders
+
+```
+vrf definition CORP
+ address-family ipv4
+  mdt auto-discovery vxlan
+  mdt default vxlan 239.3.2.1
+  mdt data vxlan 239.3.3.0 0.0.0.255      # only with an Active data_mdt
+  mdt overlay use-bgp
+!
+ip multicast-routing vrf CORP             # note the trailing space IOS-XE keeps
+ip pim vrf CORP ssm default
+!
+interface Loopback20003                   # Loopback<l3vni>, leaves and borders
+ description Fabric Anycast RP for VRF CORP
+ vrf forwarding CORP
+ ip address 10.67.118.31 255.255.255.255
+ ip pim sparse-mode
+!
+ip pim vrf CORP rp-address 10.67.118.31
+```
+
+External mode instead renders `description PIM Register Source for VRF <X>`, the
+switch's own allocated address, `ip pim vrf X register-source Loopback<l3vni>`
+and one `rp-address` per external RP.
+
+BGP gains `address-family ipv4 mvpn`, mirroring `l2vpn evpn` including
+`route-reflector-client` on spines, **only** on devices carrying at least one
+multicast-enabled VRF.
+
+### Turning it off
+
+Un-marking a VRF prunes its RP loopback, `ip multicast-routing vrf X` and every
+`ip pim vrf X` line. Without that, preserve-by-default would carry them forward
+for ever and disabling TRM would be a one-way door.
+
+
+## Safety guards
+
+Because `acm replace` deletes anything absent from the candidate config, several
+checks run before a switch is touched:
+
+| Guard | Behaviour |
+|---|---|
+| VNI validation | Fails on out-of-range, duplicate, or L2/L3-colliding VNIs. Fabric-wide. |
+| Multicast validation | Fails on a missing, malformed, or duplicated group, one outside the carve, or one outside the owning VRF's own `/16`. |
+| Anycast RP assertions | The RP loopback must match `underlay_rp_address`, and every spine must carry it. |
+| Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |
+| Blast-radius guard | Blocks a deploy removing >`acm_safety_max_removal_pct` of any tracked object class, and **any** underlay removal (zero tolerance). Override with `-e acm_safety_force=true`. Generate runs warn instead of failing. |
+
+## Tests
+
+```bash
+venv/bin/python -m unittest discover -s roles/acm_evpn/tests/unit
+```
+
+Stdlib `unittest` only — no pytest, no live NetBox, no Ansible runtime.

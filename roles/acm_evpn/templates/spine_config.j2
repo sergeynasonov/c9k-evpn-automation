@@ -1,0 +1,112 @@
+{% include 'common_base.j2' %}
+!
+! --- 6. (anycast RP loopback and MSDP are underlay) ---
+{# Loopback60000 and 'ip msdp ...' used to be generated here. They are ordinary
+   underlay -- a global-table interface with an address, and global underlay
+   statements -- so they are now preserved verbatim from the running config by
+   filter_plugins/ios_underlay.py, like Loopback0 and OSPF. Generating them
+   also required reading hostvars[<other spine>]['loopback0_ip'], which broke
+   any run using --limit. #}
+! --- 7. CORE VLANS ---
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+{% for vid, vlan in vrf_data.core_vlans.items() %}
+vlan {{ vid }}
+ name {{ vlan.name }}
+!
+vlan configuration {{ vid }}
+ member vni {{ vrf_data.l3vni }}
+!
+{% endfor %}
+{% endfor %}
+!
+! --- 8. CORE SVIs ---
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+{% for vid, vlan in vrf_data.core_vlans.items() %}
+interface Vlan{{ vid }}
+ vrf forwarding {{ vrf_name }}
+ ip unnumbered {{ vtep_source_intf }}
+ no autostate
+ no ip proxy-arp
+{% if vrf_data.trm is defined and vrf_data.trm.enabled %}
+ ip pim sparse-mode
+{% endif %}
+!
+{% endfor %}
+{% endfor %}
+!
+! --- 9. NVE VTEP ---
+{# 'no shutdown' is omitted deliberately: nve1 comes up on its own once its
+   dependencies are met, and IOS does not render the line back in the running
+   config -- so including it made ACM re-apply it on every single deploy. #}
+interface nve1
+ no ip proxy-arp
+ source-interface {{ vtep_source_intf }}
+ host-reachability protocol bgp
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+ member vni {{ vrf_data.l3vni }} vrf {{ vrf_name }}
+{% endfor %}
+!
+! --- 10. BGP ROUTING ---
+router bgp {{ evpn_bgp_asn }}
+ bgp router-id interface {{ vtep_source_intf }}
+ bgp log-neighbor-changes
+ bgp graceful-restart
+ no bgp default ipv4-unicast
+ neighbor {{ evpn_peer_group_name }} peer-group
+ neighbor {{ evpn_peer_group_name }} remote-as {{ evpn_bgp_asn }}
+ neighbor {{ evpn_peer_group_name }} update-source {{ vtep_source_intf }}
+ neighbor {{ evpn_peer_group_name }} fall-over host-route
+{% for ip in peer_ips %}
+ neighbor {{ ip }} peer-group {{ evpn_peer_group_name }}
+{% endfor %}
+{# Underlay BGP preserved verbatim from the device; empty on a pure leaf/spine
+   whose underlay is OSPF-only. See filter_plugins/ios_underlay.py. #}
+{% for line in underlay.bgp.direct %}
+{{ line }}
+{% endfor %}
+ !
+ address-family ipv4
+{% for line in underlay.bgp.af_ipv4 %}
+{{ line }}
+{% endfor %}
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  neighbor {{ evpn_peer_group_name }} send-community both
+  neighbor {{ evpn_peer_group_name }} route-reflector-client
+{% for ip in peer_ips %}
+  neighbor {{ ip }} activate
+{% endfor %}
+ exit-address-family
+ !
+{% set _trm_on = [] %}
+{% for _n, _d in netbox_vlan_groups.vrfs.items() if _d.l3vni and _d.trm is defined and _d.trm.enabled %}
+{%   set _ = _trm_on.append(_n) %}
+{% endfor %}
+{% if _trm_on %}
+{# MVPN carries TRM's overlay signalling -- auto-discovery and the Source-Active
+    routes that replace MSDP. Activated only where the device actually carries a
+    multicast-enabled VRF, so a fabric without TRM gains no dead config. Peering
+    follows l2vpn evpn exactly: same peer-group, route-reflector-client on
+    spines. #}
+ address-family ipv4 mvpn
+  neighbor {{ evpn_peer_group_name }} send-community both
+{% if 'tags_fabric_spine' in group_names %}
+  neighbor {{ evpn_peer_group_name }} route-reflector-client
+{% endif %}
+{% for ip in peer_ips %}
+  neighbor {{ ip }} activate
+{% endfor %}
+ exit-address-family
+ !
+{% endif %}
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+ address-family ipv4 vrf {{ vrf_name }}
+  advertise l2vpn evpn
+  redistribute connected
+  maximum-paths ibgp 2
+ exit-address-family
+ !
+{% endfor %}
+!
+end

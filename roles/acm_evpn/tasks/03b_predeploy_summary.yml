@@ -1,0 +1,112 @@
+---
+# What this deploy is about to change, printed after the blast-radius guard and
+# immediately before anything touches a device.
+#
+# DEPLOY ONLY. generate_evpn.yml does not run this: that playbook's output IS
+# the rendered candidate in switch-configuration/, which the operator diffs
+# directly. A console summary there duplicates the artifact, worse.
+#
+# Two rules learned from the first version:
+#
+#  * 'msg' is a LIST of strings, not one multi-line string. The default callback
+#    renders a multi-line string as one JSON blob full of \n escapes -- and
+#    'result_format = yaml' in ansible.cfg does not take effect (only the
+#    ANSIBLE_CALLBACK_RESULT_FORMAT env var does), so the readable form has to
+#    be built rather than configured.
+#
+#  * Only NOTABLE things are listed. A converged fabric prints one line. Detail
+#    that appears on every run stops being read, which is how the per-host debug
+#    tasks this replaced ended up as scroll.
+
+- name: Summarise what this deploy will change
+  ansible.builtin.debug:
+    msg: "{{ _lines | from_json }}"
+  vars:
+    _hosts: "{{ ansible_play_hosts | sort }}"
+    # A host that fails before rendering is REMOVED from ansible_play_hosts, so
+    # iterating that alone reports on the survivors and says nothing about the
+    # rest. access1-1 timed out fetching its running config and simply vanished
+    # from a seven-switch summary. At 500 switches a single fatal: line is lost
+    # in the scroll, and a silently skipped switch keeps its old config while
+    # the fabric is believed consistent.
+    _missing: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts_all | sort if h not in ansible_play_hosts -%}
+      {%-   set _ = out.append(h) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    _lines: >-
+      {%- set out = [] -%}
+      {%- set notable = [] -%}
+
+      {#- Per host: pruning, blast-radius findings and trunk growth. Object
+          counts are shown only when non-zero -- '+0 / -0' on every switch was
+          noise that buried the two lines that mattered. -#}
+      {%- for h in _hosts -%}
+      {%-   set stale = hostvars[h].stale_headers | default([]) -%}
+      {%-   set viol = hostvars[h]._acm_violations | default([]) -%}
+      {%-   set trunks = hostvars[h].trunk_vlan_additions | default({}) -%}
+      {%-   set d = hostvars[h].acm_census_delta | default({}) -%}
+      {%-   set ns = namespace(add=0, rem=0) -%}
+      {%-   for _k, v in d.items() -%}
+      {%-     set ns.add = ns.add + [0, (v.after | int) - (v.before | int)] | max -%}
+      {%-     set ns.rem = ns.rem + (v.removed_count | int) -%}
+      {%-   endfor -%}
+      {%-   set bits = [] -%}
+      {%-   if ns.add or ns.rem -%}
+      {%-     set _ = bits.append('+' ~ ns.add ~ ' / -' ~ ns.rem ~ ' objects') -%}
+      {%-   endif -%}
+      {%-   if stale -%}
+      {%-     set _ = bits.append('PRUNE ' ~ (stale | join(', '))) -%}
+      {%-   endif -%}
+      {%-   for intf, vids in trunks.items() -%}
+      {%-     set _ = bits.append('trunk ' ~ intf ~ ' += ' ~ (vids | join(','))) -%}
+      {%-   endfor -%}
+      {%-   for v in viol -%}
+      {%-     set _ = bits.append('BLAST RADIUS ' ~ v.klass ~ ' -' ~ v.removed_count
+                                  ~ ' (' ~ v.removed_pct ~ '%)') -%}
+      {%-   endfor -%}
+      {%-   if bits -%}
+      {%-     set _ = notable.append(h) -%}
+      {%-     set _ = out.append('  ' ~ '%-14s' | format(h) ~ (bits | join('; '))) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+
+      {%- set quiet = _hosts | length - notable | length -%}
+      {%- set missing = _missing | from_json -%}
+      {#- Listed FIRST and unconditionally: a switch that produced no candidate
+          is the one thing here that silently leaves the fabric inconsistent. -#}
+      {%- if missing -%}
+      {%-   set _ = out.insert(0, '  NOT RENDERED (' ~ missing | length ~ '): '
+                               ~ (missing | join(', '))
+                               ~ ' — failed before a candidate was built; these'
+                               ~ ' switches will NOT be deployed to') -%}
+      {%- endif -%}
+      {%- set _ = out.insert(0, 'EVPN deploy — ' ~ ansible_play_hosts_all | length
+                             ~ ' switch(es) targeted, ' ~ _hosts | length
+                             ~ ' rendered, nothing applied yet') -%}
+      {%- if quiet -%}
+      {%-   set _ = out.append('  ' ~ quiet ~ ' switch(es) with no pending object changes') -%}
+      {%- endif -%}
+
+      {#- NetBox data hygiene, stated once rather than once per switch: these
+          are properties of NetBox, not of any device. -#}
+      {%- set skipped = hostvars[_hosts[0]].skipped_vlans | default({}) -%}
+      {%- set common = [] -%}
+      {%- for vid, v in skipped | dictsort(by='key') -%}
+      {%-   set seen = [] -%}
+      {%-   for h in _hosts if vid in (hostvars[h].skipped_vlans | default({})) -%}
+      {%-     set _ = seen.append(h) -%}
+      {%-   endfor -%}
+      {%-   if seen | length == _hosts | length -%}
+      {%-     set _ = common.append(vid ~ ' (' ~ v.name ~ ')') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if common -%}
+      {%-   set _ = out.append('  NetBox: VLAN(s) ' ~ (common | join(', '))
+                               ~ ' are in scope with no role and configure nothing'
+                               ~ ' -- set role "edge" if they should be overlay segments') -%}
+      {%- endif -%}
+      {{ out | to_json }}
+  run_once: true
+  delegate_to: localhost

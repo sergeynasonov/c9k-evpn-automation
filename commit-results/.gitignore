@@ -1,0 +1,5 @@
+# Keep the commit-results/ directory tracked in git, but never commit anything
+# written into it. The acm_evpn role drops ACM net-diffs and validation-failure
+# logs here at deploy time; those are runtime artifacts, not source.
+*
+!.gitignore

@@ -1,0 +1,191 @@
+{% include 'common_base.j2' %}
+!
+{# The anycast RP loopback and MSDP mesh are underlay and are preserved from
+   the running configuration -- see the note in spine_config.j2. #}
+! --- 7. CORE & HANDOFF VLANS ---
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+{% for vid, vlan in vrf_data.core_vlans.items() %}
+vlan {{ vid }}
+ name {{ vlan.name }}
+!
+vlan configuration {{ vid }}
+ member vni {{ vrf_data.l3vni }}
+!
+{% endfor %}
+{% endfor %}
+
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() %}
+{% for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags %}
+vlan {{ vid }}
+ name {{ vlan.name }}
+!
+{% endfor %}
+{% endfor %}
+!
+! --- 8. CORE & HANDOFF SVIs ---
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+{% for vid, vlan in vrf_data.core_vlans.items() %}
+interface Vlan{{ vid }}
+ vrf forwarding {{ vrf_name }}
+ ip unnumbered {{ vtep_source_intf }}
+ no autostate
+ no ip proxy-arp
+{% if vrf_data.trm is defined and vrf_data.trm.enabled %}
+ ip pim sparse-mode
+{% endif %}
+!
+{% endfor %}
+{% endfor %}
+
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() %}
+{% for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags %}
+interface Vlan{{ vid }}
+ vrf forwarding {{ vrf_name }}
+{% if vlan.get('local_ip_v4') %}
+ ip address {{ vlan.get('local_ip_v4') | ansible.utils.ipaddr('address') }} {{ vlan.get('local_ip_v4') | ansible.utils.ipaddr('netmask') }}
+{% endif %}
+{% if vlan.get('local_ip_v6') %}
+ ipv6 address {{ vlan.get('local_ip_v6') }}
+{% endif %}
+ bfd interval 750 min_rx 750 multiplier 3
+ no ip proxy-arp
+{% if vrf_data.trm is defined and vrf_data.trm.enabled and vrf_data.trm.has_mcast_vlans %}
+{# has_mcast_vlans is FABRIC-WIDE. A border has no local edge VLANs, so a
+    per-device test would never fire -- yet it is exactly the switch whose
+    handoff carries the VRF's multicast off the fabric. #}
+ ip pim sparse-mode
+{% endif %}
+!
+{% endfor %}
+{% endfor %}
+!
+! --- 9. NVE VTEP ---
+{# 'no shutdown' is omitted deliberately: nve1 comes up on its own once its
+   dependencies are met, and IOS does not render the line back in the running
+   config -- so including it made ACM re-apply it on every single deploy. #}
+interface nve1
+ no ip proxy-arp
+ source-interface {{ vtep_source_intf }}
+ host-reachability protocol bgp
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+ member vni {{ vrf_data.l3vni }} vrf {{ vrf_name }}
+{% endfor %}
+!
+! --- 10. BGP ROUTING ---
+ip prefix-list DEFAULT-ROUTE seq 5 permit 0.0.0.0/0
+!
+route-map WAN-INBOUND-FILTER permit 10
+ match ip address prefix-list DEFAULT-ROUTE
+!
+{#
+  Overlay BGP is generated from NetBox; underlay BGP is preserved verbatim
+  from the running configuration. On a border the global-routing-table
+  session is what carries reachability to the outside world and to the
+  Ansible control node itself, so it is never regenerated from assumptions --
+  it comes from the device. filter_plugins/ios_underlay.py strips out the
+  overlay lines (EVPN peer group, l2vpn evpn, per-VRF families) so the two
+  halves splice together without duplication.
+#}
+{#
+  Borders peer iBGP full-mesh with each other over Loopback0. Their remote-as
+  is the fabric ASN, so by the ownership rule these sessions belong to the
+  automation and must be rendered here rather than carried forward from the
+  device.
+
+  Addresses come from INVENTORY (each device's NetBox primary IP), never from a
+  fact another host sets at run time: a scoped run must still render the whole
+  mesh, and hostvars[...]['ansible_host'] is populated for every device in the
+  inventory whether or not it is in the play.
+#}
+{% set border_mesh = [] %}
+{% for host in groups.get('device_roles_fabric_border', []) | sort if host != inventory_hostname %}
+{%   if hostvars[host].get('ansible_host') %}
+{%     set _ = border_mesh.append(hostvars[host]['ansible_host']) %}
+{%   endif %}
+{% endfor %}
+router bgp {{ evpn_bgp_asn }}
+ bgp router-id interface {{ vtep_source_intf }}
+ bgp log-neighbor-changes
+ bgp graceful-restart
+ no bgp default ipv4-unicast
+ neighbor {{ evpn_peer_group_name }} peer-group
+ neighbor {{ evpn_peer_group_name }} remote-as {{ evpn_bgp_asn }}
+ neighbor {{ evpn_peer_group_name }} update-source {{ vtep_source_intf }}
+ neighbor {{ evpn_peer_group_name }} fall-over host-route
+{% for ip in peer_ips %}
+ neighbor {{ ip }} peer-group {{ evpn_peer_group_name }}
+{% endfor %}
+{% for ip in border_mesh %}
+ neighbor {{ ip }} remote-as {{ evpn_bgp_asn }}
+ neighbor {{ ip }} update-source {{ vtep_source_intf }}
+{% endfor %}
+{% for line in underlay.bgp.direct %}
+{{ line }}
+{% endfor %}
+ !
+ address-family ipv4
+{% for ip in border_mesh %}
+  neighbor {{ ip }} activate
+{% endfor %}
+{% if underlay.bgp.af_ipv4 %}
+{% for line in underlay.bgp.af_ipv4 %}
+{{ line }}
+{% endfor %}
+{% else %}
+{# Greenfield fallback only: no underlay BGP found on the device. #}
+  network {{ loopback0_ip }} mask 255.255.255.255
+  aggregate-address {{ fabric_loopbacks_range | ansible.utils.ipaddr('network') }} {{ fabric_loopbacks_range | ansible.utils.ipaddr('netmask') }} summary-only
+  maximum-paths ibgp 2
+{% endif %}
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  neighbor {{ evpn_peer_group_name }} send-community both
+{% if 'tags_fabric_spine' in group_names %}
+  neighbor {{ evpn_peer_group_name }} route-reflector-client
+{% endif %}
+{% for ip in peer_ips %}
+  neighbor {{ ip }} activate
+{% endfor %}
+ exit-address-family
+ !
+{% set _trm_on = [] %}
+{% for _n, _d in netbox_vlan_groups.vrfs.items() if _d.l3vni and _d.trm is defined and _d.trm.enabled %}
+{%   set _ = _trm_on.append(_n) %}
+{% endfor %}
+{% if _trm_on %}
+{# MVPN carries TRM's overlay signalling -- auto-discovery and the Source-Active
+    routes that replace MSDP. Activated only where the device actually carries a
+    multicast-enabled VRF, so a fabric without TRM gains no dead config. Peering
+    follows l2vpn evpn exactly: same peer-group, route-reflector-client on
+    spines. #}
+ address-family ipv4 mvpn
+  neighbor {{ evpn_peer_group_name }} send-community both
+{% if 'tags_fabric_spine' in group_names %}
+  neighbor {{ evpn_peer_group_name }} route-reflector-client
+{% endif %}
+{% for ip in peer_ips %}
+  neighbor {{ ip }} activate
+{% endfor %}
+ exit-address-family
+ !
+{% endif %}
+{% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
+ address-family ipv4 vrf {{ vrf_name }}
+  advertise l2vpn evpn
+  redistribute connected
+  maximum-paths ibgp 2
+{% for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags %}
+  neighbor {{ vlan.get('neighbor_ip_v4') }} remote-as {{ evpn_ext_bgp_asn }}
+  neighbor {{ vlan.get('neighbor_ip_v4') }} fall-over bfd
+  neighbor {{ vlan.get('neighbor_ip_v4') }} activate
+  neighbor {{ vlan.get('neighbor_ip_v4') }} route-map WAN-INBOUND-FILTER in
+{% endfor %}
+{% for vid, subnet in fabric_edge_subnets.get(vrf_name, {}).items() %}
+  network {{ subnet.network }} mask {{ subnet.mask }}
+{% endfor %}
+ exit-address-family
+ !
+{% endfor %}
+!
+end

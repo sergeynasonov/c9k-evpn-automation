@@ -1,0 +1,207 @@
+---
+# ONE task produces the whole verdict. Each check keeps its own named block in
+# 'vars' so the logic stays readable, but the play prints a single line per host
+# instead of one per category -- which is the difference between a readable run
+# and 500 switches x 8 checks of console noise.
+#
+# Findings are STRUCTURED, not prose:
+#   msg     - the human sentence, for the console summary
+#   parents - config context for remediation, e.g. ['interface Te1/1/1']
+#   lines   - the CLI that would fix it, if it can be expressed as config
+# A finding with no 'lines' needs human judgement and is emitted as a comment in
+# the remediation file rather than a command.
+#
+# Nothing here changes the device. The underlay is hand-built at day 0 and
+# silently remediating it would reintroduce exactly the risk that keeping it
+# device-owned was meant to avoid.
+
+- name: Readiness — check the underlay
+  ansible.builtin.set_fact:
+    readiness_failures: >-
+      {{ (_global | from_json) + (_routing | from_json) + (_defaults | from_json)
+         + (_loopback | from_json) + (_ospf | from_json) + (_uplinks | from_json)
+         + (_snmp | from_json) + (_spine | from_json) }}
+    readiness_ospf_area_routers: "{{ _readiness_ospf_routers | int }}"
+  vars:
+    # --- global single-line settings -------------------------------------
+    _global: >-
+      {%- set bad = [] -%}
+      {%- for line in readiness_global_lines if line not in _stanzas -%}
+      {%-   set _ = bad.append({'msg': 'missing global: ' ~ line,
+                                'parents': [], 'lines': [line]}) -%}
+      {%- endfor -%}
+      {{ bad | to_json }}
+
+    # --- IP routing, checked by consequence ------------------------------
+    # 'ip routing' is default-ON for the C9400/9500/9600 so those never print
+    # it; the C9300 has it off by default and does. Absence therefore proves
+    # nothing, while presence of 'no ip routing' proves everything -- see
+    # 01_gather.yml, where both facts are derived.
+    _routing: >-
+      {%- set bad = [] -%}
+      {%- if _readiness_routing_disabled | bool -%}
+      {%-   set _ = bad.append({
+              'msg': 'IP routing is explicitly DISABLED ("no ip routing") -- the switch cannot route',
+              'parents': [], 'lines': ['ip routing']}) -%}
+      {%- elif not (_readiness_routing_enabled | bool) -%}
+      {%-   set _ = bad.append({
+              'msg': 'IP routing does not appear to be enabled: no "ip routing" line, no "router ospf '
+                     ~ readiness_ospf_process ~ '", and no OSPF database',
+              'parents': [], 'lines': ['ip routing']}) -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+
+    # --- platform defaults that must not be overridden --------------------
+    # A default is not rendered, so it cannot be asserted positively. A
+    # NON-default value IS rendered, so the line appearing at all is the
+    # finding. Same asymmetry as 'no ip routing'.
+    _defaults: >-
+      {%- set bad = [] -%}
+      {%- for line in _stanzas if line.startswith('ip tcp window-size ') -%}
+      {%-   if line != 'ip tcp window-size ' ~ readiness_tcp_window_size -%}
+      {%-     set _ = bad.append({
+                'msg': line ~ ' -- expected the default of ' ~ readiness_tcp_window_size
+                       ~ '; a non-default value is rendered, so this was set deliberately',
+                'parents': [],
+                'lines': ['default ip tcp window-size']}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if 'no hidekeys' in _stanzas.get('archive', []) -%}
+      {%-   set _ = bad.append({
+              'msg': 'archive log config: "no hidekeys" -- archived configurations will contain credentials in clear text',
+              'parents': ['archive', ' log config'], 'lines': ['hidekeys']}) -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+
+    # --- the VTEP loopback -------------------------------------------------
+    _loopback: >-
+      {%- set bad = [] -%}
+      {%- set body = _stanzas.get('interface ' ~ vtep_source_intf, []) -%}
+      {%- set ctx = ['interface ' ~ vtep_source_intf] -%}
+      {%- if 'interface ' ~ vtep_source_intf not in _stanzas -%}
+      {%-   set _ = bad.append({'msg': 'missing interface ' ~ vtep_source_intf,
+                                'parents': [], 'lines': []}) -%}
+      {%- else -%}
+      {%-   if not _readiness_lo0 -%}
+      {%-     set _ = bad.append({'msg': vtep_source_intf ~ ': no IP address',
+                                  'parents': [], 'lines': []}) -%}
+      {%-   elif ('ip address ' ~ _readiness_lo0 ~ ' 255.255.255.255') not in body -%}
+      {%-     set _ = bad.append({
+                'msg': vtep_source_intf ~ ': ' ~ _readiness_lo0 ~ ' is not a /32 -- it is the VTEP'
+                       ~ ' source and the router-id, so a shorter mask breaks EVPN next-hop reachability',
+                'parents': ctx,
+                'lines': ['ip address ' ~ _readiness_lo0 ~ ' 255.255.255.255']}) -%}
+      {%-   endif -%}
+      {%-   for line in readiness_loopback_lines if line not in body -%}
+      {%-     set _ = bad.append({'msg': vtep_source_intf ~ ': missing "' ~ line ~ '"',
+                                  'parents': ctx, 'lines': [line]}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+
+    # --- the OSPF process --------------------------------------------------
+    _ospf: >-
+      {%- set bad = [] -%}
+      {%- set proc = 'router ospf ' ~ readiness_ospf_process -%}
+      {%- set body = _stanzas.get(proc, []) -%}
+      {%- if proc not in _stanzas -%}
+      {%-   set _ = bad.append({'msg': 'missing "' ~ proc ~ '"', 'parents': [], 'lines': []}) -%}
+      {%- else -%}
+      {%-   for line in readiness_ospf_lines if line not in body -%}
+      {%-     set _ = bad.append({'msg': proc ~ ': missing "' ~ line ~ '"',
+                                  'parents': [proc], 'lines': [line]}) -%}
+      {%-   endfor -%}
+      {#- The router-id must be the VTEP loopback: BGP takes its router-id from
+          the same interface, and the two disagreeing makes a fabric very hard
+          to read from a route dump. Changing it is disruptive, so it is
+          reported for a human rather than emitted as a command. -#}
+      {%-   if _readiness_lo0 and ('router-id ' ~ _readiness_lo0) not in body -%}
+      {%-     set _ = bad.append({
+                'msg': proc ~ ': router-id is not ' ~ _readiness_lo0 ~ ' (the '
+                       ~ vtep_source_intf ~ ' address) -- changing it resets OSPF adjacencies',
+                'parents': [], 'lines': []}) -%}
+      {%-   endif -%}
+      {%-   if inventory_hostname in groups.get('device_roles_fabric_border', []) -%}
+      {%-     for line in readiness_ospf_border_lines if line not in body -%}
+      {%-       set _ = bad.append({'msg': proc ~ ' (border): missing "' ~ line ~ '"',
+                                    'parents': [proc], 'lines': [line]}) -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+
+    # --- fabric uplinks ----------------------------------------------------
+    _uplinks: >-
+      {%- set bad = [] -%}
+      {%- if _readiness_uplinks | length == 0 -%}
+      {%-   set _ = bad.append({
+              'msg': 'no routed uplinks are enrolled in OSPF process ' ~ readiness_ospf_process
+                     ~ ' -- this switch has no path into the fabric',
+              'parents': [], 'lines': []}) -%}
+      {%- endif -%}
+      {%- for intf in _readiness_uplinks -%}
+      {%-   set body = _stanzas.get('interface ' ~ intf, []) -%}
+      {%-   for line in readiness_uplink_lines if line not in body -%}
+      {%-     set _ = bad.append({'msg': intf ~ ': missing "' ~ line ~ '"',
+                                  'parents': ['interface ' ~ intf], 'lines': [line]}) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ bad | to_json }}
+
+    # --- SNMPv3, from operational state ------------------------------------
+    # IOS-XE hides snmp-server credentials from the running config. Presence
+    # only; neither command reveals a password, and no command is emitted here
+    # because that would put credentials in a file on disk.
+    _snmp: >-
+      {%- set bad = [] -%}
+      {%- if snmp_v3_user not in _readiness_state.stdout[0] -%}
+      {%-   set _ = bad.append({
+              'msg': 'SNMPv3 user "' ~ snmp_v3_user ~ '" not present (show snmp user)'
+                     ~ ' -- run readiness.yml with readiness_apply_snmp=true to configure it',
+              'parents': [], 'lines': []}) -%}
+      {%- endif -%}
+      {%- if snmp_v3_group not in _readiness_state.stdout[1] -%}
+      {%-   set _ = bad.append({
+              'msg': 'SNMPv3 group "' ~ snmp_v3_group ~ '" not present (show snmp group)',
+              'parents': [], 'lines': []}) -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+
+    # --- spines: anycast RP and the MSDP mesh ------------------------------
+    # A one-way MSDP mesh is invisible from either device -- each switch's own
+    # config looks complete -- so it can only be caught against the inventory.
+    # This fabric has been bitten by it: core2 pointed at core1, core1 did not
+    # point back.
+    _spine: >-
+      {%- set bad = [] -%}
+      {%- if 'tags_fabric_spine' in group_names -%}
+      {%-   set carried = [] -%}
+      {%-   for name, body in _stanzas.items() if name.startswith('interface ') -%}
+      {%-     for line in body if line.startswith('ip address ' ~ underlay_rp_address ~ ' ') -%}
+      {%-       set _ = carried.append(name) -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%-   if carried | length == 0 -%}
+      {%-     set _ = bad.append({
+                'msg': 'spine: no interface carries the anycast RP address ' ~ underlay_rp_address
+                       ~ ' -- the RP loopback is day-0 topology, create it deliberately',
+                'parents': [], 'lines': []}) -%}
+      {%-   endif -%}
+      {%-   if ('ip msdp originator-id ' ~ vtep_source_intf) not in _stanzas -%}
+      {%-     set _ = bad.append({'msg': 'spine: missing "ip msdp originator-id ' ~ vtep_source_intf ~ '"',
+                                  'parents': [],
+                                  'lines': ['ip msdp originator-id ' ~ vtep_source_intf]}) -%}
+      {%-   endif -%}
+      {%-   for peer in groups.get('tags_fabric_spine', []) | sort if peer != inventory_hostname -%}
+      {%-     set addr = hostvars[peer].get('ansible_host') -%}
+      {%-     if addr and ('ip msdp peer ' ~ addr ~ ' connect-source ' ~ vtep_source_intf) not in _stanzas -%}
+      {%-       set _ = bad.append({
+                  'msg': 'spine: missing MSDP peer to ' ~ peer ~ ' (' ~ addr ~ ')'
+                         ~ ' -- configure BOTH ends; a one-way mesh looks complete on each switch',
+                  'parents': [],
+                  'lines': ['ip msdp peer ' ~ addr ~ ' connect-source ' ~ vtep_source_intf]}) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+  when: _stanzas is defined

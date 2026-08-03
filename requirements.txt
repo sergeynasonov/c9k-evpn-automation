@@ -1,0 +1,24 @@
+# Python dependencies. Install into a virtualenv with:
+#     python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+#
+# Then the collections:
+#     ./venv/bin/ansible-galaxy collection install -r requirements.yml
+
+# Ansible itself. ansible-core is what actually runs; the 'ansible' package is
+# the batteries-included bundle. Either works -- core is the smaller install if
+# you are also using requirements.yml, which this project is.
+ansible-core>=2.21.1,<2.22.0
+
+# Required by every netbox.netbox module and by the nb_inventory plugin.
+pynetbox>=7.8.0,<8.0.0
+
+# Backs the ansible.utils ipaddr filter family. Not pulled in automatically.
+netaddr>=1.3.0,<2.0.0
+
+# SSH transport for cisco.ios / network_cli.
+#
+# ansible-pylibssh is significantly faster and Ansible warns on every run
+# without it, but it needs libssh present at build time. paramiko is the
+# fallback and is what this project has been run with; add pylibssh if you are
+# driving hundreds of switches and connection setup becomes the bottleneck.
+paramiko>=5.0.0,<6.0.0

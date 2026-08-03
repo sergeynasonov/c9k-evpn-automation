@@ -1,0 +1,231 @@
+---
+# Everything this role needs FROM NETBOX, and nothing that touches a device.
+#
+# Split out of 01_gather_data.yml so that trm_allocate.yml can import the same
+# queries and the same transform. The alternative was a second implementation of
+# the site/site-group scoping that decides which VRFs a switch carries -- one
+# that would drift the moment either copy changed.
+#
+# Every task here is run_once and delegated to localhost: the data is
+# fabric-wide, so it is fetched once per run no matter how many switches are in
+# the play. Only task 7 is per-host, because scoping is per-device.
+
+- name: 2. Fetch all VLANs, Prefixes, and VRFs via NetBox GraphQL
+  ansible.builtin.uri:
+    url: "{{ lookup('env', 'NETBOX_API') }}/graphql/"
+    method: POST
+    headers:
+      Authorization: "Token {{ lookup('env', 'NETBOX_TOKEN') }}"
+      Accept: "application/json"
+    validate_certs: "{{ netbox_validate_certs }}"
+    body_format: json
+    body:
+      query: >
+        query {
+          vlan_list(pagination: {limit: 2000}) {
+            vid name role { slug } tags { slug } site { id } custom_field_data
+            group { scope {
+              __typename
+              ... on SiteType { id }        ... on SiteGroupType { id }
+              ... on LocationType { id }    ... on RegionType { id }
+              ... on RackType { id }        ... on ClusterType { id }
+              ... on ClusterGroupType { id }
+            } }
+            prefixes { prefix custom_field_data vrf { name rd custom_field_data } }
+          }
+        }
+  register: graphql_vlans
+  # Read-only, so it must RUN in check mode. Ansible skips 'uri' under --check
+  # because POST is assumed to change something; that leaves the registered
+  # result a skip stub with no .json, and every downstream task fails on
+  # "object of type 'dict' has no attribute 'json'". GraphQL only uses POST as
+  # transport -- nothing is written.
+  check_mode: false
+  delegate_to: localhost
+  run_once: true
+  # A GraphQL schema error returns HTTP 200 with an 'errors' key, so the query
+  # must be failed explicitly or a rejected query looks like an empty fabric --
+  # which the blast-radius guard would then have to catch downstream.
+  failed_when:
+    - graphql_vlans.json is defined
+    - graphql_vlans.json.errors is defined
+    - graphql_vlans.json.errors | length > 0
+
+- name: 5. Fetch only the referenced DHCP-server IPs via NetBox GraphQL (scoped by ID)
+  ansible.builtin.uri:
+    url: "{{ lookup('env', 'NETBOX_API') }}/graphql/"
+    method: POST
+    headers:
+      Authorization: "Token {{ lookup('env', 'NETBOX_TOKEN') }}"
+      Accept: "application/json"
+    validate_certs: "{{ netbox_validate_certs }}"
+    body_format: json
+    body:
+      query: >
+        query ($ids: [ID!]) {
+          ip_address_list(filters: {id: {in_list: $ids}}) { id address }
+        }
+      variables:
+        ids: "{{ _dhcp_ip_ids | from_json }}"
+  vars:
+    # Only the IP-address object IDs actually referenced as DHCP servers, so
+    # this fetches exactly those rows instead of paging the whole IPAM table
+    # (which silently truncated at the old 2000-row limit).
+    _dhcp_ip_ids: >-
+      {%- set ids = [] -%}
+      {%- for vlan in graphql_vlans.json.data.vlan_list -%}
+      {%-   for p in (vlan.prefixes or []) -%}
+      {%-     set cfd = p.custom_field_data or {} -%}
+      {%-     for key in ['dhcp_servers_ipv4', 'dhcp_servers_ipv6'] -%}
+      {%-       for ip_id in (cfd.get(key) or []) -%}
+      {%-         if (ip_id | string) not in ids -%}
+      {%-           set _ = ids.append(ip_id | string) -%}
+      {%-         endif -%}
+      {%-       endfor -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ ids | to_json }}
+  register: graphql_ips
+  check_mode: false
+  delegate_to: localhost
+  run_once: true
+  when: (_dhcp_ip_ids | from_json | length) > 0
+  failed_when:
+    - graphql_ips.json is defined
+    - graphql_ips.json.errors is defined
+    - graphql_ips.json.errors | length > 0
+
+# The multicast carve, held in NetBox IPAM rather than hard-coded here: which
+# ranges L2VNI replication groups may be allocated from, and which belong to
+# MVPN/TRM infrastructure. Both live in the one shared underlay irrespective of
+# VRF, so a replication group must sit inside an allowed range and outside
+# every reserved one.
+- name: 5b. Fetch the multicast carve and TRM objects from NetBox IPAM
+  ansible.builtin.uri:
+    url: "{{ lookup('env', 'NETBOX_API') }}/graphql/"
+    method: POST
+    headers:
+      Authorization: "Token {{ lookup('env', 'NETBOX_TOKEN') }}"
+      Accept: "application/json"
+    validate_certs: "{{ netbox_validate_certs }}"
+    body_format: json
+    body:
+      query: >
+        query ($roles: [String!], $trm: [String!]) {
+          mcast_prefixes: prefix_list(filters: {role: {slug: {in_list: $roles}}}) {
+            prefix status role { slug }
+          }
+          trm_pools: prefix_list(filters: {tags: {slug: {in_list: $trm}}}) {
+            prefix status vrf { name } tags { slug }
+          }
+          trm_addresses: ip_address_list(filters: {tags: {slug: {in_list: $trm}}}) {
+            address vrf { name } tags { slug } description
+            assigned_object { ... on InterfaceType { name device { name } } }
+          }
+        }
+      variables:
+        roles: "{{ mcast_allowed_prefix_roles + mcast_reserved_prefix_roles }}"
+        trm: "{{ trm_tags }}"
+  register: graphql_mcast_prefixes
+  check_mode: false
+  delegate_to: localhost
+  run_once: true
+  failed_when:
+    - graphql_mcast_prefixes.json is defined
+    - graphql_mcast_prefixes.json.errors is defined
+    - graphql_mcast_prefixes.json.errors | length > 0
+
+# TRM inputs, kept as a separate fact rather than folded into the transform yet.
+# Nothing consumes this until the transform lands, so this step changes no
+# rendered output -- which is what makes a clean generate_evpn.yml diff proof
+# that the split and the query extension are correct.
+#
+#   pools     - prefixes tagged trm_register_source, one per external-RP VRF
+#   addresses - anycast RPs, external RPs, and allocated register sources,
+#               distinguished by tag; register sources also carry a hostname tag
+- name: 5c. Collect the TRM objects
+  ansible.builtin.set_fact:
+    trm_netbox: "{{ _trm | from_json }}"
+  vars:
+    _data: >-
+      {{ graphql_mcast_prefixes.json.data
+         if (graphql_mcast_prefixes.json is defined
+             and graphql_mcast_prefixes.json.data is defined) else {} }}
+    _trm: >-
+      {%- set pools = [] -%}
+      {%- for p in (_data.trm_pools if _data.trm_pools is defined else []) -%}
+      {%-   set _ = pools.append({'prefix': p.prefix,
+                                  'status': p.status,
+                                  'vrf': (p.vrf.name if p.vrf else ''),
+                                  'tags': (p.tags | map(attribute='slug') | list)}) -%}
+      {%- endfor -%}
+      {%- set addrs = [] -%}
+      {%- for a in (_data.trm_addresses if _data.trm_addresses is defined else []) -%}
+      {#- 'device' is the BINDING: which switch this allocation belongs to. It
+          comes from the interface the address is assigned to, which is how
+          NetBox natively expresses ownership. Empty for the anycast and
+          external RP addresses, which belong to no single switch. -#}
+      {%-   set _ = addrs.append({'address': a.address,
+                                  'vrf': (a.vrf.name if a.vrf else ''),
+                                  'tags': (a.tags | map(attribute='slug') | list),
+                                  'description': a.description | default(''),
+                                  'device': ((a.assigned_object.device.name)
+                                             if (a.assigned_object is defined
+                                                 and a.assigned_object
+                                                 and a.assigned_object.device is defined
+                                                 and a.assigned_object.device) else '')}) -%}
+      {%- endfor -%}
+      {{ {'pools': pools, 'addresses': addrs} | to_json }}
+  delegate_to: localhost
+  run_once: true
+
+- name: 7. Transform NetBox data and assign the facts the templates read
+  ansible.builtin.set_fact:
+    netbox_vlan_groups: "{{ {'vrfs': _processed_data.vrfs, 'l2_vlans': _processed_data.l2_vlans} }}"
+    all_edge_vlans: "{{ _processed_data.all_edge_vlans }}"
+    fabric_edge_subnets: "{{ _processed_data.fabric_edge_subnets }}"
+    skipped_vlans: "{{ _processed_data.skipped_vlans }}"
+  vars:
+    _processed_data: >-
+      {{ vlan_list | netbox_evpn_data(ip_list, my_site, my_sg, evpn_l2vni_base,
+                                      _mcast_carve
+                                        | selectattr('role', 'in', mcast_reserved_prefix_roles)
+                                        | list,
+                                      _mcast_carve
+                                        | selectattr('role', 'in', mcast_allowed_prefix_roles)
+                                        | list,
+                                      evpn_l3vni_base,
+                                      trm_netbox,
+                                      inventory_hostname,
+                                      trm_require_register_source | default(true)) }}
+
+    vlan_list: "{{ graphql_vlans.json.data.vlan_list }}"
+    _mcast_carve: >-
+      {%- set out = [] -%}
+      {#- 'mcast_prefixes' is an alias now that one query returns three sets.
+          'status' rides along for the TRM enablement marker; the reserved/allowed
+          containment checks deliberately ignore it, because a reserved range is
+          off-limits to L2VNI groups whether or not TRM uses it. -#}
+      {%- for p in (graphql_mcast_prefixes.json.data.mcast_prefixes
+                    if (graphql_mcast_prefixes.json is defined
+                        and graphql_mcast_prefixes.json.data is defined) else []) -%}
+      {%-   set _ = out.append({'prefix': p.prefix,
+                                'role': (p.role.slug if p.role else ''),
+                                'status': p.status | default('')}) -%}
+      {%- endfor -%}
+      {{ out }}
+    ip_list: >-
+      {{ graphql_ips.json.data.ip_address_list
+         if (graphql_ips is defined
+             and graphql_ips.json is defined
+             and graphql_ips.json.data is defined)
+         else [] }}
+    my_site: "{{ sites[0].id | string if sites | length > 0 else none }}"
+    my_sg: "{{ sites[0].group.id | string if sites | length > 0 and sites[0].get('group') else none }}"
+
+# Tasks 8b and 8c -- 'VLANs in scope with no role' and 'pure-L2 overlay
+# segments' -- moved to 03b_predeploy_summary.yml. Both printed the SAME message
+# once per host, because they report properties of NetBox rather than of a
+# switch; at fabric scale that is hundreds of identical lines. The summary states
+# them once.

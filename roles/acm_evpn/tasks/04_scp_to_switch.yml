@@ -1,0 +1,6 @@
+---
+- name: 10. Copy Candidate Configuration to Switch Bootflash
+  ansible.netcommon.net_put:
+    src: "{{ playbook_dir }}/switch-configuration/{{ inventory_hostname }}-candidate-config.cfg"
+    dest: "bootflash:{{ inventory_hostname }}-candidate-config.cfg"
+    protocol: scp

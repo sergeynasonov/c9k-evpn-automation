@@ -1,0 +1,58 @@
+---
+# The one thing this role configures, and only on the standalone path -- never
+# as an acm_evpn pre-flight.
+#
+# SNMPv3 lives here rather than in the acm_evpn render because IOS-XE hides
+# 'snmp-server user' from 'show running-config'. A full-replace candidate can
+# therefore never converge on it: the line is pushed, the device accepts it, and
+# the next run's diff shows it again because the device will not read it back.
+# It also put the auth and priv passwords in plaintext into every rendered
+# candidate on disk.
+#
+# Merge semantics (ios_config, not acm replace): this adds, it never removes.
+
+- name: Readiness — configure the SNMP access list
+  cisco.ios.ios_config:
+    save_when: changed
+    parents: "ip access-list standard {{ snmp_acl_name }}"
+    lines: "{{ _acl_lines }}"
+  vars:
+    # Explicit sequence numbers: IOS assigns 10, 20, 30... itself, so an
+    # unsequenced entry never matches what the device stores and would rewrite
+    # the ACL on every run.
+    _acl_lines: >-
+      {%- set out = [] -%}
+      {%- for ip in snmp_acl -%}
+      {%-   set _ = out.append((loop.index * 10) | string ~ ' permit ' ~ ip) -%}
+      {%- endfor -%}
+      {{ out }}
+  when:
+    - readiness_apply_snmp | bool
+    - snmp_acl | length > 0
+
+- name: Readiness — configure the SNMPv3 group and user
+  cisco.ios.ios_config:
+    save_when: changed
+    lines:
+      - "snmp-server group {{ snmp_v3_group }} v3 priv{% if snmp_acl | length > 0 %} access {{ snmp_acl_name }}{% endif %}"
+      - >-
+        snmp-server user {{ snmp_v3_user }} {{ snmp_v3_group }} v3
+        auth sha {{ snmp_v3_auth_password }}
+        priv aes 128 {{ snmp_v3_priv_password }}
+  # Gated on operational state rather than left to ios_config's own diff. The
+  # user line is invisible in the running config, so ios_config would report a
+  # change on every single run and never settle.
+  when:
+    - readiness_apply_snmp | bool
+    - snmp_v3_user not in _readiness_state.stdout[0]
+      or snmp_v3_group not in _readiness_state.stdout[1]
+  no_log: true
+  register: _snmp_applied
+
+# No re-read here: main.yml re-gathers after all the apply tasks, so the
+# assertions see post-apply state.
+#
+# Worth remembering if one is ever added back -- a task with 'register' that is
+# SKIPPED still overwrites its target with {'skipped': true}. Pointing a
+# conditional re-read straight at _readiness_state would destroy the gathered
+# output on every run where SNMP was already correct.

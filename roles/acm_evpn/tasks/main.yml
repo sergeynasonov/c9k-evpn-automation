@@ -1,0 +1,38 @@
+---
+- name: Gather Data and Build Peering Matrix
+  ansible.builtin.import_tasks: 01_gather_data.yml
+
+# Pre-flight. The overlay assumes a working underlay -- a VTEP with no PIM, an
+# uplink outside OSPF or a one-way MSDP mesh produces a fabric that configures
+# cleanly and then silently fails to forward. Cheaper to refuse here than to
+# debug it afterwards.
+#
+# Placed after 01_gather_data because that is where the running config is
+# fetched; the readiness role reuses it, so this costs one round-trip for its
+# show commands and nothing else. Read-only: assert_only.yml never configures.
+- name: Verify Underlay Readiness (pre-flight)
+  ansible.builtin.import_role:
+    name: underlay_readiness
+    tasks_from: assert_only.yml
+  when: evpn_preflight_readiness | bool
+
+- name: Render Local Configurations
+  ansible.builtin.import_tasks: 02_render_configs.yml
+
+- name: Verify Candidate Configuration Blast Radius
+  ansible.builtin.import_tasks: 03_safety_check.yml
+
+- name: Report What This Deploy Will Do
+  ansible.builtin.import_tasks: 03b_predeploy_summary.yml
+
+- name: Enforce the Blast-Radius Guard
+  ansible.builtin.import_tasks: 03c_safety_enforce.yml
+
+- name: SCP Configurations to Switches
+  ansible.builtin.import_tasks: 04_scp_to_switch.yml
+
+- name: Redact Passwords Locally (After SCP is complete)
+  ansible.builtin.import_tasks: 05_redact_local.yml
+
+- name: Deploy to Switches via ACM
+  ansible.builtin.import_tasks: 06_run_acm.yml

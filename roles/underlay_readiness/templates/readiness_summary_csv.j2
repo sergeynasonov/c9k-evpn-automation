@@ -1,0 +1,18 @@
+{#
+  One row per switch in the play, ready ones included -- the point is tracking a
+  remediation campaign across hundreds of switches, which means seeing what is
+  DONE as much as what is outstanding. Diffing two runs shows what regressed.
+
+  Every field is quoted and internal quotes doubled (RFC 4180), because finding
+  text contains commas and quoted CLI. 'findings' is semicolon-joined so a
+  spreadsheet can filter on it; the full detail is in <hostname>-readiness.cfg.
+#}
+hostname,status,finding_count,ospf_area_routers,findings
+{% for h in ansible_play_hosts_all | sort %}
+{%   if h in readiness_unreachable %}
+"{{ h }}","unreachable","","",""
+{%   else %}
+{%     set f = hostvars[h].readiness_failures | default([]) %}
+"{{ h }}","{{ 'ready' if f | length == 0 else 'not_ready' }}","{{ f | length }}","{{ hostvars[h].readiness_ospf_area_routers | default('') }}","{{ f | map(attribute='msg') | join('; ') | replace('"', '""') }}"
+{%   endif %}
+{% endfor %}

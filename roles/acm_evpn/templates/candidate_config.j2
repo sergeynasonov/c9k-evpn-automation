@@ -1,0 +1,113 @@
+{#
+  CANDIDATE CONFIG = fabric block + everything on the device we do not manage.
+
+  Inverted ownership. Instead of deciding what to carry forward (which needed a
+  growing allowlist, and silently deleted switchports, non-fabric-VRF SVIs and
+  platform defaults whenever that list fell behind), we strip only what we
+  render and keep the rest.
+
+  The managed set is DERIVED FROM OUR OWN OUTPUT: the top-level stanza headers
+  present in the rendered fabric block. It therefore cannot drift from what we
+  actually push, and there is no list to maintain.
+
+  Two additions:
+    * stale fabric objects -- an EVPN instance, VNI mapping, tenant SVI or VRF
+      on the device but no longer in the render -- are stripped too, so that
+      preserve-by-default does not become preserve-forever. Computed in
+      tasks/02_render_configs.yml.
+    * a trailer for config that must land AFTER the preserved block, currently
+      the handoff trunk's allowed-VLAN additions.
+    * candidate_omit_regex: stanzas 'acm replace' looks after by itself and
+      which therefore only add noise to the candidate -- the Cisco licensing
+      trustpoint and its certificate chain. ACM keeps these whether or not the
+      candidate mentions them, so omitting them costs nothing and keeps the
+      file readable.
+
+  Lines are accumulated into a list and joined, rather than emitted inline:
+  Jinja whitespace control across a stateful loop is easy to get wrong and the
+  failure mode (an entire config collapsed onto one line) is quiet.
+
+  Order: fabric first, preserved remainder second.
+#}
+{#- The role templates end with 'end'. Left in place it terminates parsing
+    before the preserved block, so every preserved line becomes dead config --
+    silently, since the file still looks complete. Dropped here; the single
+    'end' at the foot of this template is the real terminator. -#}
+{% set _fab = fabric_config.rstrip().splitlines() %}
+{% if _fab and _fab[-1].strip() == 'end' %}{% set _fab = _fab[:-1] %}{% endif %}
+{{ _fab | join('\n') }}
+!
+! ==============================================================================
+! PRESERVED FROM DEVICE — not managed by this role
+! ==============================================================================
+{# Compared right-trimmed: IOS emits trailing whitespace on some lines
+   ('aaa authorization exec default local ', 'ip multicast-routing ') and our
+   own templates emit it on others, so a raw string match silently fails and
+   the line falls through to 'preserved' -- duplicating it in the candidate. #}
+{% set managed = fabric_config | regex_findall('(?m)^([^ !].*)$') | map('trim') | list %}
+{# Some lines can never match textually. A type-9 secret is salted, so the same
+   password hashes differently every time it is generated -- the device's
+   'username admin ... secret 9 $9$A...' and our rendered '$9$B...' are the same
+   account with different ciphertext. Ownership of those lines is decided by a
+   stable PREFIX (the username) rather than the whole line; without this the
+   device's copy is preserved alongside ours and the candidate carries two. #}
+{% set managed_prefixes = [] %}
+{% for line in managed %}
+{%   for pattern in candidate_prefix_managed | default([]) %}
+{%     set hit = line | regex_search('^' ~ pattern) %}
+{%     if hit %}{% set _ = managed_prefixes.append(hit) %}{% endif %}
+{%   endfor %}
+{% endfor %}
+{% set kept = [] %}
+{% set ns = namespace(skip=false) %}
+{% for line in current_run_config.stdout[0].splitlines() %}
+{%   if line == '!' or not line.strip() %}
+{#     stanza separator: keep one, never a run of them #}
+{%     if not ns.skip and kept and kept[-1] != '!' %}
+{%       set _ = kept.append('!') %}
+{%     endif %}
+{%   elif line.startswith('!') or line.strip() == 'end'
+        or line.startswith('Building configuration')
+        or line.startswith('Current configuration') %}
+{#     running-config preamble, comments and trailing 'end': never emitted #}
+{%   else %}
+{%     if not line.startswith(' ') %}
+{%       set prefix_hit = [] %}
+{%       for p in managed_prefixes %}
+{%         if (line | trim).startswith(p) %}{% set _ = prefix_hit.append(p) %}{% endif %}
+{%       endfor %}
+{#     Stale PREFIXES, as opposed to stale headers. Some lines cannot be
+       matched exactly because their tail lives only on the device: when a VRF
+       stops being multicast-enabled we must remove 'ip pim vrf X rp-address
+       <addr>', and that address is precisely what we no longer render. Matching
+       on 'ip pim vrf X ' removes every PIM line for the VRF in one entry. #}
+{%       set stale_hit = [] %}
+{%       for p in stale_prefixes | default([]) %}
+{%         if (line | trim).startswith(p) %}{% set _ = stale_hit.append(p) %}{% endif %}
+{%       endfor %}
+{%       set ns.skip = line | trim in managed
+                        or line | trim in stale_headers
+                        or prefix_hit | length > 0
+                        or stale_hit | length > 0
+                        or (candidate_omit_regex | length > 0
+                            and line | trim is match(candidate_omit_regex)) %}
+{%     endif %}
+{%     if not ns.skip %}
+{%       set _ = kept.append(line) %}
+{%     endif %}
+{%   endif %}
+{% endfor %}
+{{ kept | join('\n') }}
+{% if kept and kept[-1] != '!' %}
+!
+{% endif %}
+{% if trunk_vlan_additions %}
+! --- handoff trunk: VLANs this border must carry. Emitted after the preserved
+!     interface so the 'add' is not overwritten by the base allowed list ---
+{% for intf, vids in trunk_vlan_additions.items() %}
+interface {{ intf }}
+ switchport trunk allowed vlan add {{ vids | ios_vlan_range }}
+!
+{% endfor %}
+{% endif %}
+end

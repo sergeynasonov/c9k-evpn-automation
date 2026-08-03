@@ -1,0 +1,39 @@
+---
+# ansible-lint configuration.
+#
+#   venv/bin/ansible-lint
+#
+# One skip below, and one inline '# noqa' in the whole tree
+# (roles/underlay_readiness/tasks/04_apply_baseline.yml). Each has its reasoning
+# written next to it -- if you need another, write down why rather than adding
+# it silently.
+#
+# Role directory names use underscores because ansible-lint's role-name rule
+# requires ^[a-z][a-z0-9_]*$. Hyphens work fine when a role is resolved by
+# path, but the underscore form is what Galaxy and collections require, so the
+# names are already correct if this ever becomes either.
+
+exclude_paths:
+  - venv/
+  - old files/            # pre-rewrite material, kept for reference, not linted
+  - switch-configuration/ # rendered device configs, not source
+  - .github/
+
+skip_list:
+  # var-naming[no-role-prefix]: wants every variable a role defines to be
+  # prefixed with the role name -- acm_evpn_evpn_l2vni_base,
+  # underlay_readiness_readiness_global_lines.
+  #
+  # That rule is written for independently reusable Galaxy roles, where an
+  # unprefixed variable can collide with an unrelated role in the same play.
+  # These two roles are halves of one system and share a vocabulary on purpose:
+  # 'readiness_enforce' is defined in underlay_readiness/defaults and SET by
+  # acm_evpn/tasks/generate_only.yml, and site values arrive unprefixed from
+  # group_vars/all/fabric.yml (evpn_bgp_asn, vtep_source_intf,
+  # underlay_rp_address). Prefixing would split one coherent namespace in three
+  # and stutter every name, while colliding with nothing.
+  #
+  # Only this sub-rule is skipped. var-naming's other checks -- reserved names,
+  # invalid identifiers, writing to read-only vars -- stay on, because those
+  # catch real bugs.
+  - var-naming[no-role-prefix]

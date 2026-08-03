@@ -1,0 +1,21 @@
+---
+# Pre-flight entry point, imported by acm_evpn before it renders anything.
+# Read-only: gather and check, no configuration. acm_evpn has already fetched
+# the running config by this point, so 01_gather reuses it and the pre-flight
+# costs one extra round-trip for the show commands.
+#
+# The report is included too, so a blocked deploy leaves the same per-switch
+# remediation files behind as a standalone readiness run -- otherwise an
+# operator would have to re-run a second playbook just to find out what to fix.
+
+- name: Gather underlay state
+  ansible.builtin.import_tasks: 01_gather.yml
+
+- name: Check the underlay
+  ansible.builtin.import_tasks: 02_check.yml
+
+- name: Report and write remediation
+  ansible.builtin.import_tasks: 05_report.yml
+  vars:
+    # A deploy is scoped; the CSV is fabric-wide. See readiness_write_csv.
+    readiness_write_csv: false

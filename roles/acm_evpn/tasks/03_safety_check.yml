@@ -1,0 +1,57 @@
+---
+# Blast-radius guard, run after rendering and BEFORE anything touches the
+# device.
+#
+# 'acm replace' is a full configuration replacement, so anything missing from
+# the candidate config is removed from the switch. An upstream data failure
+# (NetBox unreachable, no VRF enrolled via l3vni, an over-tight scope filter)
+# therefore looks exactly like "a small intended config" until the device has
+# lost every VRF, SVI and EVPN instance it had.
+#
+# Two policies apply, both implemented and unit tested in
+# filter_plugins/ios_config_census.py:
+#   * underlay classes (routed interfaces, OSPF processes) are ZERO TOLERANCE
+#     -- any removal blocks, because losing one uplink can cost the management
+#     plane and no later run can repair it;
+#   * everything else is judged against acm_safety_max_removal_pct.
+#
+# Set acm_safety_force=true to proceed anyway -- expected on a first brownfield
+# cutover, where replacing a legacy config legitimately removes a lot.
+
+- name: Compare rendered candidate against the device running configuration
+  ansible.builtin.set_fact:
+    _acm_violations: >-
+      {{ current_run_config.stdout[0]
+         | ios_config_census_violations(_candidate,
+                                        acm_safety_max_removal_pct,
+                                        underlay_excluded_interfaces) }}
+    # The full object delta, not just the violations: 03b_predeploy_summary.yml
+    # reports what this deploy adds and removes per switch, and recomputing it
+    # there would mean reading the candidate off disk a second time.
+    acm_census_delta: >-
+      {{ current_run_config.stdout[0] | ios_config_census_delta(_candidate) }}
+  vars:
+    _acm_candidate_file: "{{ playbook_dir }}/switch-configuration/{{ inventory_hostname }}-candidate-config.cfg"
+    _candidate: "{{ lookup('file', _acm_candidate_file) }}"
+
+# BGP ownership is by ASN: a neighbour in the fabric ASN is stripped from the
+# preserved config because the templates are expected to render it. If one is
+# stripped and NOT rendered, the session is silently deleted -- which is how the
+# border-to-border iBGP mesh would have been lost. Verified per device rather
+# than assumed.
+- name: Verify every fabric-ASN BGP neighbour stripped from the device is rendered
+  ansible.builtin.assert:
+    that:
+      - _bgp_missing | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: BGP neighbour(s) {{ _bgp_missing | join(', ') }}
+      are in the fabric ASN {{ evpn_bgp_asn }}, so they were removed from the
+      preserved configuration on the assumption a template renders them - but
+      they do not appear in the candidate. Deploying this would delete those
+      sessions. Either render them, or exclude them from fabric ownership.
+    quiet: true
+  vars:
+    _candidate: "{{ lookup('file', playbook_dir ~ '/switch-configuration/' ~ inventory_hostname ~ '-candidate-config.cfg') }}"
+    _bgp_missing: >-
+      {{ underlay.bgp.fabric_asn_stripped
+         | reject('in', _candidate | regex_findall('(?m)^\s*neighbor (\S+)')) | list }}

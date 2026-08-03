@@ -1,0 +1,24 @@
+---
+# Scope a run with  -e deploy_target=<pattern>  rather than --limit.
+#
+# The spines are unioned into the host pattern unconditionally. Adding or
+# removing a leaf changes the spines' EVPN peer list, so a spine that is not in
+# the play keeps a stale 'router bgp' until someone remembers to run it
+# separately. Peer ADDRESSES come from inventory (see fabric_peers.py), so a
+# narrow deploy_target renders correct configs -- this union is about which
+# devices get updated, not about where the data comes from.
+#
+#   full fabric : ansible-playbook deploy_evpn.yml
+#   one leaf    : ansible-playbook deploy_evpn.yml -e deploy_target=access1-1
+#   one building: ansible-playbook deploy_evpn.yml -e deploy_target=sites_evpn_building_a
+- name: Deploy EVPN Configurations to Live Fabric
+  hosts: >-
+    {{ deploy_target
+       | default('device_roles_fabric_border:device_roles_fabric_leaf:tags_fabric_spine') }}:tags_fabric_spine
+  gather_facts: false
+  strategy: linear
+  tasks:
+    - name: Execute EVPN Role (Full Deploy)
+      ansible.builtin.include_role:
+        name: acm_evpn
+        # Defaults to main.yml

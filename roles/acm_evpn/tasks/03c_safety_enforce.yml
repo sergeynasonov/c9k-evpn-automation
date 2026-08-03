@@ -1,0 +1,29 @@
+---
+# Enforcement, deliberately AFTER 03b_predeploy_summary.yml. The summary lists
+# the blast-radius findings for every host; failing before it would abort the
+# run without showing an operator what was wrong on the other switches.
+- name: Refuse to deploy a configuration that removes too much
+  ansible.builtin.fail:
+    msg: |-
+      Refusing to deploy to {{ inventory_hostname }}: the candidate configuration
+      would remove configuration that 'acm replace' cannot be trusted to restore.
+      {% for v in _acm_violations %}
+        {{ v.klass }}: {{ v.before }} -> {{ v.after }} ({{ v.removed_count }} removed, {{ v.removed_pct }}%) - {{ v.reason }}
+          removed: {{ v.removed | join(', ') }}
+      {% endfor %}
+      {% if _acm_violations | selectattr('underlay') | list | length > 0 %}
+      An UNDERLAY object is among these. That is the management plane: if this
+      were applied and the extraction was wrong, the switch would be reachable
+      only by console. Check the running config against the extraction rules in
+      filter_plugins/ios_underlay.py before overriding.
+      {% else %}
+      Check first that NetBox returned the data you expect -- in particular that
+      every fabric VRF still has its 'l3vni' custom field set, since a VRF
+      without one is treated as not part of the fabric and silently omitted.
+      {% endif %}
+      If this removal is intended (e.g. a first cutover from a legacy config),
+      re-run with:  -e acm_safety_force=true
+  when:
+    - acm_safety_enforce | default(true) | bool
+    - not (acm_safety_force | default(false) | bool)
+    - _acm_violations | length > 0

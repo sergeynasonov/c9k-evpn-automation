@@ -1,0 +1,6 @@
+# Keep the readiness-results/ directory tracked in git, but never commit
+# anything written into it. The underlay_readiness role drops one
+# <hostname>-readiness.cfg per unready switch here; those are runtime
+# artifacts, not source, and they describe live device state.
+*
+!.gitignore

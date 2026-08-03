@@ -1,0 +1,32 @@
+---
+- name: Gather Data and Build Peering Matrix
+  ansible.builtin.import_tasks: 01_gather_data.yml
+
+# Same pre-flight as the deploy path, reporting instead of failing -- for the
+# same reason as the blast-radius guard below.
+- name: Verify Underlay Readiness (report only)
+  ansible.builtin.import_role:
+    name: underlay_readiness
+    tasks_from: assert_only.yml
+  vars:
+    readiness_enforce: false
+  when: evpn_preflight_readiness | bool
+
+- name: Render Local Configurations
+  ansible.builtin.import_tasks: 02_render_configs.yml
+
+# Same guard as the deploy path, but reporting instead of failing: a generate
+# run exists so the operator can inspect the candidate config, and aborting
+# here would withhold exactly the output they need in order to judge whether
+# the removals are legitimate.
+- name: Verify Candidate Configuration Blast Radius (report only)
+  ansible.builtin.import_tasks: 03_safety_check.yml
+  vars:
+    acm_safety_enforce: false
+
+# No pre-deploy summary here. This playbook's OUTPUT is the rendered candidate
+# in switch-configuration/, which the operator inspects and diffs directly -- a
+# console summary would duplicate the artifact, less readably.
+
+- name: Redact Passwords Locally
+  ansible.builtin.import_tasks: 05_redact_local.yml

@@ -1,0 +1,172 @@
+---
+# Site-specific values -- ASNs, addresses, NTP/SNMP/VTP identity -- are NOT here.
+# They live in group_vars/all/fabric.yml, which is gitignored, with a documented
+# template in fabric.yml.example. A default pointing at somebody else's network
+# is worse than no default, so the role asserts they are set instead.
+#
+
+
+# Underlay extraction (see filter_plugins/ios_underlay.py).
+# Interfaces common_base.j2 renders itself, so extraction must skip them or they
+# would appear twice. nve1 is excluded in code (it is fully generated).
+#
+# Everything NOT listed here is preserved from the device, including switchports
+# -- access ports, trunks and port-channel members. Extraction used to require an
+# interface to carry an IP address, which silently dropped every switchport; on a
+# border that included the handoff trunk carrying the underlay BGP session, so
+# 'acm replace' would have reset the path the automation arrives on.
+underlay_excluded_interfaces:
+  - Vlan1
+  - GigabitEthernet0/0
+
+
+# EVPN peers are addressed from each device's NetBox primary IP, so that a peer
+# outside the current play still gets a correct address. That assumes the
+# primary IP is the VTEP loopback; this asserts it on every host visited. Set
+# false only if this fabric deliberately peers on some other address.
+fabric_verify_peer_addressing: true
+
+# Peer-group name used for the EVPN overlay sessions. Named here so underlay
+# BGP extraction can tell overlay lines (regenerated) from underlay ones
+# (preserved verbatim).
+evpn_peer_group_name: "EVPN-PEERS"
+
+# EVPN Overlay Base Values
+#
+# L2VNI is DERIVED: evpn_l2vni_base + <vlan-id>, giving 10001..14094 across the
+# full 1..4094 VLAN space. Safe because VLAN IDs are unique fabric-wide, so a
+# function of the VLAN ID is unique too. A single VLAN can opt out by setting
+# an 'l2vni' custom field on the VLAN in NetBox (brownfield escape hatch).
+#
+# L3VNI is EXPLICIT: an 'l3vni' integer custom field on the VRF in NetBox.
+# It is unique per VRF, must match on every VTEP carrying that VRF, and drives
+# the RD, the route-targets, AND the VRF's multicast index (see
+# evpn_l3vni_base). Allocate from 20001..20254 -- clear of the derived L2 range
+# above, and bounded so the multicast index fits an octet. The filter plugin
+# fails the render on any overlap, out-of-range value, or duplicate.
+#
+# Setting l3vni is also what ENROLS a VRF in this fabric. NetBox holds VRFs
+# that have nothing to do with the campus EVPN (WAN, out-of-band, other
+# platforms); those simply leave l3vni empty and are ignored. A VRF is then
+# only provisioned on a given switch if at least one of its VLANs is in scope
+# for that switch's site / site group.
+evpn_l2vni_base: 10000
+
+# A VRF's multicast index is derived as (l3vni - evpn_l3vni_base) and selects
+# its /16 in the carve: 239.<index>.0.0/16. Deriving it avoids a second field
+# that would have to be kept in step with the L3VNI, and makes one number
+# identify a VRF everywhere -- l3vni 20003 gives RD/RT ":20003" and multicast
+# block 239.3.0.0/16.
+#
+# This is what narrows the usable L3VNI range to 20001..20254 (see below): the
+# index must fit in an octet.
+evpn_l3vni_base: 20000
+
+# There is deliberately no per-border underlay-peer variable here. The border
+# underlay BGP neighbours are read from each device's own running config by
+# filter_plugins/ios_underlay.py, which splits the hybrid 'router bgp' stanza by
+# ASN: anything in the fabric ASN is ours to render, anything else is the
+# device's to preserve. Naming those peers in this file would mean re-declaring,
+# per border, something the switch already states correctly.
+
+# The platform baseline -- local admin user, AAA, NTP, VTY hardening, clock,
+# VTP, spanning-tree, errdisable, UDLD, CoPP, and the routing/multicast globals
+# -- moved to roles/underlay_readiness along with its variables (vty_line_max,
+# ntp_server_*, local_admin_*). It is applied once at onboarding with
+# 'ios_config' instead of being rendered on every overlay change.
+#
+# This role no longer renders any of it. Running switches keep it: it stops
+# being template-owned, so candidate_config.j2 preserves it from the device.
+
+# SNMPv3 now belongs to roles/underlay_readiness -- credentials, ACL and the
+# configuration itself. IOS-XE hides 'snmp-server user' from the running config,
+# so a full-replace candidate could never converge on it (it re-appeared in
+# every deploy diff), and rendering it put the auth and priv passwords in
+# plaintext into every candidate file on disk. The readiness role checks it with
+# 'show snmp user' / 'show snmp group' and applies it in merge mode instead.
+#
+# Existing switches keep their SNMP config regardless: it is no longer template-
+# owned, so the candidate preserves whatever the device already has.
+
+
+# Run the underlay_readiness assertions before rendering. Set false only to push
+# overlay config to a switch whose underlay is knowingly non-compliant.
+evpn_preflight_readiness: true
+
+# Write startup-config after the commit is confirmed. 'acm confirm-commit' only
+# cancels the rollback timer -- it makes the change permanent in the RUNNING
+# config and does not persist it, so without this a power event reverts the
+# switch's entire fabric configuration.
+#
+# Set false only to deliberately leave a change unsaved, e.g. when you want a
+# power cycle to be the undo button for something you are still evaluating.
+acm_save_startup: true
+
+# The multicast carve lives in NetBox IPAM, not here: these name the prefix
+# ROLES that define it, so re-carving is a data change rather than a code edit.
+#
+# A resolved L2VNI replication group must fall INSIDE a prefix carrying an
+# allowed role, and OUTSIDE every prefix carrying a reserved one. All of these
+# ranges share the one underlay irrespective of VRF, which is why the reserved
+# check ignores VRF entirely.
+#
+# Containment is skipped when NetBox holds no prefix with an allowed role, so a
+# fabric that has not adopted the carve yet still renders; the built-in
+# administratively-scoped (239.0.0.0/8) check always applies.
+mcast_allowed_prefix_roles:
+  - l2vni_replication
+mcast_reserved_prefix_roles:
+  - default_mdt
+  - data_mdt
+
+# TRM object tags in NetBox. All three mark IPAM objects inside the tenant VRF:
+#   trm_anycast_rp      one IPAddress per VRF -- the shared RP for fabric-local ASM
+#   trm_external_rp     one or more IPAddresses -- an RP outside the fabric
+#   trm_register_source a Prefix (the pool, external-RP VRFs only) and the
+#                       IPAddresses allocated from it by trm_allocate.yml,
+#                       each additionally tagged with its device's hostname
+trm_tags:
+  - trm_anycast_rp
+  - trm_external_rp
+  - trm_register_source
+
+# Stanzas to leave OUT of the candidate config entirely.
+#
+# 'acm replace' preserves the Cisco licensing trustpoint and its certificate
+# chain on its own, whether or not the candidate mentions them, so carrying a
+# multi-hundred-line CA certificate through every candidate only hurts
+# readability. Anything listed here is neither rendered nor preserved -- add to
+# it only for config ACM is known to protect by itself.
+candidate_omit_regex: 'crypto pki (trustpoint|certificate chain) '
+
+# Lines whose ownership is decided by a stable PREFIX rather than the whole
+# line. A type-9 secret is salted, so the same password hashes differently on
+# every generation: the device's 'username admin ... secret 9 $9$A...' and our
+# rendered '$9$B...' are one account with different ciphertext, and an exact
+# match would preserve the device's copy alongside ours.
+#
+# Note this makes the automation own EVERY account matching the prefix it
+# renders -- 'username admin ...' here. Other local accounts on the device are
+# still preserved, so leftover ones (a throwaway used to generate a hash, say)
+# persist until removed by hand.
+#
+# CURRENTLY INERT, deliberately kept. The prefix list is built from lines in the
+# render, and since the platform baseline moved to underlay_readiness this role
+# renders no 'username' line at all -- so the list comes out empty and the
+# device's own account is preserved untouched. It re-arms by itself if a
+# username is ever rendered here again. Consequence worth knowing: rotating the
+# local admin password is now a readiness.yml run, not a deploy.
+candidate_prefix_managed:
+  - 'username \S+ '
+
+# ACM Configuration
+commit_timeout: 120
+
+# ACM deploy safety guard (see tasks/03_safety_check.yml).
+# 'acm replace' removes anything absent from the candidate config, so a bad
+# NetBox response can silently strip a switch. Refuse to deploy when any
+# tracked object class (VRFs, SVIs, EVPN instances, VNIs) would lose more than
+# this share of its members. Override for a legitimate large removal with:
+#   ansible-playbook deploy_evpn.yml -e acm_safety_force=true
+acm_safety_max_removal_pct: 50
+acm_safety_force: false

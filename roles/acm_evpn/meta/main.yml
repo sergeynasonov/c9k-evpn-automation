@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+---
+galaxy_info:
+  author: Sergey Nasonov snasonov@cisco.com
+  description: >-
+    EVPN overlay provisioning for Cisco Catalyst 9000 switches, applied as a
+    single validated configuration replacement through Atomic Configuration
+    Manager (IOS-XE 17.18.3+), with NetBox as the source of truth.
+  company: Cisco Systems
+  license: GPL-3.0-or-later
+
+  # ACM is the whole point of this role and needs IOS-XE 17.18.3+, so there is
+  # no useful older floor. This is the version the project is developed and
+  # tested against; see requirements.txt.
+  min_ansible_version: "2.21"
+
+  galaxy_tags:
+    - networking
+    - cisco
+    - ios
+    - iosxe
+    - catalyst
+    - evpn
+    - vxlan
+    - netbox
+
+# roles/underlay_readiness is invoked from tasks/main.yml as a pre-flight, but
+# is deliberately NOT declared here: a dependency runs unconditionally, ahead of
+# this role's own tasks, and the pre-flight is conditional on
+# evpn_preflight_readiness.
+dependencies: []

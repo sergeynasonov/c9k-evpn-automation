@@ -1,0 +1,32 @@
+---
+# Ansible collections. Install with:
+#     ansible-galaxy collection install -r requirements.yml
+#
+# Versions are the ones this project is developed and tested against. The
+# ranges allow patch and minor updates but pin the major, because a major bump
+# in any of these has broken behaviour here before.
+
+collections:
+  # Device access: ios_command / ios_config, and the network_cli connection.
+  - name: cisco.ios
+    version: ">=11.4.2,<12.0.0"
+
+  # net_get, used to download ACM net-diffs off the switch after a commit.
+  - name: ansible.netcommon
+    version: ">=8.5.3,<9.0.0"
+
+  # ipaddr filters. Used heavily in the templates for netmask, wildcard and
+  # first-usable-address arithmetic.
+  - name: ansible.utils
+    version: ">=6.0.3,<7.0.0"
+
+  # NetBox dynamic inventory, plus the IP/interface/tag modules that
+  # trm_allocate.yml uses to allocate PIM register sources.
+  #
+  # NOTE: 3.23.0 cannot create an IP with 'state: new' under --check --
+  # netbox_ipam.py calls .serialize() on a plain dict in check mode. The
+  # allocator works around it by skipping the write and reporting the plan
+  # instead. If a later release fixes that, roles/acm_evpn/tasks/trm_allocate.yml
+  # can drop its 'when: not ansible_check_mode' guards.
+  - name: netbox.netbox
+    version: ">=3.23.0,<4.0.0"

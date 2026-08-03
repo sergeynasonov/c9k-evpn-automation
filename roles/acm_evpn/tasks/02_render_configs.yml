@@ -1,0 +1,234 @@
+---
+# Build the candidate config: the fabric block we own, plus everything on the
+# device we do not.
+#
+# Ownership is DERIVED, not declared. The managed set is the top-level stanza
+# headers our own render emits (see candidate_config.j2), so it cannot drift
+# from what we actually push and there is no allowlist to maintain. The former
+# model did the opposite -- extract what to keep, delete the rest -- and that
+# allowlist repeatedly fell behind reality: it silently dropped switchports,
+# L3 port-channel members, SVIs in non-fabric VRFs, and every IOS-XE platform
+# default the templates did not model.
+#
+# Two hand-written rules sit on top:
+#   * the fabric NAMESPACES below, so an object NetBox has dropped is pruned
+#     rather than preserved forever;
+#   * candidate_omit_regex / candidate_prefix_managed in defaults.
+
+- name: Remove previously rendered candidate configs
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/switch-configuration"
+    state: absent
+  run_once: true
+  delegate_to: localhost
+
+- name: Recreate clean candidate-config directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/switch-configuration"
+    state: directory
+    mode: '0755'
+  run_once: true
+  delegate_to: localhost
+
+- name: Ensure ACM results directory exists (tracked in git, kept empty)
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/commit-results"
+    state: directory
+    mode: '0755'
+  run_once: true
+  delegate_to: localhost
+
+# Clear the previous run's results WITHOUT deleting the directory itself, so the
+# tracked-but-empty commit-results/ folder (and its .gitignore keeper) survives.
+- name: Find stale ACM result files (excluding the directory keeper)
+  ansible.builtin.find:
+    paths: "{{ playbook_dir }}/commit-results"
+    excludes:
+      - ".gitignore"
+  register: _stale_results
+  run_once: true
+  delegate_to: localhost
+
+- name: Remove stale ACM result files
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _stale_results.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  run_once: true
+  delegate_to: localhost
+
+- name: Render the fabric block (the config this role owns)
+  ansible.builtin.set_fact:
+    fabric_config: >-
+      {{ lookup('template',
+                'border_config.j2' if inventory_hostname in groups.get('device_roles_fabric_border', [])
+                else ('spine_config.j2' if inventory_hostname in groups.get('tags_fabric_spine', [])
+                      else 'leaf_config.j2')) }}
+
+# Which fabric objects exist ON THIS DEVICE? Read from the device's own config,
+# so it includes objects NetBox has since dropped -- exactly what has to be
+# pruned rather than preserved.
+- name: Inventory the fabric objects on the device and in the render
+  ansible.builtin.set_fact:
+    _dev_evi_vlans: "{{ _run | regex_findall('(?m)^l2vpn evpn instance (\\d+)') }}"
+    _dev_cfg_vlans: "{{ _run | regex_findall('(?m)^vlan configuration (\\d+)') }}"
+    _dev_fabric_vrfs: "{{ _run | regex_findall('(?m)^\\s+member vni \\d+ vrf (\\S+)') }}"
+    _new_evi_vlans: "{{ fabric_config | regex_findall('(?m)^l2vpn evpn instance (\\d+)') }}"
+    _new_cfg_vlans: "{{ fabric_config | regex_findall('(?m)^vlan configuration (\\d+)') }}"
+    _new_fabric_vrfs: "{{ fabric_config | regex_findall('(?m)^\\s+member vni \\d+ vrf (\\S+)') }}"
+  vars:
+    # ONLY genuine task-local values belong here. A 'vars:' entry is scoped to
+    # this task, so anything a later task reads must be under set_fact -- which
+    # is exactly how merging these two inventories first went wrong: the _new_*
+    # keys landed under vars: and were Undefined by the next task.
+    _run: "{{ current_run_config.stdout[0] }}"
+
+# A tenant SVI cannot be classified from its header -- 'interface Vlan500' looks
+# identical whether it is an orphaned CORP SVI or an underlay handoff. The
+# difference is 'vrf forwarding <a fabric VRF>' in the body, so walk the stanzas
+# once to find them.
+
+- name: Find tenant SVIs belonging to fabric VRFs
+  ansible.builtin.set_fact:
+    _dev_fabric_svis: >-
+      {%- set fabric = (_dev_fabric_vrfs + _new_fabric_vrfs) | unique -%}
+      {%- set found = [] -%}
+      {%- set ns = namespace(cur='') -%}
+      {%- for line in current_run_config.stdout[0].splitlines() -%}
+      {%-   if line.startswith('interface Vlan') -%}
+      {%-     set ns.cur = line[14:] | trim -%}
+      {%-   elif not line.startswith(' ') -%}
+      {%-     set ns.cur = '' -%}
+      {%-   elif ns.cur and line.strip().startswith('vrf forwarding ') -%}
+      {%-     if line.strip()[15:] | trim in fabric -%}
+      {%-       set _ = found.append(ns.cur) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ found | unique }}
+
+# Stale = on the device, inside a fabric namespace, absent from the render.
+# Without this, preserve-by-default would become preserve-forever.
+# TRM pruning. Under preserve-by-default, anything this role stops rendering is
+# carried forward from the device -- so a VRF that is un-marked for multicast
+# would keep its RP loopback, 'ip multicast-routing vrf X' and every 'ip pim
+# vrf X' line forever, and disabling TRM would be a one-way door.
+#
+# Detection is by consequence, not by comparing NetBox state: a VRF has TRM on
+# the DEVICE if the device carries 'ip multicast-routing vrf <name>', and it
+# keeps it if the RENDER carries the same line. Everything on the device and not
+# in the render is stale. That works whether TRM was switched off, or the whole
+# VRF was removed from the fabric.
+- name: Find TRM configuration to prune from VRFs no longer multicast-enabled
+  ansible.builtin.set_fact:
+    trm_stale_vrfs: "{{ _stale | from_json }}"
+    stale_prefixes: "{{ _prefixes | from_json }}"
+    trm_stale_loopbacks: "{{ _loopbacks | from_json }}"
+  vars:
+    # '\S+' stops at the trailing space IOS-XE renders on this line.
+    _dev: "{{ current_run_config.stdout[0] | regex_findall('(?m)^ip multicast-routing vrf (\\S+)') }}"
+    _new: "{{ fabric_config | regex_findall('(?m)^ip multicast-routing vrf (\\S+)') }}"
+    _stale: "{{ (_dev | unique | difference(_new)) | to_json }}"
+    _prefixes: >-
+      {%- set out = [] -%}
+      {%- for vrf in _dev | unique | difference(_new) -%}
+      {%-   set _ = out.append('ip multicast-routing vrf ' ~ vrf) -%}
+      {%-   set _ = out.append('ip pim vrf ' ~ vrf ~ ' ') -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    # The RP loopback carries no marker of its own, so it is found by walking
+    # the stanza for 'vrf forwarding <stale vrf>'. Restricted to Loopback
+    # numbers in the L3VNI range, so an operator's own loopback in the same VRF
+    # is never touched -- this role only ever creates Loopback<l3vni>.
+    _loopbacks: >-
+      {%- set stale = _dev | unique | difference(_new) -%}
+      {%- set out = [] -%}
+      {%- set ns = namespace(cur='', num=0) -%}
+      {%- for line in current_run_config.stdout[0].splitlines() -%}
+      {%-   if line.startswith('interface Loopback') -%}
+      {%-     set ns.cur = line | trim -%}
+      {%-     set ns.num = (line | trim)[18:] | int(0) -%}
+      {%-   elif not line.startswith(' ') -%}
+      {%-     set ns.cur = '' -%}
+      {%-   elif ns.cur and line.strip().startswith('vrf forwarding ') -%}
+      {%-     if line.strip()[15:] in stale
+                and ns.num > (evpn_l3vni_base | int)
+                and ns.num <= (evpn_l3vni_base | int) + 254 -%}
+      {%-       set _ = out.append(ns.cur) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | unique | to_json }}
+
+- name: Work out what to prune and what to add to the handoff trunk
+  ansible.builtin.set_fact:
+    stale_headers: >-
+      {%- set out = [] -%}
+      {%- for vid in (_dev_evi_vlans | difference(_new_evi_vlans)) -%}
+      {%-   set _ = out.append('l2vpn evpn instance ' ~ vid ~ ' vlan-based') -%}
+      {%- endfor -%}
+      {%- for vid in (_dev_cfg_vlans | difference(_new_cfg_vlans)) -%}
+      {%-   set _ = out.append('vlan configuration ' ~ vid) -%}
+      {%- endfor -%}
+      {%- set gone_vlans = (_dev_evi_vlans + _dev_cfg_vlans + _dev_fabric_svis) | unique
+                           | difference(_new_evi_vlans + _new_cfg_vlans) -%}
+      {%- for vid in gone_vlans if vid in _dev_fabric_svis -%}
+      {%-   set _ = out.append('interface Vlan' ~ vid) -%}
+      {%-   set _ = out.append('vlan ' ~ vid) -%}
+      {%- endfor -%}
+      {%- for vrf in (_dev_fabric_vrfs | difference(_new_fabric_vrfs)) -%}
+      {%-   set _ = out.append('vrf definition ' ~ vrf) -%}
+      {%- endfor -%}
+      {#- RP loopbacks of VRFs that lost TRM; see the task above. -#}
+      {%- for lo in trm_stale_loopbacks | default([]) -%}
+      {%-   set _ = out.append(lo) -%}
+      {%- endfor -%}
+      {{ out | unique }}
+
+# The handoff trunk keeps its own allowed-VLAN list; we only add what this
+# border must carry. candidate_config.j2 emits these AFTER the preserved
+# interface, so the 'add' is not overwritten by the base list before it.
+    trunk_vlan_additions: >-
+      {%- set handoff = [] -%}
+      {%- for _vrf, vrf_data in netbox_vlan_groups.vrfs.items() -%}
+      {%-   for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags -%}
+      {%-     set _ = handoff.append(vid | int) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- set underlay_svis = (current_run_config.stdout[0]
+            | regex_findall('(?m)^interface Vlan(\\d+)'))
+            | difference(_dev_fabric_svis) | map('int') | list -%}
+      {%- set out = {} -%}
+      {%- set ns = namespace(cur='') -%}
+      {%- for line in current_run_config.stdout[0].splitlines() -%}
+      {%-   if line.startswith('interface ') -%}
+      {%-     set ns.cur = line[10:] | trim -%}
+      {%-   elif not line.startswith(' ') -%}
+      {%-     set ns.cur = '' -%}
+      {%-   elif ns.cur and line.strip().startswith('switchport trunk allowed vlan ') -%}
+      {%-     set spec = line.strip().split('vlan ')[-1] | replace('add ', '') -%}
+      {%-     set on_trunk = spec.split(',') | map('trim') | select('match', '^\\d+$')
+                             | map('int') | list -%}
+      {%-     if on_trunk | intersect(underlay_svis) | length > 0 and handoff | length > 0 -%}
+      {%-       set missing = handoff | difference(on_trunk) -%}
+      {%-       if missing | length > 0 -%}
+      {%-         set _ = out.update({ns.cur: missing}) -%}
+      {%-       endif -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+# Stale objects are reported per host by 03b_predeploy_summary.yml.
+
+- name: Render the full IOS-XE candidate configuration
+  ansible.builtin.template:
+    src: candidate_config.j2
+    dest: "{{ playbook_dir }}/switch-configuration/{{ inventory_hostname }}-candidate-config.cfg"
+    newline_sequence: '\n'  # Ensures correct newlines for VS Code review
+    # 0600, not the 0644 used elsewhere: until 05_redact_local.yml runs, this
+    # file is a complete copy of a live switch's configuration, secrets included.
+    mode: '0600'
+  delegate_to: localhost

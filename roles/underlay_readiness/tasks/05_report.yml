@@ -1,0 +1,167 @@
+---
+# Reporting, kept away from the per-host checks so the console shows a handful
+# of lines rather than one per host per check.
+#
+# Nothing here fails an individual host. Every switch is evaluated, every
+# remediation file is written, the summary is printed, and only THEN does the
+# play fail. Failing per-host would drop switches out of ansible_play_hosts and
+# the summary would silently under-report exactly the hosts you care about.
+
+- name: Readiness — ensure the results directory exists (tracked in git, kept empty)
+  ansible.builtin.file:
+    path: "{{ readiness_results_dir }}"
+    state: directory
+    mode: '0755'
+  run_once: true
+  delegate_to: localhost
+
+# Per-host, NOT a wipe-then-write of the whole directory. Two reasons:
+#
+#  - A scoped run (-e deploy_target=access1-1) must not delete results for the
+#    switches it never looked at. Wiping made a narrow run destroy the record of
+#    a fabric-wide one.
+#  - The wipe was three run_once tasks, and run_once is NOT supported under the
+#    'free' strategy that ansible.cfg sets globally. The playbooks all override
+#    it with 'strategy: linear', but a role should not silently depend on that
+#    to avoid destroying data. Nothing destructive is run_once any more.
+- name: Readiness — write a remediation file for each unready switch
+  ansible.builtin.template:
+    src: readiness_remediation.j2
+    dest: "{{ readiness_results_dir }}/{{ inventory_hostname }}-readiness.cfg"
+    mode: '0644'
+  delegate_to: localhost
+  when:
+    - readiness_failures is defined
+    - readiness_failures | length > 0
+
+# A switch that has since been fixed loses its file, so the directory always
+# lists exactly what is still outstanding. An UNREACHABLE switch keeps whatever
+# it had: we did not evaluate it, so neither writing nor deleting would be
+# honest -- the CSV records it as unreachable instead.
+- name: Readiness — clear the remediation file for each switch now ready
+  ansible.builtin.file:
+    path: "{{ readiness_results_dir }}/{{ inventory_hostname }}-readiness.cfg"
+    state: absent
+  delegate_to: localhost
+  when:
+    - readiness_failures is defined
+    - readiness_failures | length == 0
+
+- name: Readiness — classify the fabric
+  ansible.builtin.set_fact:
+    readiness_ready: "{{ _ready | from_json }}"
+    readiness_unready: "{{ _unready | from_json }}"
+    readiness_unreachable: "{{ _unreachable | from_json }}"
+    readiness_oversized_area: "{{ _oversized | from_json }}"
+  vars:
+    # Explicit loops rather than select/extract chains: a READY switch has an
+    # EMPTY findings list, which is falsy, so any truthiness-based filter drops
+    # exactly the hosts that passed.
+    _ready: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts_all
+            if 'readiness_failures' in hostvars[h]
+               and hostvars[h].readiness_failures | length == 0 -%}
+      {%-   set _ = out.append(h) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    _unready: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts_all
+            if 'readiness_failures' in hostvars[h]
+               and hostvars[h].readiness_failures | length > 0 -%}
+      {%-   set _ = out.append(h) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    # A switch we could not reach is neither ready nor unready -- reporting it
+    # as either would be a lie. It gets its own line in the summary.
+    _unreachable: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts_all if 'readiness_failures' not in hostvars[h] -%}
+      {%-   set _ = out.append(h) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+    _oversized: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts_all
+            if (hostvars[h].readiness_ospf_area_routers | default(0) | int)
+               > (readiness_ospf_routers_warn | int) -%}
+      {%-   set _ = out.append(h) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  run_once: true
+  delegate_to: localhost
+
+# A remediation campaign across hundreds of switches is a spreadsheet problem:
+# who is done, who is left, what regressed since last week. The per-switch .cfg
+# files answer "what do I paste into this box"; this answers "where are we".
+- name: Readiness — write the fabric summary CSV
+  ansible.builtin.template:
+    src: readiness_summary_csv.j2
+    dest: "{{ readiness_results_dir }}/readiness-summary.csv"
+    mode: '0644'
+  run_once: true
+  delegate_to: localhost
+  # Not from the acm_evpn pre-flight. The CSV tracks a remediation campaign
+  # across the WHOLE fabric, so a three-host deploy writing it replaces a
+  # seven-row fabric-wide record with three rows -- the same mistake as a
+  # scoped run wiping the results directory. Per-switch remediation files are
+  # still written, because a blocked deploy should leave you something to act
+  # on.
+  when: readiness_write_csv | bool
+
+# 'msg' is a LIST of strings, not one multi-line string: the default callback
+# renders a multi-line string as a single JSON blob full of \n escapes, and
+# 'result_format = yaml' in ansible.cfg does not take effect (only the
+# ANSIBLE_CALLBACK_RESULT_FORMAT env var does). A list prints one line per
+# element regardless of callback format.
+- name: Readiness — fabric summary
+  ansible.builtin.debug:
+    msg: "{{ _lines | from_json }}"
+  vars:
+    _lines: >-
+      {%- set out = [] -%}
+      {%- set _ = out.append('Underlay readiness — ' ~ ansible_play_hosts_all | length
+                             ~ ' switch(es): ' ~ readiness_ready | length ~ ' ready, '
+                             ~ readiness_unready | length ~ ' NOT ready, '
+                             ~ readiness_unreachable | length ~ ' unreachable') -%}
+      {%- for h in readiness_unready -%}
+      {%-   set _ = out.append('  ' ~ '%-16s' | format(h)
+                               ~ hostvars[h].readiness_failures | length ~ ' finding(s)') -%}
+      {%-   for f in hostvars[h].readiness_failures -%}
+      {%-     set _ = out.append('      - ' ~ f.msg) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- if readiness_unready -%}
+      {%-   set _ = out.append('  remediation written to '
+                               ~ readiness_results_dir | basename ~ '/') -%}
+      {%- endif -%}
+      {%- for h in readiness_unreachable -%}
+      {%-   set _ = out.append('  ' ~ '%-16s' | format(h) ~ 'UNREACHABLE — not evaluated') -%}
+      {%- endfor -%}
+      {%- for h in readiness_oversized_area -%}
+      {%-   set _ = out.append('  WARNING ' ~ h ~ ' sees '
+                               ~ hostvars[h].readiness_ospf_area_routers
+                               ~ ' routers in OSPF area ' ~ readiness_ospf_area
+                               ~ '; the C9K supports at most ' ~ readiness_ospf_routers_max
+                               ~ ' in one area — plan additional areas') -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  run_once: true
+  delegate_to: localhost
+
+# One failure for the whole run, after everything has been reported and written.
+- name: Readiness — fail if any switch is not fit for fabric provisioning
+  ansible.builtin.fail:
+    msg: >-
+      {{ readiness_unready | length }} switch(es) are not ready for fabric
+      provisioning: {{ readiness_unready | join(', ') }}. Per-switch remediation
+      is in {{ readiness_results_dir | basename }}/. The underlay is hand-built
+      and this automation deliberately does not change it, so these must be
+      fixed on the devices; the expected configuration is in the Day 0 section
+      of the root README.
+  when:
+    - readiness_enforce | bool
+    - readiness_unready | length > 0
+  run_once: true
+  delegate_to: localhost

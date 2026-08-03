@@ -1,0 +1,116 @@
+---
+- name: 12a. Validate Candidate Configuration via ACM
+  cisco.ios.ios_command:
+    commands: "acm replace bootflash:{{ inventory_hostname }}-candidate-config.cfg validate"
+  register: acm_validate_out
+  vars:
+    ansible_command_timeout: 180
+
+- name: 12b. Ensure local commit-results directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/commit-results"
+    state: directory
+    mode: '0755'
+  run_once: true
+  delegate_to: localhost
+
+# A switch already in the desired state is the GOAL, not an error.
+#
+# ACM reports 'Config diff empty. No Diff to Validate/Apply' and does NOT report
+# 'Status : Success', so a plain not-Success test reads a perfectly converged
+# switch as a validation failure. That is what the whole churn hunt was working
+# towards: the candidate is now byte-identical to the running config, and the
+# first fully converged deploy failed the pipeline rather than passing it.
+- name: 12c. Determine whether ACM found anything to apply
+  ansible.builtin.set_fact:
+    acm_no_diff: "{{ 'No Diff to Validate/Apply' in acm_validate_out.stdout[0] }}"
+    acm_validated: "{{ 'Status : Success' in acm_validate_out.stdout[0] }}"
+
+- name: 12d. Report a switch that is already in the desired state
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: candidate is identical to the running
+      configuration -- nothing to apply.
+  when: acm_no_diff | bool
+
+- name: 12e. Save ACM Validation Failure Log
+  ansible.builtin.copy:
+    content: "{{ acm_validate_out.stdout[0] }}"
+    dest: "{{ playbook_dir }}/commit-results/{{ inventory_hostname }}-failure.cfg"
+    # Quotes rejected device config back at you, so treat it as device data.
+    mode: '0600'
+  delegate_to: localhost
+  when:
+    - not (acm_no_diff | bool)
+    - not (acm_validated | bool)
+
+- name: 12f. Verify ACM Validation Success
+  ansible.builtin.fail:
+    msg: "ACM Validation Failed! Details saved to commit-results/{{ inventory_hostname }}-failure.cfg"
+  when:
+    - not (acm_no_diff | bool)
+    - not (acm_validated | bool)
+
+- name: 12g. Apply Configuration with Rollback Timeout
+  cisco.ios.ios_command:
+    commands: "acm replace bootflash:{{ inventory_hostname }}-candidate-config.cfg timeout {{ commit_timeout }}"
+  register: acm_apply_out
+  vars:
+    ansible_command_timeout: 180
+  when: not (acm_no_diff | bool)
+
+- name: 12h. Verify Apply Status and Extract Diff Filename
+  ansible.builtin.set_fact:
+    acm_diff_file: >-
+      {%- set ns = namespace(file='') -%}
+      {%- for line in acm_apply_out.stdout[0].splitlines() -%}
+      {%-   if 'Config Net-Diff:' in line -%}
+      {%-     set ns.file = line.split('Config Net-Diff:')[1] | trim -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ ns.file }}
+  when: not (acm_no_diff | bool)
+  failed_when:
+    - not (acm_no_diff | bool)
+    - "'Config Replace Status: Success' not in acm_apply_out.stdout[0]"
+
+- name: 12i. Wait 5 seconds before confirming commit
+  ansible.builtin.wait_for:
+    timeout: 5
+  delegate_to: localhost
+  when: not (acm_no_diff | bool)
+
+- name: 12j. Confirm ACM Commit
+  cisco.ios.ios_command:
+    commands: "acm confirm-commit"
+  vars:
+    ansible_command_timeout: 60
+  when: not (acm_no_diff | bool)
+
+# 'acm confirm-commit' cancels the rollback timer and makes the change permanent
+# in the RUNNING config only -- it does not write startup-config. Without this
+# step every switch in the fabric reverts its entire EVPN configuration at the
+# next power event, and nothing in the pipeline would have reported a problem.
+#
+# Deliberately AFTER confirm-commit, never before: the whole point of the
+# rollback timer is that a change which breaks the management path is undone
+# when the confirm never arrives. Saving first would make such a change survive
+# the reboot that is supposed to recover from it.
+- name: 12k. Save the confirmed configuration to startup-config
+  cisco.ios.ios_command:
+    commands: "acm save startup-config"
+  register: acm_save_out
+  vars:
+    ansible_command_timeout: 120
+  when:
+    - not (acm_no_diff | bool)
+    - acm_save_startup | bool
+
+- name: 12l. Download Net-Diff File to Ansible Control Node
+  ansible.netcommon.net_get:
+    src: "{{ acm_diff_file }}"
+    dest: "{{ playbook_dir }}/commit-results/{{ inventory_hostname }}-success-diff.cfg"
+    protocol: scp
+  when:
+    - not (acm_no_diff | bool)
+    - acm_diff_file is defined and acm_diff_file | length > 0
