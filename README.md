@@ -1,5 +1,7 @@
 # c9k-evpn-automation
 
+[![CI](https://github.com/sergeynasonov/c9k-evpn-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/sergeynasonov/c9k-evpn-automation/actions/workflows/ci.yml)
+
 Ansible automation for a campus EVPN/VXLAN fabric on Cisco Catalyst 9000 running
 IOS-XE, with **NetBox** as the source of truth and secrets supplied from the
 environment at run time.
@@ -117,10 +119,14 @@ arrives on. Modelling it would put that path at the mercy of a NetBox edit.
    receive a default route into the global routing table — this is what gives
    the node reachability to the Ansible control node.
 4. Configure the underlay routed interfaces with IP addressing.
-5. Enable OSPF and originate the OSPF default route.
+5. Enable OSPF on `Loopback0` and the underlay routed interfaces.
+6. Originate the default route into OSPF (`default-information originate`), so
+   the rest of the fabric learns its way out through this node.
 
-**On a leaf or spine:** steps 1, 4 and 5. The handoff SVI, trunk and external
-BGP peering (2 and 3) are border-only.
+**On a leaf or spine:** steps 1, 4 and 5. The handoff SVI, trunk, external BGP
+peering and default-route origination (2, 3 and 6) are border-only — the border
+is what connects the fabric to the outside world, which is why it is the node
+that originates the default.
 
 **On a spine, additionally:** the anycast RP loopback carrying
 `underlay_rp_address`, and the **MSDP mesh to every other spine**, sourced from
