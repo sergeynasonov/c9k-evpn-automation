@@ -1,0 +1,115 @@
+---
+# Every gate a contributor is asked to run in CONTRIBUTING.md, run on every push
+# and pull request.
+#
+# NO SECRETS. Nothing here reaches NetBox or a switch: the tests are stdlib
+# unittest against plain Python, and syntax/lint checks read files. That is
+# deliberate and worth preserving -- it means a pull request from a fork can be
+# checked without handing an untrusted branch anything at all. If a step ever
+# seems to need a credential, it belongs in the offline harness described in
+# CONTRIBUTING.md, not here.
+#
+# What this canNOT catch, so nobody mistakes green for safe: anything that needs
+# a real switch. Second-deploy idempotency, ACM behaviour, platform defaults --
+# all invisible here. See "Things that have caused real outages" in
+# CONTRIBUTING.md.
+
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only. This workflow publishes nothing and needs to write nothing.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is ansible-core 2.21's floor; 3.14 is what the project is
+        # developed on. Testing both ends catches "works here, breaks on the
+        # version the docs claim to support".
+        python-version: ["3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # Collections are the slow part of the install, and requirements.yml
+      # changes rarely. Keyed on the file's hash, so a version bump busts it.
+      - name: Cache Ansible collections
+        uses: actions/cache@v4
+        with:
+          path: ~/.ansible/collections
+          key: collections-${{ matrix.python-version }}-${{ hashFiles('requirements.yml') }}
+
+      - name: Install Ansible collections
+        run: ansible-galaxy collection install -r requirements.yml
+
+      - name: Unit tests — acm_evpn
+        run: python -m unittest discover -s roles/acm_evpn/tests/unit -v
+
+      - name: Unit tests — underlay_readiness
+        run: python -m unittest discover -s roles/underlay_readiness/tests/unit -v
+
+      # 'ansible-playbook --syntax-check' does NOT validate the inventory: a
+      # netbox_inv.yml corrupted into invalid YAML produces a WARNING and an
+      # exit code of 0, so the step below would pass a file that cannot load.
+      # Verified by breaking it deliberately. Parsing it here closes that gap
+      # without needing a NetBox token.
+      - name: Inventory file parses
+        run: |
+          python -c "
+          import yaml, sys
+          d = yaml.safe_load(open('netbox_inv.yml'))
+          assert isinstance(d, dict), 'netbox_inv.yml is not a mapping'
+          assert d.get('plugin'), 'netbox_inv.yml declares no inventory plugin'
+          print('netbox_inv.yml parses, plugin:', d['plugin'])
+          "
+
+      - name: Playbook syntax
+        run: |
+          for pb in readiness.yml generate_evpn.yml deploy_evpn.yml trm_allocate.yml; do
+            echo "--- $pb"
+            ansible-playbook --syntax-check "$pb"
+          done
+
+      # ansible-lint reads Jinja embedded in YAML but never opens a .j2 file,
+      # which is where most of this project's logic lives. Plain jinja2 parsing
+      # is enough to catch a syntax error; filters resolve at render time, so no
+      # Ansible runtime is needed.
+      - name: Jinja templates parse
+        run: |
+          python -c "
+          import pathlib, sys, jinja2
+          env = jinja2.Environment()
+          bad = 0
+          tpls = sorted(pathlib.Path('roles').rglob('*.j2'))
+          for t in tpls:
+              try:
+                  env.parse(t.read_text())
+                  print('ok  ', t)
+              except jinja2.TemplateSyntaxError as e:
+                  print('FAIL', t, 'line', e.lineno, e.message); bad += 1
+          print(len(tpls), 'templates parsed,', bad, 'error(s)')
+          sys.exit(1 if bad else 0)
+          "
+
+      - name: Lint
+        run: ansible-lint

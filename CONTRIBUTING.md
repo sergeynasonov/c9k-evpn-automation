@@ -11,7 +11,14 @@ project. New source files should carry the SPDX header and a copyright line.
 
 ## Run the tests
 
-Stdlib `unittest` only — no pytest, no live NetBox, no devices:
+Install the dev dependencies once — `requirements.txt` deliberately omits the
+linter so an operator running playbooks does not install one:
+
+```bash
+venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+```
+
+Then the tests. Stdlib `unittest` only — no pytest, no live NetBox, no devices:
 
 ```bash
 venv/bin/python -m unittest discover -s roles/acm_evpn/tests/unit
@@ -40,6 +47,13 @@ venv/bin/ansible-lint
 `.ansible-lint` carries exactly one `skip_list` entry and the tree carries one
 inline `# noqa`, each with its reasoning written next to it. If you need
 another, write down why rather than adding it silently.
+
+All of the above runs in CI on every push and pull request
+(`.github/workflows/ci.yml`), on Python 3.12 and 3.14 — the floor ansible-core
+requires and the version this is developed on. **CI needs no secrets**, because
+nothing it runs touches NetBox or a switch; keep it that way. A green tick means
+nothing broke that can be checked without hardware — it says nothing about the
+device-level failures listed further down.
 
 Note ansible-lint only sees Jinja **embedded in YAML** — it does not open
 `.j2` files at all, which is where most of the logic actually lives. Those are

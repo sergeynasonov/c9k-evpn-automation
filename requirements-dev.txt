@@ -1,0 +1,14 @@
+# Development dependencies -- linting and testing only. Deliberately separate
+# from requirements.txt so an operator who just wants to run the playbooks does
+# not install a linter.
+#
+#     ./venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+#
+# The unit tests themselves need nothing beyond requirements.txt: they are
+# stdlib unittest against plain Python, with no pytest and no live services.
+
+# Pinned to a major version. ansible-lint adds rules in minor releases, so an
+# unpinned install can turn a green tree red without a line of this project
+# changing -- which is a CI failure that teaches you nothing. Bump it
+# deliberately, read the new findings, then commit the result.
+ansible-lint>=26.6.0,<27.0.0
