@@ -169,6 +169,11 @@ direnv allow
 ```
 *You should immediately see the secrets load and your `(venv)` activate in your shell prompt.*
 
+> **If `cd` into the project hangs**, with direnv reporting that it is "taking a
+> while to execute", your Infisical session has expired. `infisical export` is
+> waiting on an interactive login that direnv cannot answer. Press Ctrl-C, run
+> `infisical login`, then `direnv reload`.
+
 ---
 
 ## Step 5: Ansible Configuration Reference
