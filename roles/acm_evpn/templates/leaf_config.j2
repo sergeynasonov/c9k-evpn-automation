@@ -24,10 +24,18 @@ l2vpn evpn instance {{ vid }} vlan-based
  replication-type {{ vlan.replication_mode }}
 {% if 'dag_routed' in vlan.tags %}
 {# Routed-only DAG: EVPN proxy-ARP handles resolution, so the ARP-cache
-   flooding suppression is disabled. Bridged segments keep the default. #}
+   flooding suppression is disabled. Bridged segments keep the default.
+
+   'advertise mac enable' is deliberately NOT emitted here. common_base.j2
+   sets 'advertise mac disable' globally, and only bridged segments override
+   it -- a routed-only segment has no MAC learning to advertise, so enabling
+   it would contradict the routed design and put MAC routes into EVPN for a
+   segment that does not bridge. #}
  flooding-suppression address-resolution disable
-{% endif %}
+{% else %}
+{# Bridged DAG: overrides the global 'advertise mac disable'. #}
  advertise mac enable
+{% endif %}
 !
 {% endfor %}
 !
