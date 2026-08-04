@@ -93,6 +93,23 @@ Scope decides **where** a VLAN is rendered. Its **role**, below, decides
 **what** is rendered. A VLAN in scope with no recognised role produces nothing
 and is reported in the run output rather than dropped silently.
 
+### VLAN names
+
+Rendered verbatim as `vlan <id>` / `name <name>`, so they must be names IOS-XE
+can accept. NetBox enforces neither rule, and the disagreement is silent until a
+switch rejects the candidate.
+
+| Rule | Why |
+|---|---|
+| **No whitespace** | `name L2 only overlay for IoT` is parsed as `name L2`, and the remainder is rejected. |
+| **At most 30 characters** | IOS-XE accepts 32; this leaves a little headroom rather than sitting on the ceiling. |
+
+Both are checked during the render, so `generate_evpn.yml` fails naming the
+VLAN — before a candidate reaches a switch and fails at
+`acm replace … validate` with a parser error that mentions neither NetBox nor
+the VLAN. Every offending name is reported in one run, so a bulk rename is not
+a guessing game.
+
 ### VRF custom fields
 
 | Field | Type | Required | Meaning |
