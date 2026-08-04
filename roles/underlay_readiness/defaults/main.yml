@@ -32,6 +32,19 @@ readiness_global_lines:
   - "ip pim register-source {{ vtep_source_intf }}"
   - "ip pim ssm default"
   - "ip pim rp-address {{ underlay_rp_address }} override"
+  # ECMP hashing across the fabric uplinks. The IOS-XE default is 'universal',
+  # which hashes on the OUTER header -- and for VXLAN every flow between the
+  # same pair of VTEPs has an identical outer header, so the whole tunnel pins
+  # to one uplink. 'include-ports source destination' brings the inner ports
+  # into the hash and restores the spread.
+  #
+  # Safe to assert by text: 'universal' is the default, so this non-default
+  # value IS rendered -- verified present in the running config of all seven
+  # lab switches, C9300 through C9400. Both address families are listed because
+  # platform_baseline.j2 applies both; asserting only one would let the other
+  # drift silently.
+  - "ip cef load-sharing algorithm include-ports source destination"
+  - "ipv6 cef load-sharing algorithm include-ports source destination"
 
 # Loopback0 is the VTEP source, the OSPF router-id and the PIM register source.
 readiness_loopback_lines:
