@@ -33,8 +33,8 @@ sys.path.insert(0, os.path.join(_ROLE, "filter_plugins"))
 from ios_underlay import render_vlan_spec  # noqa: E402
 
 
-def render_leaf(edge_vlans):
-    """Render the real leaf_config.j2 with the given edge VLANs."""
+def _render(template, edge_vlans, l2_only=None, hostname="access1-1"):
+    """Render a real shipped template with the given VLANs."""
     env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(os.path.join(_ROLE, "templates")),
         undefined=jinja2.ChainableUndefined,
@@ -43,13 +43,36 @@ def render_leaf(edge_vlans):
     )
     env.filters["ios_vlan_range"] = render_vlan_spec
     env.filters["ansible.utils.ipaddr"] = lambda value, query=None: value
-    return env.get_template("leaf_config.j2").render(
+    return env.get_template(template).render(
         all_edge_vlans=edge_vlans,
-        netbox_vlan_groups={"vrfs": {}},
+        netbox_vlan_groups={"vrfs": {}, "l2_vlans": l2_only or {},
+                            "l2_only_vlans": l2_only or {}},
+        inventory_hostname=hostname,
         vtep_source_intf="Loopback0",
         evpn_bgp_asn=64513,
         evpn_peer_group_name="EVPN-PEERS",
+        fabric_edge_subnets={},
+        underlay={"bgp": {"direct": [], "af_ipv4": []}},
+        peer_ips=[], border_mesh=[],
+        groups={"device_roles_fabric_border": ["core1", "core2"]},
+        hostvars={"core1": {"ansible_host": "10.0.0.64"},
+                  "core2": {"ansible_host": "10.0.0.65"}},
     )
+
+
+def render_leaf(edge_vlans, l2_only=None):
+    return _render("leaf_config.j2", edge_vlans, l2_only)
+
+
+def render_border(l2_only, hostname):
+    return _render("border_config.j2", {}, l2_only, hostname)
+
+
+def l2_only_vlan(vid=900, tags=()):
+    """An enrolled L2-only overlay as the transform emits it."""
+    return {str(vid): {"name": "L2_ONLY_%d" % vid, "l2vni": 10000 + vid,
+                       "replication_mode": "static", "mcast_group": "239.0.1.1",
+                       "tags": list(tags), "l2_only": True}}
 
 
 def evpn_instances(rendered):
@@ -121,3 +144,43 @@ class TestGlobalDefault(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestL2OnlyOverlay(unittest.TestCase):
+    """An L2-only overlay has no VRF, so it is bridged with no gateway: the
+    four blocks below and, critically, NO SVI."""
+
+    def test_leaf_renders_the_four_blocks(self):
+        out = render_leaf(l2_only_vlan(), l2_only_vlan())
+        for expected in ("vlan 900",
+                         "l2vpn evpn instance 900 vlan-based",
+                         "vlan configuration 900",
+                         " member evpn-instance 900 vni 10900",
+                         " member vni 10900 mcast-group 239.0.1.1"):
+            self.assertIn(expected, out, expected)
+
+    def test_leaf_renders_no_svi(self):
+        """The distinguishing property. An SVI would imply a gateway that does
+        not exist, and the transform rejects a prefix for the same reason."""
+        self.assertNotIn("interface Vlan900", render_leaf(l2_only_vlan(), l2_only_vlan()))
+
+    def test_l2_only_is_bridged_so_it_advertises_mac(self):
+        inst = evpn_instances(render_leaf(l2_only_vlan(), l2_only_vlan()))
+        self.assertIn("advertise mac enable", inst[900])
+        self.assertIn("replication-type static", inst[900])
+
+    def test_border_renders_it_only_when_tagged_for_that_border(self):
+        tagged = l2_only_vlan(900, tags=["core1"])
+        self.assertIn("vlan 900", render_border(tagged, "core1"))
+        self.assertNotIn("vlan 900", render_border(tagged, "core2"))
+
+    def test_border_ignores_an_untagged_l2_only_vlan(self):
+        """Default off on borders: a border has no local edge ports, so an L2
+        segment belongs there only when it must be bridged out of the fabric."""
+        untagged = l2_only_vlan(900, tags=[])
+        for host in ("core1", "core2"):
+            self.assertNotIn("vlan 900", render_border(untagged, host))
+
+    def test_border_nve_member_carries_the_group(self):
+        out = render_border(l2_only_vlan(900, tags=["core1"]), "core1")
+        self.assertIn(" member vni 10900 mcast-group 239.0.1.1", out)

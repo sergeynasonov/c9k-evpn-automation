@@ -21,6 +21,24 @@ vlan {{ vid }}
 !
 {% endfor %}
 {% endfor %}
+{# L2-only overlays are OPT-IN on a border. A border has no local edge ports, so
+   an L2 segment lands here only when it must be bridged out of the fabric --
+   tag the VLAN with this border's hostname, the same convention a
+   vrf_l3_handoff_vlan uses to choose its border. Untagged, a border ignores it
+   entirely while every in-scope leaf still carries it. #}
+{% for vid, vlan in netbox_vlan_groups.l2_only_vlans.items() if inventory_hostname in vlan.tags %}
+vlan {{ vid }}
+ name {{ vlan.name }}
+!
+l2vpn evpn instance {{ vid }} vlan-based
+ encapsulation vxlan
+ replication-type {{ vlan.replication_mode }}
+ advertise mac enable
+!
+vlan configuration {{ vid }}
+ member evpn-instance {{ vid }} vni {{ vlan.l2vni }}
+!
+{% endfor %}
 !
 ! --- 8. CORE & HANDOFF SVIs ---
 {% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
@@ -69,6 +87,9 @@ interface nve1
  host-reachability protocol bgp
 {% for vrf_name, vrf_data in netbox_vlan_groups.vrfs.items() if vrf_data.l3vni %}
  member vni {{ vrf_data.l3vni }} vrf {{ vrf_name }}
+{% endfor %}
+{% for vid, vlan in netbox_vlan_groups.l2_only_vlans.items() if inventory_hostname in vlan.tags %}
+ member vni {{ vlan.l2vni }} mcast-group {{ vlan.mcast_group }}
 {% endfor %}
 !
 ! --- 10. BGP ROUTING ---

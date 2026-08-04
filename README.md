@@ -21,12 +21,12 @@ the commit.
   neighbour, so a tenant VRF reaches the outside world.
 - **IPv4 TRM** (tenant routed multicast) — MVPN auto-discovery, default and data
   MDTs, anycast or external RP.
+- **L2-only overlays** — a VLAN bridged across the fabric with no VRF and no
+  gateway. Enrolled with the `l2vni` custom field, replicated via a multicast
+  group, and opt-in on borders.
 
 **Not functional today. Near-term roadmap:**
 
-- **L2-only overlays** — a VLAN with no VRF is read from NetBox and carried in
-  the data model, but no template renders it. Every overlay segment today is
-  routed, with an anycast gateway.
 - **ESI multihoming**
 - **IPv6** — no `address-family ipv6` in the overlay, and no IPv6 TRM.
 

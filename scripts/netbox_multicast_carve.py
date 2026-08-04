@@ -5,6 +5,9 @@ The carve is VRF-major: one /16 per VRF inside 239.0.0.0/8, subdivided by
 function, so that `show ip mroute | include 239.<index>.` returns everything for
 one VRF. See roles/acm_evpn/README.md for the full rationale.
 
+    239.0.0.0/16            Active      role: l2vni_replication   <- --l2-only
+                            (flat: L2-only segments have no VRF, so no MDTs)
+
     239.<index>.0.0/16      Container   "VRF <NAME> - multicast"    no role
     ├── 239.<index>.1.0/24  Active      role: l2vni_replication
     ├── 239.<index>.2.0/24  Reserved    role: default_mdt   <- Active enables TRM
@@ -68,6 +71,10 @@ FUNCTIONS = [
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--l2-only", action="store_true",
+                    help="also carve 239.0.0.0/16 for L2-only overlays (index 0, "
+                         "which is reserved for exactly this: an L2-only segment "
+                         "has no VRF, so it has no per-VRF block to sit in)")
     ap.add_argument("--vrf", action="append", default=[], metavar="NAME=INDEX",
                     help="fabric VRF and its multicast index (1-254); repeatable")
     ap.add_argument("--apply", action="store_true",
@@ -163,6 +170,23 @@ def main() -> int:
     print("\n== container ==")
     ensure_prefix(ROOT, "container", None,
                   "Administratively scoped multicast (RFC 2365) - underlay")
+
+    if args.l2_only:
+        # Index 0 is FLAT: the whole /16 is the replication range.
+        #
+        # The per-VRF subdivision exists to separate L2VNI replication from the
+        # MDT ranges, and MDTs are per-VRF TRM constructs. Index 0 is by
+        # definition the block for segments that have NO VRF, so a default_mdt
+        # or data_mdt here could never be used -- subdividing would reserve
+        # address space against a case that cannot arise, and confine L2-only
+        # groups to a /24 for no reason.
+        #
+        # Same l2vni_replication role as the per-VRF blocks: an L2-only BUM
+        # group is an L2VNI replication group like any other, so acm_evpn's
+        # containment check accepts it with no new vocabulary.
+        print("\n== L2-only overlays (index 0) ==")
+        ensure_prefix("239.0.0.0/16", "active", "l2vni_replication",
+                      "L2-only overlays - BUM replication (no VRF)")
 
     for name, index in sorted(vrfs.items(), key=lambda kv: kv[1]):
         print(f"\n== VRF {name} (index {index}) ==")

@@ -182,7 +182,9 @@
 
 - name: 7. Transform NetBox data and assign the facts the templates read
   ansible.builtin.set_fact:
-    netbox_vlan_groups: "{{ {'vrfs': _processed_data.vrfs, 'l2_vlans': _processed_data.l2_vlans} }}"
+    netbox_vlan_groups: "{{ {'vrfs': _processed_data.vrfs,
+                          'l2_vlans': _processed_data.l2_vlans,
+                          'l2_only_vlans': _processed_data.l2_only_vlans} }}"
     all_edge_vlans: "{{ _processed_data.all_edge_vlans }}"
     fabric_edge_subnets: "{{ _processed_data.fabric_edge_subnets }}"
     skipped_vlans: "{{ _processed_data.skipped_vlans }}"
