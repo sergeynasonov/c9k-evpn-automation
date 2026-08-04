@@ -19,6 +19,9 @@
 - name: Render Local Configurations
   ansible.builtin.import_tasks: 02_render_configs.yml
 
+- name: Report NetBox data problems
+  ansible.builtin.import_tasks: 02b_netbox_hygiene.yml
+
 - name: Verify Candidate Configuration Blast Radius
   ansible.builtin.import_tasks: 03_safety_check.yml
 

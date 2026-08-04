@@ -15,6 +15,9 @@
 - name: Render Local Configurations
   ansible.builtin.import_tasks: 02_render_configs.yml
 
+- name: Report NetBox data problems
+  ansible.builtin.import_tasks: 02b_netbox_hygiene.yml
+
 # Same guard as the deploy path, but reporting instead of failing: a generate
 # run exists so the operator can inspect the candidate config, and aborting
 # here would withhold exactly the output they need in order to judge whether
@@ -27,6 +30,10 @@
 # No pre-deploy summary here. This playbook's OUTPUT is the rendered candidate
 # in switch-configuration/, which the operator inspects and diffs directly -- a
 # console summary would duplicate the artifact, less readably.
+#
+# The NetBox hygiene report above is the exception, and for the opposite reason:
+# a VLAN that produces no configuration appears in no artifact at all, so the
+# console line is the only place it can be seen.
 
 - name: Redact Passwords Locally
   ansible.builtin.import_tasks: 05_redact_local.yml
