@@ -641,6 +641,68 @@ def _vlan_l2vni(vlan: Dict[str, Any], vid: Any, l2vni_base: int) -> Optional[int
     return _coerce_vni(raw)
 
 
+def _l2vni_explicit(vlan: Dict[str, Any]) -> bool:
+    """True when the VLAN carries an explicit ``l2vni`` custom field.
+
+    The field means two different things depending on context, which is why
+    this is asked separately from ``_vlan_l2vni``:
+
+      * inside a VRF it is a brownfield OVERRIDE of the derived VNI;
+      * with no VRF it is the ENROLMENT MARKER -- it is what makes the segment
+        an L2-only overlay rather than a VLAN NetBox merely happens to hold.
+
+    Enrolment is deliberately an act, not the absence of one. A VRF-less edge
+    VLAN with no l2vni used to render anyway on a derived VNI, so a
+    half-modelled VLAN reached a switch looking finished.
+    """
+    raw = (vlan.get("custom_field_data") or {}).get("l2vni")
+    return raw is not None and raw != ""
+
+
+def _validate_l2_only(candidates: List[Dict[str, Any]]) -> None:
+    """Validate L2-only overlay segments. Every failure here fails the render.
+
+    An L2-only segment has no VRF, so nothing upstream supplies the two things
+    it still needs -- a VNI and a BUM replication group. Both must be stated on
+    the VLAN itself, and neither has a safe default:
+
+      * no ``l2vni`` -> not enrolled. Rendering it on a derived VNI is how a
+        VLAN that was never meant to be an overlay reaches a switch.
+      * no ``mcast_group`` -> there is no VRF base group to inherit, so the
+        segment would silently fall back to head-end replication. That is a
+        different forwarding design arrived at by omission.
+      * a prefix -> an L2-only segment is bridged, with no SVI and no gateway.
+        The address renders nowhere, so carrying one means the VLAN was modelled
+        as routed and the operator will look for a gateway that does not exist.
+    """
+    errors: List[str] = []
+    for c in sorted(candidates, key=lambda x: int(x["vid"])):
+        vid, name, why = c["vid"], c["name"], c["why"]
+        if why == "unenrolled":
+            errors.append(
+                "VLAN {} '{}' has role 'edge' and no VRF, but no 'l2vni' custom "
+                "field. Set 'l2vni' to enrol it as an L2-only overlay, or give it "
+                "a VRF, or change its role -- it is currently neither."
+                .format(vid, name))
+        elif why == "no_mcast_group":
+            errors.append(
+                "VLAN {} '{}' is an L2-only overlay, so it has no VRF base group "
+                "to inherit: set the 'mcast_group' custom field to its BUM "
+                "replication group."
+                .format(vid, name))
+        elif why == "has_prefix":
+            errors.append(
+                "VLAN {} '{}' is an L2-only overlay but has prefix {} assigned. "
+                "L2-only segments are bridged and render no SVI, so the address "
+                "would be silently ignored. Remove the prefix, or give the VLAN a "
+                "VRF so it becomes a routed segment."
+                .format(vid, name, c.get("prefix")))
+    if errors:
+        raise AnsibleFilterError(
+            "netbox_evpn_data: L2-only overlay validation failed:\n  - "
+            + "\n  - ".join(errors))
+
+
 def _validate_fabric_vnis(
     l3_by_vrf: Dict[str, int],
     l3_bad_by_vrf: Dict[str, Any],
@@ -906,6 +968,9 @@ def build_evpn_data(
           "vrfs": {vrf_name: {"rd", "mcast_group",
                                "core_vlans", "edge_vlans", "handoff_vlans"}},
           "l2_vlans": {vid: v_data},        # VLANs with no VRF at all
+          "l2_only_vlans": {vid: v_data},   # of those, the ENROLLED L2-only
+                                            # overlays (explicit l2vni, a
+                                            # mcast_group, and no prefix)
           "all_edge_vlans": {vid: v_data},  # edge VLANs, VRF or not, in scope for this host
           "skipped_vlans": {vid: {"vid", "name", "role", "vrf_name"}},
                                              # in scope for this host but
@@ -939,6 +1004,11 @@ def build_evpn_data(
 
     vrfs: Dict[str, Any] = {}
     l2_vlans: Dict[str, Any] = {}
+    # Enrolled L2-only overlays. Kept separate from l2_vlans, which stays
+    # 'every in-scope VLAN with no VRF' -- borders render from this one, so it
+    # must contain only segments that are actually fabric overlays.
+    l2_only_vlans: Dict[str, Any] = {}
+    l2_only_bad: List[Dict[str, Any]] = []
     all_edge_vlans: Dict[str, Any] = {}
     fabric_edge_subnets: Dict[str, Any] = {}
     skipped_vlans: Dict[str, Any] = {}
@@ -1040,8 +1110,22 @@ def build_evpn_data(
         elif not v_data["vrf_name"]:
             l2_vlans[vid_str] = v_data
             if role in _EDGE_ROLES:
-                all_edge_vlans[vid_str] = v_data
+                if not _l2vni_explicit(vlan):
+                    l2_only_bad.append({"vid": vlan["vid"], "name": v_data["name"],
+                                        "why": "unenrolled"})
+                elif not v_data["mcast_group"]:
+                    l2_only_bad.append({"vid": vlan["vid"], "name": v_data["name"],
+                                        "why": "no_mcast_group"})
+                elif v_data["prefix_ipv4"] or v_data["prefix_ipv6"]:
+                    l2_only_bad.append({
+                        "vid": vlan["vid"], "name": v_data["name"], "why": "has_prefix",
+                        "prefix": v_data["prefix_ipv4"] or v_data["prefix_ipv6"]})
+                else:
+                    v_data["l2_only"] = True
+                    l2_only_vlans[vid_str] = v_data
+                    all_edge_vlans[vid_str] = v_data
 
+    _validate_l2_only(l2_only_bad)
     _validate_fabric_vnis(fabric_l3, fabric_l3_bad, fabric_l2, l3vni_base)
     _validate_multicast_groups(all_edge_vlans, reserved_mcast_prefixes,
                                allowed_mcast_prefixes, l3vni_base)
@@ -1071,6 +1155,7 @@ def build_evpn_data(
     return {
         "vrfs": vrfs,
         "l2_vlans": l2_vlans,
+        "l2_only_vlans": l2_only_vlans,
         "all_edge_vlans": all_edge_vlans,
         "fabric_edge_subnets": fabric_edge_subnets,
         "skipped_vlans": skipped_vlans,

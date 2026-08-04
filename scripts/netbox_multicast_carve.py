@@ -68,6 +68,10 @@ FUNCTIONS = [
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--l2-only", action="store_true",
+                    help="also carve 239.0.0.0/16 for L2-only overlays (index 0, "
+                         "which is reserved for exactly this: an L2-only segment "
+                         "has no VRF, so it has no per-VRF block to sit in)")
     ap.add_argument("--vrf", action="append", default=[], metavar="NAME=INDEX",
                     help="fabric VRF and its multicast index (1-254); repeatable")
     ap.add_argument("--apply", action="store_true",
@@ -101,6 +105,14 @@ def parse_vrfs(pairs: list) -> dict:
 
 def main() -> int:
     args = parse_args()
+    if args.l2_only:
+        # Index 0 is deliberately unused by the per-VRF carve, which is why it
+        # is free for the one class of segment that belongs to no VRF. The role
+        # is the SAME l2vni_replication used per-VRF -- an L2-only overlay's BUM
+        # group is an L2VNI replication group like any other, so acm_evpn's
+        # containment check accepts it with no new vocabulary.
+        args.vrf = list(args.vrf) + ["L2-ONLY=0"]
+
     if not args.url or not args.token:
         sys.exit("set NETBOX_API and NETBOX_TOKEN (or pass --url/--token)")
     vrfs = parse_vrfs(args.vrf)

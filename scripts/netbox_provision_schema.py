@@ -104,22 +104,34 @@ PREFIX_ROLES = {
 
 # --- Custom fields ---------------------------------------------------------
 #
-# (name, type, object types, label, description)
+# Any address in 239.0.0.0/8. Deliberately the WHOLE administratively scoped
+# range (RFC 2365), matching what acm_evpn's own validator enforces. A regex
+# encoding the per-VRF carve (239.<index>.1.x) would reject 239.0.x, which is
+# where L2-only overlay groups live -- index 0 belongs to no VRF.
+MCAST_REGEX = r"^239\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){2}$"
+
+# (name, type, object types, label, description[, validation_regex])
 #
-# 'l3vni' is what ENROLS a VRF in the fabric -- a VRF without it is ignored
-# entirely, which is how NetBox can hold WAN and out-of-band VRFs that have
-# nothing to do with this automation.
+# 'l3vni' ENROLS a VRF in the fabric and 'l2vni' enrols a VRF-less VLAN as an
+# L2-only overlay. A VRF or VLAN without its marker is ignored entirely, which
+# is how NetBox can hold WAN, out-of-band and non-fabric objects alongside.
 CUSTOM_FIELDS = [
     ("l3vni", "integer", ["ipam.vrf"], "L3VNI",
      "Enrols this VRF in the EVPN fabric. Allocate 20001-20254. Drives the RD, "
      "route-targets and the VRF's multicast index (l3vni - 20000). Blank = not a fabric VRF."),
     ("mcast_base_group", "text", ["ipam.vrf"], "Multicast Base Group",
      "Underlay multicast group for every bridged segment in this VRF. "
-     "Required if the VRF has any bridged (non-dag_routed) segment."),
+     "Required if the VRF has any bridged (non-dag_routed) segment.",
+     MCAST_REGEX),
     ("l2vni", "integer", ["ipam.vlan"], "L2VNI",
-     "Override for the derived L2VNI (10000 + vid). Leave blank unless pinning a brownfield VNI."),
+     "Two meanings. On a VLAN in a VRF: an override for the derived L2VNI "
+     "(10000 + vid), for brownfield segments only. On a VLAN with NO VRF: the "
+     "marker that ENROLS it as an L2-only overlay -- without it the VLAN is not "
+     "part of the fabric."),
     ("mcast_group", "text", ["ipam.vlan"], "Multicast Group",
-     "Overrides the VRF's mcast_base_group for this VLAN alone. Escape hatch; most VLANs inherit."),
+     "Overrides the VRF's mcast_base_group for this VLAN alone, and is REQUIRED "
+     "on an L2-only overlay, which has no VRF to inherit from.",
+     MCAST_REGEX),
     # On the PREFIX, not the VLAN: _apply_prefix() reads these from the
     # prefix's custom_field_data. A VLAN can carry an IPv4 and an IPv6 prefix
     # with different relay destinations, which a VLAN-level field could not
@@ -190,7 +202,7 @@ def main() -> int:
         ensure(nb.ipam.roles, "slug", slug,
                {"name": name, "slug": slug, "description": desc}, "role")
 
-    for cf_name, cf_type, obj_types, label, desc in CUSTOM_FIELDS:
+    for cf_name, cf_type, obj_types, label, desc, *extra in CUSTOM_FIELDS:
         payload = {
             "name": cf_name,
             "label": label,
@@ -201,6 +213,8 @@ def main() -> int:
         }
         if cf_type == "multiobject":
             payload["related_object_type"] = DHCP_OBJECT_TYPE
+        if extra and extra[0]:
+            payload["validation_regex"] = extra[0]
         ensure(nb.extras.custom_fields, "name", cf_name, payload, "custom field")
 
     verb = "created" if args.apply else "would create"

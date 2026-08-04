@@ -306,13 +306,36 @@ class TestHandoffVlan(unittest.TestCase):
 
 
 class TestPureL2Vlan(unittest.TestCase):
-    def test_l2_vlan_no_vrf(self):
-        vlan_list = [vlan(50, "GUEST_WIFI", cfd={"mcast_group": "239.17.50.1"},
-                          prefixes=[prefix("172.16.50.0/24")])]
+    def test_l2_only_segment_is_enrolled_by_l2vni(self):
+        """No VRF, so 'l2vni' is what says this VLAN is a fabric overlay at
+        all, and 'mcast_group' supplies the BUM group there is no VRF to
+        inherit. Both stated, no prefix: it is bridged and has no gateway."""
+        vlan_list = [vlan(50, "GUEST_WIFI",
+                          cfd={"l2vni": 10050, "mcast_group": "239.17.50.1"})]
         result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
-        self.assertIn("50", result["l2_vlans"])
-        self.assertIn("50", result["all_edge_vlans"])  # role '' counts as edge
+        self.assertIn("50", result["l2_only_vlans"])
+        self.assertIn("50", result["all_edge_vlans"])
         self.assertEqual(result["vrfs"], {})
+        rec = result["all_edge_vlans"]["50"]
+        self.assertEqual(rec["l2vni"], 10050)
+        self.assertEqual(rec["replication_mode"], "static")
+        self.assertTrue(rec["l2_only"])
+
+    def test_vrf_less_edge_vlan_without_l2vni_is_rejected(self):
+        """The behaviour this replaced: it used to render on a derived VNI, so
+        a VLAN nobody had finished modelling reached a switch looking done."""
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([vlan(50, "HALF_DONE")], [], None, None)
+        self.assertIn("no 'l2vni'", str(cm.exception))
+
+    def test_l2_only_segment_may_not_carry_a_prefix(self):
+        """It renders no SVI, so an address would be silently ignored and the
+        operator would look for a gateway that does not exist."""
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([vlan(50, "GUEST_WIFI",
+                                  cfd={"l2vni": 10050, "mcast_group": "239.17.50.1"},
+                                  prefixes=[prefix("172.16.50.0/24")])], [], None, None)
+        self.assertIn("172.16.50.0/24", str(cm.exception))
 
     def test_vlan_with_unrecognised_role_produces_nothing_and_is_reported(self):
         vlan_list = [vlan(51, "SOMETHING", role="voice", prefixes=[prefix("172.16.51.0/24")])]
@@ -325,12 +348,12 @@ class TestPureL2Vlan(unittest.TestCase):
 
 class TestNoScopeIsGlobal(unittest.TestCase):
     def test_vlan_with_no_site_and_no_group_is_always_included(self):
-        vlan_list = [vlan(60, "GLOBAL_VLAN", cfd={"mcast_group": "239.17.60.1"},
-                             prefixes=[prefix("172.16.60.0/24")])]
+        vlan_list = [vlan(60, "GLOBAL_VLAN",
+                          cfd={"l2vni": 10060, "mcast_group": "239.17.60.1"})]
         for my_site, my_sg in [(None, None), ("51", "3"), ("999", "999")]:
             with self.subTest(my_site=my_site, my_sg=my_sg):
                 result = build_evpn_data(vlan_list, [], my_site=my_site, my_sg=my_sg)
-                self.assertIn("60", result["l2_vlans"])
+                self.assertIn("60", result["l2_only_vlans"])
 
 
 class TestUnsupportedScopeType(unittest.TestCase):
@@ -436,27 +459,28 @@ class TestDhcpResolution(unittest.TestCase):
     def test_dedup_across_multiple_prefixes_in_same_vlan(self):
         vlan_list = [
             vlan(90, "MULTI_PREFIX", cfd={"mcast_group": "239.17.90.1"}, prefixes=[
-                prefix("10.1.1.0/24", cfd={"dhcp_servers_ipv4": ["a", "b"]}),
-                prefix("10.1.2.0/24", cfd={"dhcp_servers_ipv4": ["b", "c"]}),  # 'b' repeated
+                prefix("10.1.1.0/24", vrf=CORP_VRF, cfd={"dhcp_servers_ipv4": ["a", "b"]}),
+                prefix("10.1.2.0/24", vrf=CORP_VRF, cfd={"dhcp_servers_ipv4": ["b", "c"]}),  # 'b' repeated
             ])
         ]
         ip_list = [ip("a", "10.9.9.1/32"), ip("b", "10.9.9.2/32"), ip("c", "10.9.9.3/32")]
         result = build_evpn_data(vlan_list, ip_list, my_site=None, my_sg=None)
-        self.assertEqual(result["l2_vlans"]["90"]["dhcp_servers_ipv4"], ["10.9.9.1", "10.9.9.2", "10.9.9.3"])
+        self.assertEqual(result["all_edge_vlans"]["90"]["dhcp_servers_ipv4"], ["10.9.9.1", "10.9.9.2", "10.9.9.3"])
 
     def test_unresolvable_id_is_silently_skipped(self):
         vlan_list = [vlan(91, "STALE_REF", cfd={"mcast_group": "239.17.91.1"},
-                          prefixes=[prefix("10.1.3.0/24", cfd={"dhcp_servers_ipv4": ["ghost"]})])]
+                          prefixes=[prefix("10.1.3.0/24", vrf=CORP_VRF,
+                                           cfd={"dhcp_servers_ipv4": ["ghost"]})])]
         result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
-        self.assertEqual(result["l2_vlans"]["91"]["dhcp_servers_ipv4"], [])
+        self.assertEqual(result["all_edge_vlans"]["91"]["dhcp_servers_ipv4"], [])
 
     def test_ipv6_dhcp_resolution(self):
         vlan_list = [vlan(92, "V6_DHCP", cfd={"mcast_group": "239.17.92.1"}, prefixes=[
-            prefix("2001:db8:9::/64", cfd={"dhcp_servers_ipv6": ["r1"]})
+            prefix("2001:db8:9::/64", vrf=CORP_VRF, cfd={"dhcp_servers_ipv6": ["r1"]})
         ])]
         ip_list = [ip("r1", "2001:db8:9::53/128")]
         result = build_evpn_data(vlan_list, ip_list, my_site=None, my_sg=None)
-        self.assertEqual(result["l2_vlans"]["92"]["dhcp_servers_ipv6"], ["2001:db8:9::53"])
+        self.assertEqual(result["all_edge_vlans"]["92"]["dhcp_servers_ipv6"], ["2001:db8:9::53"])
 
 
 class TestVrfFirstPrefixWins(unittest.TestCase):
@@ -485,8 +509,8 @@ class TestFullFabricIntegration(unittest.TestCase):
             vlan(197, "VRF_CORP_HANDOFF197", role="vrf_l3_handoff_vlan", tags=["core1"],
                  scope_type="SiteGroup", scope_id="3",
                  prefixes=[prefix("10.67.118.6/31", vrf=CORP_VRF)]),
-            vlan(500, "GLOBAL_GUEST", cfd={"mcast_group": "239.17.5.1"},
-                 prefixes=[prefix("172.16.5.0/24")]),
+            # L2-only overlay: enrolled by l2vni, its own BUM group, no prefix.
+            vlan(500, "GLOBAL_GUEST", cfd={"l2vni": 10500, "mcast_group": "239.17.5.1"}),
             vlan(600, "OTHER_SITE_ONLY", site_id="99", prefixes=[prefix("172.16.6.0/24", vrf=CORP_VRF)]),
         ]
         ip_list = [ip("d1", "10.66.119.56/32")]
@@ -497,6 +521,7 @@ class TestFullFabricIntegration(unittest.TestCase):
         self.assertEqual(set(result["vrfs"]["CORP"]["core_vlans"]), {"199"})
         self.assertEqual(set(result["vrfs"]["CORP"]["handoff_vlans"]), {"197"})
         self.assertEqual(set(result["l2_vlans"]), {"500"})
+        self.assertEqual(set(result["l2_only_vlans"]), {"500"})
         self.assertEqual(set(result["all_edge_vlans"]), {"100", "500"})
         # VLAN 600 is scoped to a different site outright -> excluded locally...
         self.assertNotIn("600", result["vrfs"]["CORP"]["edge_vlans"])
@@ -774,8 +799,8 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
     def test_pure_l2_vlan_still_supported_when_explicitly_marked(self):
         """A genuine L2-only tenant segment (no VRF) is still valid — it just
         has to say so now."""
-        vlan_list = [vlan(500, "GUEST_L2", role="edge", cfd={"mcast_group": "239.17.5.1"},
-                          prefixes=[prefix("172.16.5.0/24")])]
+        vlan_list = [vlan(500, "GUEST_L2", role="edge",
+                          cfd={"l2vni": 10500, "mcast_group": "239.17.5.1"})]
         result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
         self.assertIn("500", result["all_edge_vlans"])
         self.assertEqual(result["all_edge_vlans"]["500"]["l2vni"], 10500)
@@ -891,16 +916,13 @@ class TestMulticastGroupValidation(unittest.TestCase):
                           prefixes=[prefix("10.0.1.0/24", vrf=v)])],
                     "101", "bridged", "mcast_base_group")
 
-    def test_vrf_less_l2_only_segment_falls_back_to_ingress_replication(self):
-        """A VRF-less L2-only overlay has nothing to inherit a group from, so
-        head-end replication is the default rather than an error. Niche case,
-        deliberately low-ceremony."""
-        result = build_evpn_data(
-            [vlan(500, "GUEST", role="edge", prefixes=[prefix("172.16.5.0/24")])],
-            [], None, None)
-        rec = result["all_edge_vlans"]["500"]
-        self.assertEqual(rec["replication_mode"], "ingress")
-        self.assertEqual(rec["mcast_group"], "")
+    def test_l2_only_segment_without_a_group_is_rejected_not_downgraded(self):
+        """This used to fall back to head-end replication. Silently choosing a
+        different forwarding design because a field was blank is exactly the
+        failure mode the rest of this module exists to prevent."""
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([vlan(500, "GUEST", cfd={"l2vni": 10500})], [], None, None)
+        self.assertIn("mcast_group", str(cm.exception))
 
     def test_vlan_in_a_vrf_without_a_base_group_still_fails(self):
         """Being in a VRF means multicast is expected; silently downgrading to

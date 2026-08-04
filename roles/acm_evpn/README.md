@@ -104,8 +104,8 @@ and is reported in the run output rather than dropped silently.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `l2vni` | Integer | no | Override for the derived L2VNI. Leave blank — L2VNI is `evpn_l2vni_base + vid` (10001–14094). Set only to pin a brownfield VNI. |
-| `mcast_group` | Text (IPv4) | no | Overrides the VRF's `mcast_base_group` for this VLAN alone. An escape hatch; most VLANs inherit. |
+| `l2vni` | Integer | **conditional** | Two meanings, decided by whether the VLAN has a VRF. **In a VRF:** an override for the derived L2VNI (`evpn_l2vni_base + vid`, 10001–14094) — leave blank unless pinning a brownfield VNI. **With no VRF:** the marker that **enrols the VLAN as an L2-only overlay**; see below. |
+| `mcast_group` | Text (IPv4) | **conditional** | Overrides the VRF's `mcast_base_group` for this VLAN alone — an escape hatch, most VLANs in a VRF inherit. **Required on an L2-only overlay**, which has no VRF to inherit from. |
 
 ### VLAN roles
 
@@ -123,7 +123,49 @@ these. A VLAN with no role produces nothing and is listed in the run output.
 | Tag | Effect |
 |---|---|
 | `dag_routed` | **Routed-only** distributed anycast gateway: `flooding-suppression address-resolution disable` on the EVI, `ip proxy-arp` + `ip local-proxy-arp` on the SVI, and **ingress replication** (no multicast group needed). Untagged ⇒ **bridged** DAG using multicast replication. |
-| `<hostname>` | On a `vrf_l3_handoff_vlan`, selects which border renders it. |
+| `<hostname>` | On a `vrf_l3_handoff_vlan`, selects which border renders it. On an **L2-only overlay**, opts that border in — see below. |
+
+### L2-only overlays
+
+A tenant segment that is **bridged across the fabric with no gateway**: no VRF,
+no SVI, no anycast gateway. It is a VLAN with role `edge` and **no VRF**, and
+`l2vni` is what separates a deliberate L2 overlay from a VLAN whose VRF was
+simply never set.
+
+| Requirement | Why |
+|---|---|
+| `l2vni` set | The enrolment marker. Without it the VLAN is not an overlay and the render **fails**, naming it — it used to render on a derived VNI, so a VLAN nobody had finished modelling reached a switch looking complete. |
+| `mcast_group` set | There is no VRF base group to inherit. Absent, the segment would silently fall back to head-end replication — a different forwarding design arrived at by omission, so it is an error instead. |
+| **No prefix** | It is bridged and renders no SVI, so an address would be silently ignored while an operator looked for a gateway that does not exist. Assigning one **fails** the render. |
+
+Scope works exactly as it does for any other VLAN — site, site group, or
+unscoped for fabric-wide.
+
+**Borders are opt-in.** A border has no local edge ports, so an L2 segment
+belongs there only when it must be bridged out of the fabric. Tag the VLAN with
+that border's hostname — the same convention a `vrf_l3_handoff_vlan` uses.
+Untagged, borders ignore it entirely while every in-scope leaf still carries it.
+
+Renders as:
+
+```
+vlan 900
+ name GUEST_L2
+!
+l2vpn evpn instance 900 vlan-based
+ encapsulation vxlan
+ replication-type static
+ advertise mac enable
+!
+vlan configuration 900
+ member evpn-instance 900 vni 10900
+!
+interface nve1
+ member vni 10900 mcast-group 239.0.1.1
+```
+
+`advertise mac enable` is present because the segment **is** bridged — contrast
+a `dag_routed` VLAN, which is routed-only and must not advertise MAC routes.
 
 ### Prefix custom fields
 
@@ -205,7 +247,14 @@ everywhere — RD and route-targets `:20003`, multicast block `239.3.x`.
 
 Valid indexes are 1–254, which is what bounds `l3vni` to 20001–20254. Do not
 derive the index from NetBox's VRF `id`: it is a surrogate key that changes on
-delete-and-recreate and climbs past 254 as objects churn. `239.0.0.0/16` and `239.255.0.0/16` are left unused
+delete-and-recreate and climbs past 254 as objects churn.
+
+**`239.0.0.0/16` (index 0) is the L2-only block.** An L2-only overlay belongs to
+no VRF, so it has no per-VRF `/16` to sit in; index 0 was already left unused by
+the per-VRF carve, which is exactly where it fits. It uses the same
+`l2vni_replication` prefix role — an L2-only segment's BUM group is an L2VNI
+replication group like any other. Create it with
+`netbox_multicast_carve.py --l2-only`. `239.0.0.0/16` and `239.255.0.0/16` are left unused
 (the latter is IPv4 Local Scope).
 
 Conventional allocations within a VRF's block:
