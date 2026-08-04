@@ -44,7 +44,15 @@ except ImportError:  # pragma: no cover
 # returns (see the query in roles/acm_evpn/tasks/01_gather_data.yml).
 # ---------------------------------------------------------------------------
 
-def vlan(vid, name, role="edge", tags=None, site_id=None, scope_type=None, scope_id=None,
+# The site/site-group a fixture VLAN and the rendering host both belong to by
+# default. Scope is REQUIRED for enrolment, so a fixture that does not care
+# about scope still has to have one -- an unscoped VLAN is enrolled nowhere.
+# Tests that are about scope override site_id/scope_type explicitly.
+SITE = "51"
+SG = "3"
+
+
+def vlan(vid, name, role="edge", tags=None, site_id=SITE, scope_type=None, scope_id=None,
          prefixes=None, cfd=None):
     scope = None
     if scope_type is not None:
@@ -228,7 +236,9 @@ class TestSiteScopedEdgeVlan(unittest.TestCase):
         self.vlan_list = [
             vlan(
                 103, "CORP_DATA", role="edge",
-                scope_type="Site", scope_id="53",
+                # Scoped by its GROUP, not by a direct site assignment -- that is
+                # the branch under test, so no site_id here.
+                site_id=None, scope_type="Site", scope_id="53",
                 prefixes=[prefix("10.67.118.224/27", vrf=CORP_VRF, cfd={"dhcp_servers_ipv4": ["d1"]})],
             )
         ]
@@ -312,7 +322,7 @@ class TestPureL2Vlan(unittest.TestCase):
         inherit. Both stated, no prefix: it is bridged and has no gateway."""
         vlan_list = [vlan(50, "GUEST_WIFI",
                           cfd={"l2vni": 10050, "mcast_group": "239.17.50.1"})]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("50", result["l2_only_vlans"])
         self.assertIn("50", result["all_edge_vlans"])
         self.assertEqual(result["vrfs"], {})
@@ -325,7 +335,7 @@ class TestPureL2Vlan(unittest.TestCase):
         """The behaviour this replaced: it used to render on a derived VNI, so
         a VLAN nobody had finished modelling reached a switch looking done."""
         with self.assertRaises(AnsibleFilterError) as cm:
-            build_evpn_data([vlan(50, "HALF_DONE")], [], None, None)
+            build_evpn_data([vlan(50, "HALF_DONE")], [], SITE, SG)
         self.assertIn("no 'l2vni'", str(cm.exception))
 
     def test_l2_only_segment_may_not_carry_a_prefix(self):
@@ -334,26 +344,50 @@ class TestPureL2Vlan(unittest.TestCase):
         with self.assertRaises(AnsibleFilterError) as cm:
             build_evpn_data([vlan(50, "GUEST_WIFI",
                                   cfd={"l2vni": 10050, "mcast_group": "239.17.50.1"},
-                                  prefixes=[prefix("172.16.50.0/24")])], [], None, None)
+                                  prefixes=[prefix("172.16.50.0/24")])], [], SITE, SG)
         self.assertIn("172.16.50.0/24", str(cm.exception))
 
     def test_vlan_with_unrecognised_role_produces_nothing_and_is_reported(self):
         vlan_list = [vlan(51, "SOMETHING", role="voice", prefixes=[prefix("172.16.51.0/24")])]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertNotIn("51", result["all_edge_vlans"])
         self.assertNotIn("51", result["l2_vlans"])
         self.assertIn("51", result["skipped_vlans"])
         self.assertEqual(result["skipped_vlans"]["51"]["role"], "voice")
 
 
-class TestNoScopeIsGlobal(unittest.TestCase):
-    def test_vlan_with_no_site_and_no_group_is_always_included(self):
-        vlan_list = [vlan(60, "GLOBAL_VLAN",
-                          cfd={"l2vni": 10060, "mcast_group": "239.17.60.1"})]
+class TestUnscopedVlanIsNotEligible(unittest.TestCase):
+    """Enrolment is opt-in throughout, and scope is how a VLAN says where it
+    belongs. An unscoped VLAN has not said, so it is enrolled NOWHERE.
+
+    This used to be the opposite -- no scope meant fabric-wide -- which
+    inverted the rule: forgetting to scope a VLAN pushed it to every leaf
+    instead of to none."""
+
+    def _unscoped(self):
+        return [vlan(60, "UNSCOPED_VLAN", site_id=None,
+                     cfd={"l2vni": 10060, "mcast_group": "239.17.60.1"})]
+
+    def test_never_enrolled_whatever_the_host(self):
         for my_site, my_sg in [(None, None), ("51", "3"), ("999", "999")]:
             with self.subTest(my_site=my_site, my_sg=my_sg):
-                result = build_evpn_data(vlan_list, [], my_site=my_site, my_sg=my_sg)
-                self.assertIn("60", result["l2_only_vlans"])
+                result = build_evpn_data(self._unscoped(), [], my_site=my_site, my_sg=my_sg)
+                self.assertEqual(result["all_edge_vlans"], {})
+                self.assertEqual(result["l2_only_vlans"], {})
+
+    def test_reported_rather_than_silently_dropped(self):
+        """A NetBox data problem the operator has to be able to see. Silence
+        here would look identical to 'the VLAN is scoped elsewhere'."""
+        result = build_evpn_data(self._unscoped(), [], my_site=SITE, my_sg=SG)
+        self.assertIn("60", result["skipped_vlans"])
+        self.assertEqual(result["skipped_vlans"]["60"]["reason"], "unscoped")
+
+    def test_a_scoped_vlan_is_still_enrolled(self):
+        """Guard against over-correcting: scope still works."""
+        result = build_evpn_data(
+            [vlan(61, "SCOPED_VLAN", cfd={"l2vni": 10061, "mcast_group": "239.17.61.1"})],
+            [], my_site=SITE, my_sg=SG)
+        self.assertIn("61", result["l2_only_vlans"])
 
 
 class TestUnsupportedScopeType(unittest.TestCase):
@@ -379,7 +413,7 @@ class TestEvpnEnrolmentIsByL3vni(unittest.TestCase):
     def test_vrf_without_l3vni_is_silently_excluded(self):
         non_fabric = vrf("WAN_MPLS", rd="65000:1", l3vni=None)
         vlan_list = [vlan(80, "WAN_LINK", prefixes=[prefix("172.16.80.0/24", vrf=non_fabric)])]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertEqual(result["vrfs"], {})
         self.assertEqual(result["l2_vlans"], {})
         self.assertEqual(result["fabric_edge_subnets"], {})
@@ -393,14 +427,14 @@ class TestEvpnEnrolmentIsByL3vni(unittest.TestCase):
             vlan(80, "OOB_MGMT", prefixes=[prefix("172.16.80.0/24", vrf=non_fabric)]),
             vlan(101, "CORP_DATA", prefixes=[prefix("10.0.1.0/24", vrf=fabric)]),
         ]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertEqual(set(result["vrfs"]), {"CORP"})
 
     def test_rd_is_irrelevant_to_enrolment(self):
         """RD no longer gates anything — the device RD is <loopback>:<l3vni>."""
         no_rd = vrf("CORP", rd=None, l3vni=20199)
         vlan_list = [vlan(101, "CORP_DATA", prefixes=[prefix("10.0.1.0/24", vrf=no_rd)])]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertEqual(set(result["vrfs"]), {"CORP"})
         self.assertEqual(result["vrfs"]["CORP"]["l3vni"], 20199)
 
@@ -409,7 +443,7 @@ class TestEvpnEnrolmentIsByL3vni(unittest.TestCase):
         typo = vrf("CORP", rd="199", l3vni="2O199")  # letter O
         vlan_list = [vlan(101, "CORP_DATA", prefixes=[prefix("10.0.1.0/24", vrf=typo)])]
         with self.assertRaises(AnsibleFilterError) as ctx:
-            build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+            build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("CORP", str(ctx.exception))
         self.assertIn("2O199", str(ctx.exception))
 
@@ -464,14 +498,14 @@ class TestDhcpResolution(unittest.TestCase):
             ])
         ]
         ip_list = [ip("a", "10.9.9.1/32"), ip("b", "10.9.9.2/32"), ip("c", "10.9.9.3/32")]
-        result = build_evpn_data(vlan_list, ip_list, my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, ip_list, my_site=SITE, my_sg=SG)
         self.assertEqual(result["all_edge_vlans"]["90"]["dhcp_servers_ipv4"], ["10.9.9.1", "10.9.9.2", "10.9.9.3"])
 
     def test_unresolvable_id_is_silently_skipped(self):
         vlan_list = [vlan(91, "STALE_REF", cfd={"mcast_group": "239.17.91.1"},
                           prefixes=[prefix("10.1.3.0/24", vrf=CORP_VRF,
                                            cfd={"dhcp_servers_ipv4": ["ghost"]})])]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertEqual(result["all_edge_vlans"]["91"]["dhcp_servers_ipv4"], [])
 
     def test_ipv6_dhcp_resolution(self):
@@ -479,7 +513,7 @@ class TestDhcpResolution(unittest.TestCase):
             prefix("2001:db8:9::/64", vrf=CORP_VRF, cfd={"dhcp_servers_ipv6": ["r1"]})
         ])]
         ip_list = [ip("r1", "2001:db8:9::53/128")]
-        result = build_evpn_data(vlan_list, ip_list, my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, ip_list, my_site=SITE, my_sg=SG)
         self.assertEqual(result["all_edge_vlans"]["92"]["dhcp_servers_ipv6"], ["2001:db8:9::53"])
 
 
@@ -491,7 +525,7 @@ class TestVrfFirstPrefixWins(unittest.TestCase):
                 prefix("10.1.5.0/24", vrf=vrf("SECOND", "2", "239.0.0.2")),
             ])
         ]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("FIRST", result["vrfs"])
         self.assertNotIn("SECOND", result["vrfs"])
 
@@ -539,7 +573,7 @@ class TestFullFabricIntegration(unittest.TestCase):
 
 class TestL2VniDerivation(unittest.TestCase):
     def _build(self, vlan_list, **kw):
-        return build_evpn_data(vlan_list, [], my_site=None, my_sg=None, **kw)
+        return build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG, **kw)
 
     def test_derived_from_vlan_id(self):
         result = self._build([vlan(101, "CORP_DATA", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)])])
@@ -609,14 +643,14 @@ class TestL3VniExtraction(unittest.TestCase):
     def test_l3vni_exposed_on_vrf(self):
         v = vrf("CORP", "199", l3vni=20199)
         result = build_evpn_data(
-            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], None, None
+            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], SITE, SG
         )
         self.assertEqual(result["vrfs"]["CORP"]["l3vni"], 20199)
 
     def test_string_l3vni_is_coerced(self):
         v = vrf("CORP", "199", l3vni="20199")
         result = build_evpn_data(
-            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], None, None
+            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], SITE, SG
         )
         self.assertEqual(result["vrfs"]["CORP"]["l3vni"], 20199)
 
@@ -624,7 +658,7 @@ class TestL3VniExtraction(unittest.TestCase):
 class TestVniValidation(unittest.TestCase):
     def _expect_failure(self, vlan_list, *fragments, **kw):
         with self.assertRaises(AnsibleFilterError) as ctx:
-            build_evpn_data(vlan_list, [], my_site=None, my_sg=None, **kw)
+            build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG, **kw)
         msg = str(ctx.exception)
         for fragment in fragments:
             self.assertIn(fragment, msg)
@@ -635,7 +669,7 @@ class TestVniValidation(unittest.TestCase):
         Enrolment semantics are covered in TestEvpnEnrolmentIsByL3vni."""
         v = vrf("CORP", "199", l3vni=None)
         result = build_evpn_data(
-            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], None, None
+            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], SITE, SG
         )
         self.assertEqual(result["vrfs"], {})
 
@@ -664,7 +698,7 @@ class TestVniValidation(unittest.TestCase):
         top = DEFAULT_L3VNI_BASE + 254
         v = vrf("CORP", "199", l3vni=top)
         result = build_evpn_data(
-            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], None, None
+            [vlan(101, "X", prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], SITE, SG
         )
         self.assertEqual(result["vrfs"]["CORP"]["l3vni"], top)
         self.assertLess(top, RD_TYPE1_MAX)
@@ -774,17 +808,17 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         ]
 
     def test_unrolled_vlan_is_not_deployed_as_an_overlay_segment(self):
-        result = build_evpn_data(self._underlay_vlans(), [], my_site=None, my_sg=None)
+        result = build_evpn_data(self._underlay_vlans(), [], my_site=SITE, my_sg=SG)
         self.assertEqual(result["all_edge_vlans"], {})
 
     def test_unrolled_vlan_gets_no_l2vni(self):
         """No VNI burned, and nothing for the NVE to join."""
-        result = build_evpn_data(self._underlay_vlans(), [], my_site=None, my_sg=None)
+        result = build_evpn_data(self._underlay_vlans(), [], my_site=SITE, my_sg=SG)
         self.assertEqual(result["all_edge_vlans"], {})
         self.assertNotIn("98", result["l2_vlans"])
 
     def test_unrolled_vlans_are_reported_not_silently_dropped(self):
-        result = build_evpn_data(self._underlay_vlans(), [], my_site=None, my_sg=None)
+        result = build_evpn_data(self._underlay_vlans(), [], my_site=SITE, my_sg=SG)
         self.assertEqual(set(result["skipped_vlans"]), {"98", "99"})
         self.assertEqual(result["skipped_vlans"]["98"]["name"], "Core-1-Underlay")
         self.assertEqual(result["skipped_vlans"]["98"]["role"], "")
@@ -792,7 +826,7 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
     def test_explicit_edge_role_is_deployed(self):
         vlan_list = [vlan(101, "CORP_DATA", role="edge",
                           prefixes=[prefix("10.67.118.160/27", vrf=CORP_VRF)])]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("101", result["all_edge_vlans"])
         self.assertEqual(result["skipped_vlans"], {})
 
@@ -801,7 +835,7 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         has to say so now."""
         vlan_list = [vlan(500, "GUEST_L2", role="edge",
                           cfd={"l2vni": 10500, "mcast_group": "239.17.5.1"})]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("500", result["all_edge_vlans"])
         self.assertEqual(result["all_edge_vlans"]["500"]["l2vni"], 10500)
 
@@ -812,7 +846,7 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
             vlan(197, "HANDOFF", role="vrf_l3_handoff_vlan", tags=["core1"],
                  prefixes=[prefix("10.67.118.4/31", vrf=CORP_VRF)]),
         ]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("199", result["vrfs"]["CORP"]["core_vlans"])
         self.assertIn("197", result["vrfs"]["CORP"]["handoff_vlans"])
         self.assertEqual(result["skipped_vlans"], {})
@@ -821,7 +855,7 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         """The rule is about the VLAN's role, not its VRF's enrolment."""
         vlan_list = [vlan(102, "NO_ROLE", role="",
                           prefixes=[prefix("10.0.2.0/24", vrf=CORP_VRF)])]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("102", result["skipped_vlans"])
         self.assertEqual(result["skipped_vlans"]["102"]["vrf_name"], "CORP")
         self.assertNotIn("102", result["all_edge_vlans"])
@@ -831,7 +865,7 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         underlay P2P prefix must not be advertised as a tenant subnet."""
         vlan_list = [vlan(98, "Core-1-Underlay", role="",
                           prefixes=[prefix("10.67.118.2/31", vrf=CORP_VRF)])]
-        result = build_evpn_data(vlan_list, [], my_site=None, my_sg=None)
+        result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertEqual(result["fabric_edge_subnets"], {})
 
     def test_out_of_scope_vlans_are_not_reported_as_skipped(self):
@@ -862,7 +896,7 @@ class TestMulticastGroupResolution(unittest.TestCase):
         v = vrf("CORP", "199", mcast_group="239.17.10.1")
         result = build_evpn_data(
             [vlan(101, "CORP_DATA", role="edge", prefixes=[prefix("10.0.1.0/24", vrf=v)])],
-            [], None, None)
+            [], SITE, SG)
         rec = result["all_edge_vlans"]["101"]
         self.assertEqual(rec["mcast_group"], "239.17.10.1")
         self.assertFalse(rec["mcast_group_is_override"])
@@ -871,7 +905,7 @@ class TestMulticastGroupResolution(unittest.TestCase):
         v = vrf("CORP", "199", mcast_group="239.17.10.1")
         result = build_evpn_data(
             [vlan(101, "CORP_DATA", role="edge", cfd={"mcast_group": "239.17.99.9"},
-                  prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], None, None)
+                  prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], SITE, SG)
         rec = result["all_edge_vlans"]["101"]
         self.assertEqual(rec["mcast_group"], "239.17.99.9")
         self.assertTrue(rec["mcast_group_is_override"])
@@ -880,7 +914,7 @@ class TestMulticastGroupResolution(unittest.TestCase):
         v = vrf("CORP", "199", mcast_group="239.17.10.1")
         result = build_evpn_data(
             [vlan(101, "X", role="edge", cfd={"mcast_group": ""},
-                  prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], None, None)
+                  prefixes=[prefix("10.0.1.0/24", vrf=v)])], [], SITE, SG)
         self.assertEqual(result["all_edge_vlans"]["101"]["mcast_group"], "239.17.10.1")
 
     def test_many_vlans_may_share_one_vrf_base_group(self):
@@ -888,7 +922,7 @@ class TestMulticastGroupResolution(unittest.TestCase):
         v = vrf("CORP", "199", mcast_group="239.17.10.1")
         vlans = [vlan(n, f"V{n}", role="edge", prefixes=[prefix(f"10.0.{n}.0/24", vrf=v)])
                  for n in (101, 102, 103)]
-        result = build_evpn_data(vlans, [], None, None)
+        result = build_evpn_data(vlans, [], SITE, SG)
         self.assertEqual({r["mcast_group"] for r in result["all_edge_vlans"].values()},
                          {"239.17.10.1"})
 
@@ -896,14 +930,14 @@ class TestMulticastGroupResolution(unittest.TestCase):
         v = vrf("CORP", "199", mcast_group=None)
         result = build_evpn_data(
             [vlan(100, "CORP_DATA_CAMPUS", role="edge", tags=["dag_routed"],
-                  prefixes=[prefix("10.67.118.128/27", vrf=v)])], [], None, None)
+                  prefixes=[prefix("10.67.118.128/27", vrf=v)])], [], SITE, SG)
         self.assertIn("100", result["all_edge_vlans"])
 
 
 class TestMulticastGroupValidation(unittest.TestCase):
     def _fails(self, vlan_list, *fragments, reserved=None):
         with self.assertRaises(AnsibleFilterError) as ctx:
-            build_evpn_data(vlan_list, [], None, None, reserved_mcast_prefixes=reserved)
+            build_evpn_data(vlan_list, [], SITE, SG, reserved_mcast_prefixes=reserved)
         msg = str(ctx.exception)
         for f in fragments:
             self.assertIn(f, msg)
@@ -921,7 +955,7 @@ class TestMulticastGroupValidation(unittest.TestCase):
         different forwarding design because a field was blank is exactly the
         failure mode the rest of this module exists to prevent."""
         with self.assertRaises(AnsibleFilterError) as cm:
-            build_evpn_data([vlan(500, "GUEST", cfd={"l2vni": 10500})], [], None, None)
+            build_evpn_data([vlan(500, "GUEST", cfd={"l2vni": 10500})], [], SITE, SG)
         self.assertIn("mcast_group", str(cm.exception))
 
     def test_vlan_in_a_vrf_without_a_base_group_still_fails(self):
@@ -981,7 +1015,7 @@ class TestMulticastGroupValidation(unittest.TestCase):
         v = vrf("CORP", "199", mcast_group="239.17.10.1")
         result = build_evpn_data(
             [vlan(101, "X", role="edge", prefixes=[prefix("10.0.1.0/24", vrf=v)])],
-            [], None, None,
+            [], SITE, SG,
             reserved_mcast_prefixes=[{"prefix": "239.100.0.0/16", "role": "default_mdt"}])
         self.assertEqual(result["all_edge_vlans"]["101"]["mcast_group"], "239.17.10.1")
 
@@ -991,7 +1025,7 @@ class TestMulticastGroupValidation(unittest.TestCase):
         result = build_evpn_data(
             [vlan(100, "R", role="edge", tags=["dag_routed"],
                   prefixes=[prefix("10.0.1.0/24", vrf=v)])],
-            [], None, None,
+            [], SITE, SG,
             reserved_mcast_prefixes=[{"prefix": "239.100.0.0/16", "role": "default_mdt"}])
         self.assertIn("100", result["all_edge_vlans"])
 
@@ -1027,7 +1061,7 @@ def _build_with_carve(group, allowed=LAB_ALLOWED, reserved=LAB_RESERVED):
     v = vrf("CORP", "199", mcast_group=group, l3vni=20003)
     return build_evpn_data(
         [vlan(101, "CORP_DATA", role="edge", prefixes=[prefix("10.0.1.0/24", vrf=v)])],
-        [], None, None,
+        [], SITE, SG,
         reserved_mcast_prefixes=reserved, allowed_mcast_prefixes=allowed)
 
 
@@ -1080,7 +1114,7 @@ class TestIpamDrivenMulticastCarve(unittest.TestCase):
         result = build_evpn_data(
             [vlan(100, "R", role="edge", tags=["dag_routed"],
                   prefixes=[prefix("10.0.1.0/24", vrf=v)])],
-            [], None, None,
+            [], SITE, SG,
             reserved_mcast_prefixes=LAB_RESERVED, allowed_mcast_prefixes=LAB_ALLOWED)
         self.assertEqual(result["all_edge_vlans"]["100"]["replication_mode"], "ingress")
 
@@ -1099,33 +1133,33 @@ class TestVlanNameValidation(unittest.TestCase):
 
     def test_whitespace_is_rejected(self):
         with self.assertRaises(AnsibleFilterError) as cm:
-            build_evpn_data([self._edge(104, "L2 only overlay for IoT")], [], None, None)
+            build_evpn_data([self._edge(104, "L2 only overlay for IoT")], [], SITE, SG)
         self.assertIn("contains whitespace", str(cm.exception))
 
     def test_whitespace_error_shows_what_ios_would_actually_read(self):
         """The useful part: it is not merely 'invalid', it shows the name being
         truncated at the first space."""
         with self.assertRaises(AnsibleFilterError) as cm:
-            build_evpn_data([self._edge(104, "L2 only overlay for IoT")], [], None, None)
+            build_evpn_data([self._edge(104, "L2 only overlay for IoT")], [], SITE, SG)
         self.assertIn("is read as 'name L2'", str(cm.exception))
 
     def test_over_the_limit_is_rejected_and_the_limit_is_stated(self):
         with self.assertRaises(AnsibleFilterError) as cm:
-            build_evpn_data([self._edge(105, "A" * 31)], [], None, None)
+            build_evpn_data([self._edge(105, "A" * 31)], [], SITE, SG)
         msg = str(cm.exception)
         self.assertIn("is 31 characters", msg)
         self.assertIn("the maximum is 30", msg)
 
     def test_exactly_at_the_limit_is_accepted(self):
         """Off-by-one guard: 30 is valid, 31 is not."""
-        result = build_evpn_data([self._edge(106, "A" * 30)], [], None, None)
+        result = build_evpn_data([self._edge(106, "A" * 30)], [], SITE, SG)
         self.assertIn("106", result["all_edge_vlans"])
 
     def test_every_bad_name_is_reported_in_one_run(self):
         """Reporting one at a time turns a bulk rename into a guessing game."""
         with self.assertRaises(AnsibleFilterError) as cm:
             build_evpn_data([self._edge(104, "has a space"),
-                             self._edge(105, "B" * 31)], [], None, None)
+                             self._edge(105, "B" * 31)], [], SITE, SG)
         msg = str(cm.exception)
         self.assertIn("2 problems", msg)
         self.assertIn("VLAN 104", msg)
@@ -1136,5 +1170,5 @@ class TestVlanNameValidation(unittest.TestCase):
         with self.assertRaises(AnsibleFilterError) as cm:
             build_evpn_data([vlan(199, "core vlan with space", role="core_vlan",
                                   prefixes=[prefix("10.1.1.0/24", vrf=CORP_VRF)])],
-                            [], None, None)
+                            [], SITE, SG)
         self.assertIn("VLAN 199", str(cm.exception))

@@ -74,20 +74,25 @@ The fabric's own convention, and the part with no substitute in code:
 - **Site = building.** Each switch belongs to one.
 - **Site group = campus.** Sites are grouped into it.
 
-A VLAN is rendered on a switch when **any** of these hold:
+**Scope is required.** A VLAN with no site and no VLAN group scope is enrolled
+**nowhere** — enrolment is opt-in throughout this project, and scope is how a
+VLAN says where it belongs. One that has not said is not a decision to honour.
+It is reported in the pre-deploy summary, not silently dropped.
 
 | VLAN in NetBox | Renders on |
 |---|---|
-| No site and no group scope | **Every switch in the fabric** |
-| `site` set | Switches in that site (building) |
-| Group whose scope is a **site group** | Switches whose site is in that campus |
-| Group whose scope is a **site** | Switches in that site |
+| **No site and no group scope** | **Nowhere** — reported as unscoped |
+| `site` set | Leaves in that site (building) |
+| Group whose scope is a **site group** | Leaves whose site is in that campus |
+| Group whose scope is a **site** | Leaves in that site |
 
-So a tenant VLAN that exists only in one building gets a site; one stretched
-across the campus gets a group scoped to the site group; one that must reach
-every switch gets neither. Fabric-wide is the *default* for an unscoped VLAN —
-worth knowing before adding a VLAN with no scope and finding it on all 500
-switches.
+So a tenant VLAN that exists in one building gets a site; one stretched across
+the campus gets a group scoped to the site group. There is no way to say
+"everywhere" by omission — scope the group at the widest site group you mean.
+
+"Leaves", not "switches": `leaf_config.j2` is the only template that renders
+edge VLANs. Borders and spines never carry them, except an L2-only overlay
+explicitly tagged for that border.
 
 Scope decides **where** a VLAN is rendered. Its **role**, below, decides
 **what** is rendered. A VLAN in scope with no recognised role produces nothing

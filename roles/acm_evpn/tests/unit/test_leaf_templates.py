@@ -142,9 +142,6 @@ class TestGlobalDefault(unittest.TestCase):
         self.assertNotIn("advertise mac enable", body)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestL2OnlyOverlay(unittest.TestCase):
     """An L2-only overlay has no VRF, so it is bridged with no gateway: the
@@ -184,3 +181,6 @@ class TestL2OnlyOverlay(unittest.TestCase):
     def test_border_nve_member_carries_the_group(self):
         out = render_border(l2_only_vlan(900, tags=["core1"]), "core1")
         self.assertIn(" member vni 10900 mcast-group 239.0.1.1", out)
+
+if __name__ == "__main__":
+    unittest.main()
