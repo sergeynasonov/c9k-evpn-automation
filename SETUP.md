@@ -187,10 +187,16 @@ some of it is load-bearing:
 - `result_format = yaml` — readable multi-line output instead of JSON blobs.
 
 ### 2. `netbox_inv.yml` (Dynamic Inventory)
-*Note: Do not define the `token:` key. The plugin automatically detects the `NETBOX_TOKEN` environment variable.*
+*Define neither `api_endpoint:` nor `token:`. The plugin reads `NETBOX_API` and
+`NETBOX_TOKEN` from the environment on its own, which is how this repo avoids
+hardcoding a NetBox instance.*
+
+*An inventory plugin config is **not** templated, so
+`api_endpoint: "{{ lookup('env', 'NETBOX_API') }}"` does not work — the literal
+string reaches urllib and fails with `unknown url type`, taking the whole
+inventory with it and leaving every play with "no hosts matched".*
 ```yaml
 plugin: netbox.netbox.nb_inventory
-api_endpoint: "{{ lookup('env', 'NETBOX_API') }}"
 validate_certs: true
 use_extra_vars: true
 flatten_custom_fields: true

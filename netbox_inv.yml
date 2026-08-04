@@ -1,9 +1,13 @@
 # netbox_inv
 
 plugin: netbox.netbox.nb_inventory
-# Read from the environment so no NetBox instance is hardcoded in the repo.
-# direnv/Infisical already export NETBOX_API for the roles; see SETUP.md.
-api_endpoint: "{{ lookup('env', 'NETBOX_API') }}"
+# api_endpoint is deliberately NOT set here, so no NetBox instance is hardcoded
+# in the repo. The plugin reads the NETBOX_API environment variable directly --
+# the same mechanism as the token, which reads NETBOX_TOKEN.
+#
+# Do NOT put "{{ lookup('env', 'NETBOX_API') }}" here. An inventory plugin
+# config is not templated: the literal string reaches urllib and fails with
+# 'unknown url type', taking the whole inventory with it.
 validate_certs: true
 use_extra_vars: true
 flatten_custom_fields: true
