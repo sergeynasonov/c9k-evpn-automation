@@ -249,11 +249,17 @@ Valid indexes are 1–254, which is what bounds `l3vni` to 20001–20254. Do not
 derive the index from NetBox's VRF `id`: it is a surrogate key that changes on
 delete-and-recreate and climbs past 254 as objects churn.
 
-**`239.0.0.0/16` (index 0) is the L2-only block.** An L2-only overlay belongs to
-no VRF, so it has no per-VRF `/16` to sit in; index 0 was already left unused by
-the per-VRF carve, which is exactly where it fits. It uses the same
-`l2vni_replication` prefix role — an L2-only segment's BUM group is an L2VNI
-replication group like any other. Create it with
+**`239.0.0.0/16` (index 0) is the L2-only block, and it is FLAT.** An L2-only
+overlay belongs to no VRF, so it has no per-VRF `/16` to sit in; index 0 was
+already left unused by the per-VRF carve, which is exactly where it fits.
+
+It is deliberately *not* subdivided the way a VRF block is. That subdivision
+exists to separate L2VNI replication from the MDT ranges, and MDTs are per-VRF
+TRM constructs — at index 0 they could never be used, so carving them would
+reserve address space against a case that cannot arise and confine L2-only
+groups to a `/24` for no reason. The whole `/16` carries the same
+`l2vni_replication` role used per-VRF: an L2-only segment's BUM group is an
+L2VNI replication group like any other. Create it with
 `netbox_multicast_carve.py --l2-only`. `239.0.0.0/16` and `239.255.0.0/16` are left unused
 (the latter is IPv4 Local Scope).
 
