@@ -569,3 +569,12 @@ The dense logic — the NetBox transform, underlay extraction, VNI and multicast
 allocation, peer selection, the deploy guard — lives in
 `roles/acm_evpn/filter_plugins/` as plain Python precisely so it can be tested
 this way.
+
+---
+
+## Author
+
+Sergey Nasonov, Network Systems Engineer, Cisco Systems — <snasonov@cisco.com>
+
+Copyright © 2026 Sergey Nasonov, Cisco Systems.
+Licensed under the [GNU General Public License v3.0 or later](LICENSE).
