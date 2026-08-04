@@ -6,6 +6,10 @@
 # the rendered candidate in switch-configuration/, which the operator diffs
 # directly. A console summary there duplicates the artifact, worse.
 #
+# NetBox data hygiene moved to 02b_netbox_hygiene.yml, which BOTH paths run --
+# a VLAN that configures nothing appears in no artifact, so the console line is
+# the only place it can be seen.
+#
 # Two rules learned from the first version:
 #
 #  * 'msg' is a LIST of strings, not one multi-line string. The default callback
@@ -89,35 +93,6 @@
       {%-   set _ = out.append('  ' ~ quiet ~ ' switch(es) with no pending object changes') -%}
       {%- endif -%}
 
-      {#- NetBox data hygiene, stated once rather than once per switch: these
-          are properties of NetBox, not of any device. -#}
-      {%- set skipped = hostvars[_hosts[0]].skipped_vlans | default({}) -%}
-      {%- set no_role = [] -%}
-      {%- set unscoped = [] -%}
-      {%- for vid, v in skipped | dictsort(by='key') -%}
-      {%-   set seen = [] -%}
-      {%-   for h in _hosts if vid in (hostvars[h].skipped_vlans | default({})) -%}
-      {%-     set _ = seen.append(h) -%}
-      {%-   endfor -%}
-      {%-   if seen | length == _hosts | length -%}
-      {%-     if v.reason | default('no_role') == 'unscoped' -%}
-      {%-       set _ = unscoped.append(vid ~ ' (' ~ v.name ~ ')') -%}
-      {%-     else -%}
-      {%-       set _ = no_role.append(vid ~ ' (' ~ v.name ~ ')') -%}
-      {%-     endif -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {%- if no_role -%}
-      {%-   set _ = out.append('  NetBox: VLAN(s) ' ~ (no_role | join(', '))
-                               ~ ' are in scope with no role and configure nothing'
-                               ~ ' -- set role "edge" if they should be overlay segments') -%}
-      {%- endif -%}
-      {%- if unscoped -%}
-      {%-   set _ = out.append('  NetBox: VLAN(s) ' ~ (unscoped | join(', '))
-                               ~ ' have no site and no VLAN group scope, so they are'
-                               ~ ' enrolled nowhere -- assign a scope if they should be'
-                               ~ ' fabric segments') -%}
-      {%- endif -%}
       {{ out | to_json }}
   run_once: true
   delegate_to: localhost

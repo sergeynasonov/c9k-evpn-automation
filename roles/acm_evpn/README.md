@@ -77,7 +77,13 @@ The fabric's own convention, and the part with no substitute in code:
 **Scope is required.** A VLAN with no site and no VLAN group scope is enrolled
 **nowhere** — enrolment is opt-in throughout this project, and scope is how a
 VLAN says where it belongs. One that has not said is not a decision to honour.
-It is reported in the pre-deploy summary, not silently dropped.
+
+This is **reported, never fatal**. A NetBox legitimately holds VLANs that are
+not fabric segments, and failing the render because one exists would make the
+fabric hostage to unrelated data. Both `generate_evpn.yml` and `deploy_evpn.yml`
+print the finding, which matters because a VLAN that produces no configuration
+appears in no candidate file — the console line is the only place it is
+visible.
 
 | VLAN in NetBox | Renders on |
 |---|---|
