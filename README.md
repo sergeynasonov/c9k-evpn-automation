@@ -11,6 +11,32 @@ Configuration Manager), which validates the candidate on the device, applies it
 under a rollback timer, and only makes it permanent once the automation confirms
 the commit.
 
+## What this automates
+
+**Today:**
+
+- **EVPN overlays, IPv4 address-family** — VRFs, anycast-gateway SVIs, EVPN
+  instances, the NVE interface and overlay BGP, rendered from NetBox.
+- **Per-VRF BGP IPv4 handoffs on borders** — the handoff SVI and its eBGP
+  neighbour, so a tenant VRF reaches the outside world.
+- **IPv4 TRM** (tenant routed multicast) — MVPN auto-discovery, default and data
+  MDTs, anycast or external RP.
+
+**Not functional today. Near-term roadmap:**
+
+- **L2-only overlays** — a VLAN with no VRF is read from NetBox and carried in
+  the data model, but no template renders it. Every overlay segment today is
+  routed, with an anycast gateway.
+- **ESI multihoming**
+- **IPv6** — no `address-family ipv6` in the overlay, and no IPv6 TRM.
+
+**The fabric it builds** is **iBGP EVPN**: one ASN across the fabric, spines as
+route reflectors for both `l2vpn evpn` and `ipv4 mvpn`. Reachability between
+VTEPs comes from an **IGP — OSPFv2** — not from BGP. That IGP, and everything
+else in the underlay, is **built by hand** and never touched by Ansible; see
+[Phase 1](#phase-1--day-0-hand-build-the-underlay) for exactly what it must
+contain.
+
 ## Requirements
 
 Three of these are hard prerequisites that will not fail gracefully if unmet.
@@ -111,41 +137,155 @@ This is deliberate. The underlay changes only when switches are added or removed
 and a mistake in it costs the management plane — the path the automation itself
 arrives on. Modelling it would put that path at the mercy of a NetBox edit.
 
-**On a border:**
+Everything below is what `readiness.yml` checks for, so a switch built from
+these blocks passes. **Substitute your own addressing**; the values shown are
+examples, and every line that is not addressing is verbatim.
 
-1. Configure the `Loopback0` interface.
-2. Configure the underlay handoff SVI, and allow that VLAN on the trunk to the
-   upstream device.
-3. Configure BGP with the fabric ASN, establish peering with upstream, and
-   receive a default route into the global routing table — this is what gives
-   the node reachability to the Ansible control node.
-4. Configure the underlay routed interfaces with IP addressing.
-5. Enable OSPF on `Loopback0` and the underlay routed interfaces.
-6. Originate the default route into OSPF (`default-information originate`), so
-   the rest of the fabric learns its way out through this node.
+`readiness.yml` additionally *installs* the platform baseline (NTP, AAA, VTY
+hardening, CoPP, CEF load-sharing and so on) with `ios_config`, so you do not
+have to paste those. The CEF lines are shown below anyway because they matter
+from the moment the underlay carries traffic, and re-applying them is a no-op.
 
-**On a leaf or spine:** steps 1, 4 and 5. The handoff SVI, trunk, external BGP
-peering and default-route origination (2, 3 and 6) are border-only — the border
-is what connects the fabric to the outside world, which is why it is the node
-that originates the default.
-
-**On a spine, additionally:** the anycast RP loopback carrying
-`underlay_rp_address`, and the **MSDP mesh to every other spine**, sourced from
-`Loopback0`:
+### Every node — globals
 
 ```
-ip msdp peer <other-spine-Loopback0> connect-source Loopback0
+system mtu 9100
+!
+ip routing
+!
+ip multicast-routing
+ip pim register-source Loopback0
+ip pim ssm default
+ip pim rp-address 10.0.0.100 override
+!
+! ECMP hashing. Without include-ports, every flow between the same pair of
+! VTEPs hashes to one uplink, because the outer VXLAN header is identical.
+ip cef load-sharing algorithm include-ports source destination
+ipv6 cef load-sharing algorithm include-ports source destination
+```
+
+`ip routing` prints on a C9300 and is a silent default on the C9400/9500/9600 —
+harmless to paste on any of them. `10.0.0.100` is the fabric anycast RP, which
+lives on the spines; it must match `underlay_rp_address` in
+`group_vars/all/fabric.yml`.
+
+### Every node — Loopback0
+
+The VTEP source, the OSPF and BGP router-id, and the PIM register source. **Must
+be a /32**, and must match the device's primary IPv4 in NetBox.
+
+```
+interface Loopback0
+ ip address 10.0.0.11 255.255.255.255
+ ip pim sparse-mode
+ ip ospf 1 area 0
+```
+
+### Every node — routed uplinks
+
+Every fabric-facing routed interface. Uplinks are **discovered**, not named, so
+nothing depends on an interface-naming convention — any non-loopback, non-SVI
+interface in OSPF process 1 is checked against this list.
+
+```
+interface TenGigabitEthernet1/1/1
+ no switchport
+ ip address 10.1.1.0 255.255.255.254
+ no ip redirects
+ no ip unreachables
+ no ip proxy-arp
+ ip pim sparse-mode
+ ip ospf network point-to-point
+ ip ospf 1 area 0
+ load-interval 30
+ carrier-delay msec 0
+ bfd interval 250 min_rx 250 multiplier 3
+ hold-queue 4094 in
+ hold-queue 4094 out
+```
+
+`bfd interval` is what makes BFD real. `bfd all-interfaces` under `router ospf`
+arms nothing on its own — an interface without per-interface timers falls back
+to OSPF dead-interval detection, and you get 40-second failover while the
+configuration looks correct.
+
+### Every node — OSPF
+
+```
+router ospf 1
+ router-id 10.0.0.11
+ max-metric router-lsa include-stub summary-lsa external-lsa on-startup 60
+ nsf cisco
+ fast-reroute per-prefix enable prefix-priority low
+ bfd all-interfaces
+```
+
+`router-id` must equal the `Loopback0` address — BGP takes its router-id from the
+same interface, and a disagreement makes route dumps unreadable. `max-metric
+on-startup` holds a rebooting node out of the transit topology until it has
+converged.
+
+### Spines only — anycast RP and MSDP
+
+The RP loopback carries the **same address on every spine**, which is what makes
+it anycast.
+
+```
+interface Loopback60000
+ ip address 10.0.0.100 255.255.255.255
+ ip pim sparse-mode
+ ip ospf 1 area 0
+!
 ip msdp originator-id Loopback0
+ip msdp peer 10.0.0.12 connect-source Loopback0
 ```
 
-MSDP must be configured on **both** ends. It is a full mesh, and a one-way
+One `ip msdp peer` per **other** spine, addressed to that spine's `Loopback0`.
+It is a full mesh and **must be configured on both ends**. A one-way
 configuration is silent — each switch's own config looks complete, so nothing
-reveals the gap until multicast misbehaves. This has already happened once in
-this fabric: core2 pointed at core1 and core1 did not point back.
+reveals the gap until multicast misbehaves. This fabric has already been bitten
+by it: core2 pointed at core1 and core1 did not point back. Because it is day-0
+topology the automation does not own it and nothing reconciles the two ends,
+which is exactly why `readiness.yml` checks every pair.
 
-Because this is day-0 topology the automation deliberately does not own it, so
-nothing reconciles the two ends. That is what the readiness role is for — see
-below.
+### Borders only — underlay handoff and default route
+
+The handoff SVI lives in the **global** table (no `vrf forwarding`) and carries
+the underlay eBGP session to upstream. Allow its VLAN on the trunk to the
+upstream device.
+
+```
+interface Vlan98
+ ip address 10.2.0.1 255.255.255.254
+!
+router bgp 64513
+ bgp router-id interface Loopback0
+ bgp log-neighbor-changes
+ bgp graceful-restart
+ no bgp default ipv4-unicast
+ neighbor 10.2.0.0 remote-as 64512
+ !
+ address-family ipv4
+  neighbor 10.2.0.0 activate
+  network 10.0.0.11 mask 255.255.255.255
+  aggregate-address 10.0.0.0 255.255.255.192 summary-only
+  maximum-paths ibgp 4
+ exit-address-family
+!
+router ospf 1
+ default-information originate
+```
+
+`64513` is the fabric ASN (`evpn_bgp_asn`); `64512` is upstream's. **Ownership
+of this stanza is by ASN**: the automation regenerates neighbours in the fabric
+ASN — the EVPN peer group and the border-to-border session — and preserves
+everything in any other ASN verbatim. So this eBGP session survives every
+deploy untouched, and you never re-declare it anywhere.
+
+`default-information originate` is **border-only**. It injects the default the
+border learned from upstream into the fabric's OSPF, which is what gives every
+leaf and spine a path out. A leaf running it would advertise a default it cannot
+honour.
 
 Once this is done the node is reachable and self-sufficient; everything from here
 is additive.
