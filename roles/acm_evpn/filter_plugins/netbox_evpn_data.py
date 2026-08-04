@@ -1123,7 +1123,24 @@ def build_evpn_data(
         match_sg_site = (scope_type == "site" and scope_id == my_site) if scope_type else False
         no_scope = not site_id and not scope_id
 
-        if not (no_scope or match_site or match_sg or match_sg_site):
+        # A VLAN with NO scope at all is not eligible for the fabric. Enrolment
+        # is opt-in throughout this project, and scope is how a VLAN says where
+        # it belongs -- an unscoped VLAN has not said, so it is not a decision
+        # to honour. It used to be treated as fabric-wide, which inverted the
+        # rule: forgetting to scope a VLAN pushed it to every leaf rather than
+        # to none. Reported rather than dropped, since it is a NetBox data
+        # problem the operator needs to see.
+        if no_scope:
+            skipped_vlans[vid_str] = {
+                "vid": vlan["vid"],
+                "name": v_data["name"],
+                "role": role,
+                "vrf_name": v_data["vrf_name"],
+                "reason": "unscoped",
+            }
+            continue
+
+        if not (match_site or match_sg or match_sg_site):
             continue
 
         # A VLAN with no recognised role produces no configuration. Surfaced in
@@ -1136,6 +1153,7 @@ def build_evpn_data(
                 "name": v_data["name"],
                 "role": role,
                 "vrf_name": v_data["vrf_name"],
+                "reason": "no_role",
             }
             continue
 

@@ -237,13 +237,19 @@ class TestMulticastVlanTagging(unittest.TestCase):
         self.assertEqual(_fabric_mcast_vlan_vrfs(vlans), {"CORP"})
 
 
+# A VLAN must be scoped to be enrolled at all, so these fixtures carry a site
+# and the rendering host belongs to it.
+SITE = "51"
+SG = "3"
+
+
 class TestEndToEnd(unittest.TestCase):
     """Through build_evpn_data, so the wiring is covered as well as the helper."""
 
     VLANS = [
         {"vid": 100, "name": "CORP_DATA_CAMPUS", "role": {"slug": "edge"},
          "tags": [{"slug": "dag_routed"}, {"slug": "multicast_enabled"}],
-         "site": None, "custom_field_data": {}, "group": None,
+         "site": {"id": SITE}, "custom_field_data": {}, "group": None,
          "prefixes": [{"prefix": "10.67.118.128/27", "custom_field_data": {},
                        "vrf": {"name": "CORP", "rd": "1:1",
                                "custom_field_data": {"l3vni": 20003,
@@ -251,7 +257,7 @@ class TestEndToEnd(unittest.TestCase):
     ]
 
     def test_vrf_entry_carries_a_trm_block(self):
-        data = build_evpn_data(self.VLANS, [], None, None,
+        data = build_evpn_data(self.VLANS, [], SITE, SG,
                                reserved_mcast_prefixes=MDT,
                                trm_objects=TRM_OBJECTS, hostname="access1-1")
         trm_block = data["vrfs"]["CORP"]["trm"]
@@ -264,7 +270,7 @@ class TestEndToEnd(unittest.TestCase):
         """No MDT prefixes, no tags: every VRF comes back disabled and nothing
         fails. This is the state every existing fabric is in."""
         vlans = [dict(self.VLANS[0], tags=[{"slug": "dag_routed"}])]
-        data = build_evpn_data(vlans, [], None, None)
+        data = build_evpn_data(vlans, [], SITE, SG)
         self.assertFalse(data["vrfs"]["CORP"]["trm"]["enabled"])
 
     def test_multicast_tag_without_an_active_mdt_fails_the_render(self):
@@ -272,7 +278,7 @@ class TestEndToEnd(unittest.TestCase):
         multicast is worse than a blocked render. The VLAN keeps its
         multicast_enabled tag here but no MDT prefix is supplied."""
         with self.assertRaises(AnsibleFilterError) as ctx:
-            build_evpn_data(self.VLANS, [], None, None)
+            build_evpn_data(self.VLANS, [], SITE, SG)
         self.assertIn("not multicast-enabled", str(ctx.exception))
 
     def test_multicast_tag_in_an_unenrolled_vrf_fails_the_render(self):
@@ -282,7 +288,7 @@ class TestEndToEnd(unittest.TestCase):
                                  "vrf": {"name": "NOTFABRIC", "rd": "1:1",
                                          "custom_field_data": {"l3vni": None}}}]
         with self.assertRaises(AnsibleFilterError) as ctx:
-            build_evpn_data(vlans, [], None, None, reserved_mcast_prefixes=MDT,
+            build_evpn_data(vlans, [], SITE, SG, reserved_mcast_prefixes=MDT,
                             trm_objects=TRM_OBJECTS, hostname="access1-1")
         self.assertIn("not enrolled in the fabric", str(ctx.exception))
 
