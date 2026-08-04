@@ -169,6 +169,39 @@ direnv allow
 ```
 *You should immediately see the secrets load and your `(venv)` activate in your shell prompt.*
 
+### Why you never type `infisical run --`
+
+`infisical export` puts the secrets into your shell environment, and
+`export PATH="$VIRTUAL_ENV/bin:$PATH"` puts the venv's binaries on your path. So
+inside the project directory you run the tools bare:
+
+```bash
+ansible-playbook readiness.yml        # not: infisical run -- ansible-playbook ...
+```
+
+**Do not try to do this with an alias in `.envrc`.** direnv captures the
+*environment* its `.envrc` produces, and an alias is a shell builtin rather than
+an environment variable, so it is silently discarded — verified against direnv
+2.37: `export FOO=bar` survives, `alias foo=bar` does not appear at all. An alias
+line there looks like configuration and does nothing.
+
+If you would rather fetch secrets **per command** than snapshot them at directory
+entry, put the alias in your shell rc — `~/.zshrc` on macOS, `~/.bashrc` under
+WSL2 — not in `.envrc`:
+
+```bash
+alias ap='infisical run -- ansible-playbook'
+```
+
+Use a distinct name like `ap` rather than shadowing `ansible-playbook`: a shell
+alias applies in every directory, so overriding the real command name would break
+any other Ansible project you open.
+
+The trade-off is freshness. The `.envrc` export is a snapshot taken when you
+entered the directory, so a secret rotated in Infisical since then is stale until
+you run `direnv reload` (see the end of this document). `infisical run --` fetches
+at every invocation and is never stale, at the cost of a round-trip per command.
+
 ---
 
 ## Step 5: Ansible Configuration Reference
