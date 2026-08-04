@@ -2,40 +2,86 @@
 
 This project uses a modern, secure, and automated local development environment. It leverages **Infisical** for centralized secret management, **direnv** for automatic environment variable injection and virtual environment activation, and **Ansible** for Cisco IOS-XE automation using a **NetBox** dynamic inventory.
 
-## 🛠 Prerequisites (macOS)
-Ensure you have Homebrew and Python 3 installed on your system.
+## Step 1: Prerequisites and system dependencies
+
+Pick your platform below. **Everything from Step 2 onward is identical**, so
+follow one of these and then continue down the page.
+
+### macOS
+
+Ensure you have Homebrew and Python 3:
 
 ```bash
 # Install Homebrew if you don't have it
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# Install Python 3
 brew install python3
-```
-
----
-
-## Step 1: Install System Dependencies
-Install the required command-line tools using Homebrew.
-
-```bash
-# Install Infisical CLI
 brew install infisical/get-infisical/infisical
-
-# Install direnv
 brew install direnv
 ```
 
-Hook `direnv` into your shell by adding it to your `~/.zshrc` file:
+Hook `direnv` into your shell:
+
 ```bash
 echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
+### Windows — via WSL2
+
+**Ansible cannot run as a control node on Windows.** `ansible-core` is published
+for `Operating System :: POSIX` only, and its SSH connection plugin — which
+`network_cli` uses to reach the switches — imports `fcntl`, a module that does
+not exist on Windows. This is not a gap to work around; run it under WSL2, where
+it is Linux and the rest of this document applies unchanged.
+
+In **PowerShell as Administrator**, then reboot and set a UNIX username when
+Ubuntu first launches:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Everything from here runs **inside the Ubuntu shell**, not PowerShell:
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip direnv curl git
+
+# Infisical CLI (adds their apt repository)
+curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
+sudo apt update && sudo apt install -y infisical
+```
+
+Hook `direnv` into your shell — WSL Ubuntu defaults to **bash**, not zsh:
+
+```bash
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+> **Clone into the WSL home directory, never `/mnt/c`.**
+>
+> The Windows filesystem is mounted world-writable inside WSL, and **Ansible
+> silently skips `ansible.cfg` in a world-writable directory** — it prints one
+> warning and carries on. You lose the NetBox inventory, `roles_path`,
+> `strategy = free` and the connection timeouts all at once, and the symptom is
+> a playbook that finds no hosts rather than anything pointing at the cause.
+>
+> Use `~/c9k-evpn-automation`. You can still edit it from Windows: VS Code with
+> the WSL extension, or `\\wsl$\Ubuntu\home\<you>\` in Explorer.
+
+Two smaller things worth knowing on WSL. Your switches must be reachable from
+the WSL network namespace — WSL2 NATs through the Windows host, so a VPN on the
+Windows side normally works, but a split-tunnel or a strict host firewall can
+leave WSL without a route to the management network. And `wsl --shutdown` closes
+persistent SSH connections, so re-run rather than resume a playbook after one.
+
 ---
 
 ## Step 2: Authenticate with Infisical
-Log in to your Infisical account. This will securely cache your session in the macOS keychain.
+Log in to your Infisical account. The session is cached by your OS credential
+store — the macOS keychain, or the Linux keyring under WSL2.
 ```bash
 infisical login
 ```
