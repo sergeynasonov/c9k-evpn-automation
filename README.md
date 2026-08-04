@@ -241,12 +241,9 @@ ip msdp peer 10.0.0.12 connect-source Loopback0
 ```
 
 One `ip msdp peer` per **other** spine, addressed to that spine's `Loopback0`.
-It is a full mesh and **must be configured on both ends**. A one-way
-configuration is silent — each switch's own config looks complete, so nothing
-reveals the gap until multicast misbehaves. This fabric has already been bitten
-by it: core2 pointed at core1 and core1 did not point back. Because it is day-0
-topology the automation does not own it and nothing reconciles the two ends,
-which is exactly why `readiness.yml` checks every pair.
+It is a full mesh and **must be configured on both ends** — a one-way
+configuration looks complete on each switch individually, so `readiness.yml`
+checks every pair rather than each device in isolation.
 
 ### Borders only — underlay handoff and default route
 
@@ -449,11 +446,9 @@ change breaks the management path the confirm never lands and the switch rolls
 itself back when the timer expires.
 
 **A switch already in the desired state is a success, not a failure.** ACM
-reports `Config diff empty. No Diff to Validate/Apply` and does *not* report
-`Status : Success`, so a naive not-Success test reads a perfectly converged
-switch as a validation error — which is exactly what happened on the first fully
-converged deploy. The role detects the empty diff, reports it, and skips the
-apply, confirm, save and net-diff download, because there is nothing to do.
+reports `Config diff empty. No Diff to Validate/Apply` for a converged switch.
+The role detects this, reports it, and skips the apply, confirm, save and
+net-diff download, because there is nothing to do.
 
 ## Allocating TRM register sources
 
@@ -481,33 +476,25 @@ For each switch and external-RP VRF it creates `Loopback<l3vni>` on the device
 prefix tagged `trm_register_source` — and attaches it to that interface with the
 built-in `Loopback` role.
 
-**The interface is the ownership record.** NetBox expresses "this address belongs
-to this device" as IPAddress → Interface → Device, so the loopback has to exist
-before an address can be attached to it. This is the only interface this project
-models, and only because NetBox chooses the address: something has to record
-which switch got it. The `trm_register_source` tag classifies *what* the address
-is; the interface says *whose* it is.
+The `Loopback<l3vni>` interface is the ownership record — NetBox expresses
+"this address belongs to this device" as IPAddress → Interface → Device. This is
+the only interface this project models, and only because NetBox chooses the
+address, so something has to record which switch got it.
 
-Three things worth knowing before the first run:
+Before the first run:
 
-- **Borders are allocated first, then leaves.** That is two plays rather than a
-  sort key — "borders first" is not expressible as an ordering across parallel
-  hosts, only as one play finishing before the next starts.
-- **The pool is sized before anything is written.** A pool that cannot cover
-  every VTEP that needs it fails the run with nothing allocated. Discovering it
-  at switch 340 of 500 would be considerably worse. The check counts *free*
-  capacity, so the borders play consuming addresses before the leaves play runs
-  is handled correctly.
+- **Borders are allocated first, then leaves**, as two plays.
+- **The pool is size-checked before anything is written**, against *free*
+  capacity. A pool too small for every VTEP fails the run with nothing
+  allocated.
 - **`--check` reports which switches need an address and how many, but not
-  which address.** NetBox picks it at allocation time, so there is nothing to
-  predict. (It also cannot simulate the write: netbox.netbox 3.23.0 has a
-  check-mode defect, documented in `requirements.yml`.)
+  which address** — NetBox picks it at allocation time. It also cannot simulate
+  the write; see the netbox.netbox note in `requirements.yml`.
 
-A final play prints every register source in NetBox with the switch and
-interface holding it. An address whose owner is no longer in inventory is
-reported as **orphaned and never reclaimed** — a switch can be temporarily out
-of the play, and automatically freeing its address would hand it to another
-switch while the first still has it configured.
+A final play prints every register source with the switch and interface holding
+it. An address whose owner has left the inventory is reported as **orphaned and
+never reclaimed**, since a switch can be temporarily out of the play and
+freeing its address would hand it to another switch.
 
 ## Changing something
 

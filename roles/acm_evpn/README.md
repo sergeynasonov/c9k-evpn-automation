@@ -158,9 +158,8 @@ Global multicast (`ip multicast-routing`, `ip pim ssm default`,
 and rendered unconditionally by `common_base.j2`, so extracting it too would
 emit it twice.
 
-Nothing is special-cased. The anycast RP loopback and the MSDP mesh used to be
-generated and are now ordinary underlay, which removed both the exception and
-the requirement that an exclusion list stay in step with a template condition.
+Nothing is special-cased: the anycast RP loopback and the MSDP mesh are
+ordinary underlay, preserved like everything else in the global table.
 
 ---
 
@@ -204,13 +203,9 @@ for that VRF:
 so `l3vni 20003` owns `239.3.0.0/16`. One number therefore identifies a VRF
 everywhere — RD and route-targets `:20003`, multicast block `239.3.x`.
 
-It is deliberately *not* read from NetBox's VRF `id`. That is a database
-surrogate key: it changes when an object is deleted and recreated or when an
-instance is rebuilt through the API, and it climbs past 254 as objects churn.
-Seeding `l3vni` from the id when first allocating is fine — the id is then out
-of the loop.
-
-Valid indexes are 1–254. `239.0.0.0/16` and `239.255.0.0/16` are left unused
+Valid indexes are 1–254, which is what bounds `l3vni` to 20001–20254. Do not
+derive the index from NetBox's VRF `id`: it is a surrogate key that changes on
+delete-and-recreate and climbs past 254 as objects churn. `239.0.0.0/16` and `239.255.0.0/16` are left unused
 (the latter is IPv4 Local Scope).
 
 Conventional allocations within a VRF's block:
