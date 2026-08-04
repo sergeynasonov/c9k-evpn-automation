@@ -703,6 +703,53 @@ def _validate_l2_only(candidates: List[Dict[str, Any]]) -> None:
             + "\n  - ".join(errors))
 
 
+# Longest VLAN name this fabric permits. IOS-XE itself accepts 32, so this
+# leaves a little headroom rather than sitting on the platform ceiling. The
+# limit is quoted verbatim in the error below, so the number and the message
+# cannot drift apart.
+MAX_VLAN_NAME_LEN = 30
+
+
+def _vlan_name_problem(name: str) -> Optional[str]:
+    """Why ``name`` cannot be an IOS-XE VLAN name, or None.
+
+    NetBox accepts anything, IOS-XE does not, and the two disagree silently.
+    A name containing a space renders as ``name L2 only overlay for IoT``, which
+    the parser reads as ``name L2`` before rejecting the remainder -- so the
+    candidate fails at ``acm replace ... validate``, after being copied to every
+    switch, with a parser error that never mentions NetBox or the VLAN.
+    """
+    if name is None or name == "":
+        return "is empty"
+    if any(c.isspace() for c in name):
+        return ("contains whitespace. IOS-XE cannot parse it: 'name {}' is read "
+                "as 'name {}' and the rest is rejected".format(name, name.split()[0]))
+    if len(name) > MAX_VLAN_NAME_LEN:
+        return "is {} characters; the maximum is {}".format(len(name), MAX_VLAN_NAME_LEN)
+    return None
+
+
+def _validate_vlan_names(candidates: List[Dict[str, Any]]) -> None:
+    """Reject VLAN names IOS-XE cannot accept, before anything is rendered.
+
+    Checked here rather than in the template because a template cannot fail
+    usefully -- it would emit the bad line and leave the switch to complain.
+    """
+    errors: List[str] = []
+    for c in sorted(candidates, key=lambda x: int(x["vid"])):
+        problem = _vlan_name_problem(c["name"])
+        if problem:
+            errors.append(
+                "VLAN {} '{}' {}. Rename it in NetBox: VLAN names must be at most "
+                "{} characters and contain no whitespace."
+                .format(c["vid"], c["name"], problem, MAX_VLAN_NAME_LEN))
+    if errors:
+        raise AnsibleFilterError(
+            "netbox_evpn_data: VLAN name validation failed ({} problem{}):\n  - ".format(
+                len(errors), "" if len(errors) == 1 else "s")
+            + "\n  - ".join(errors))
+
+
 def _validate_fabric_vnis(
     l3_by_vrf: Dict[str, int],
     l3_bad_by_vrf: Dict[str, Any],
@@ -1009,6 +1056,9 @@ def build_evpn_data(
     # must contain only segments that are actually fabric overlays.
     l2_only_vlans: Dict[str, Any] = {}
     l2_only_bad: List[Dict[str, Any]] = []
+    # Every in-scope VLAN with a recognised role has its name rendered as
+    # 'vlan <id> / name <name>', so every one of them is checked.
+    named_vlans: List[Dict[str, Any]] = []
     all_edge_vlans: Dict[str, Any] = {}
     fabric_edge_subnets: Dict[str, Any] = {}
     skipped_vlans: Dict[str, Any] = {}
@@ -1089,6 +1139,8 @@ def build_evpn_data(
             }
             continue
 
+        named_vlans.append({"vid": vlan["vid"], "name": v_data["name"]})
+
         if v_data["vrf_name"] and _is_evpn_vrf(v_data):
             vrf_name = v_data["vrf_name"]
             if vrf_name not in vrfs:
@@ -1125,6 +1177,7 @@ def build_evpn_data(
                     l2_only_vlans[vid_str] = v_data
                     all_edge_vlans[vid_str] = v_data
 
+    _validate_vlan_names(named_vlans)
     _validate_l2_only(l2_only_bad)
     _validate_fabric_vnis(fabric_l3, fabric_l3_bad, fabric_l2, l3vni_base)
     _validate_multicast_groups(all_edge_vlans, reserved_mcast_prefixes,

@@ -1087,3 +1087,54 @@ class TestIpamDrivenMulticastCarve(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVlanNameValidation(unittest.TestCase):
+    """NetBox accepts any VLAN name; IOS-XE does not. Without this the
+    disagreement surfaces as a parser error at 'acm replace ... validate',
+    after the candidate has been copied to every switch."""
+
+    def _edge(self, vid, name):
+        return vlan(vid, name, cfd={"l2vni": 10000 + vid, "mcast_group": "239.0.0.1"})
+
+    def test_whitespace_is_rejected(self):
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([self._edge(104, "L2 only overlay for IoT")], [], None, None)
+        self.assertIn("contains whitespace", str(cm.exception))
+
+    def test_whitespace_error_shows_what_ios_would_actually_read(self):
+        """The useful part: it is not merely 'invalid', it shows the name being
+        truncated at the first space."""
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([self._edge(104, "L2 only overlay for IoT")], [], None, None)
+        self.assertIn("is read as 'name L2'", str(cm.exception))
+
+    def test_over_the_limit_is_rejected_and_the_limit_is_stated(self):
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([self._edge(105, "A" * 31)], [], None, None)
+        msg = str(cm.exception)
+        self.assertIn("is 31 characters", msg)
+        self.assertIn("the maximum is 30", msg)
+
+    def test_exactly_at_the_limit_is_accepted(self):
+        """Off-by-one guard: 30 is valid, 31 is not."""
+        result = build_evpn_data([self._edge(106, "A" * 30)], [], None, None)
+        self.assertIn("106", result["all_edge_vlans"])
+
+    def test_every_bad_name_is_reported_in_one_run(self):
+        """Reporting one at a time turns a bulk rename into a guessing game."""
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([self._edge(104, "has a space"),
+                             self._edge(105, "B" * 31)], [], None, None)
+        msg = str(cm.exception)
+        self.assertIn("2 problems", msg)
+        self.assertIn("VLAN 104", msg)
+        self.assertIn("VLAN 105", msg)
+
+    def test_core_and_handoff_names_are_checked_too(self):
+        """Their names are rendered by the same 'vlan <id> / name <name>' block."""
+        with self.assertRaises(AnsibleFilterError) as cm:
+            build_evpn_data([vlan(199, "core vlan with space", role="core_vlan",
+                                  prefixes=[prefix("10.1.1.0/24", vrf=CORP_VRF)])],
+                            [], None, None)
+        self.assertIn("VLAN 199", str(cm.exception))
