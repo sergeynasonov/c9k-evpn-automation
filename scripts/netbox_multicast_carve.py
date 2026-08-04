@@ -29,6 +29,8 @@ Idempotent: existing objects are left alone. Dry-run unless --apply is given.
     export NETBOX_API=https://netbox.example.com NETBOX_TOKEN=...
     scripts/netbox_multicast_carve.py --vrf CORP=1 --vrf MEDICAL=2
     scripts/netbox_multicast_carve.py --vrf CORP=1 --vrf MEDICAL=2 --apply
+
+    scripts/netbox_multicast_carve.py --l2-only --apply    # just the L2 block
 """
 
 from __future__ import annotations
@@ -97,8 +99,10 @@ def parse_vrfs(pairs: list) -> dict:
         except ValueError:
             sys.exit(f"--vrf index must be an integer, got {raw!r}")
         if not 1 <= index <= 254:
-            # 239.0.0.0/16 is left unused; 239.255.0.0/16 is IPv4 Local Scope.
-            sys.exit(f"VRF {name}: index must be 1-254, got {index}")
+            # 239.0.0.0/16 belongs to L2-only overlays (--l2-only) and is not a
+            # VRF index; 239.255.0.0/16 is IPv4 Local Scope.
+            sys.exit(f"VRF {name}: index must be 1-254, got {index}. "
+                     f"For the L2-only block use --l2-only.")
         if index in out.values():
             sys.exit(f"VRF {name}: index {index} is already used by "
                      f"{[k for k, v in out.items() if v == index][0]}")
@@ -111,8 +115,8 @@ def main() -> int:
     if not args.url or not args.token:
         sys.exit("set NETBOX_API and NETBOX_TOKEN (or pass --url/--token)")
     vrfs = parse_vrfs(args.vrf)
-    if not vrfs:
-        sys.exit("give at least one --vrf NAME=INDEX")
+    if not vrfs and not args.l2_only:
+        sys.exit("give at least one --vrf NAME=INDEX, or --l2-only")
 
     nb = pynetbox.api(args.url, token=args.token)
     if args.insecure:
