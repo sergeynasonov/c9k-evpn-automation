@@ -293,228 +293,87 @@ is additive.
 ### Checking Day 0: the underlay_readiness role
 
 Day-0 config is hand-built and then preserved verbatim, which means nothing
-would otherwise check it. `roles/underlay_readiness/` asserts a switch is
-actually fit for fabric provisioning:
+would otherwise check it. `roles/underlay_readiness/` asserts a switch is fit
+for fabric provisioning:
 
 ```bash
-ansible-playbook readiness.yml -e deploy_target=access1-1
+ansible-playbook readiness.yml                            # whole fabric
+ansible-playbook readiness.yml -e deploy_target=access1-1 # one switch
 ```
 
-#### Output at fabric scale
+It also runs automatically as a **pre-flight inside `acm_evpn`**, so a switch
+that fails it is never deployed to. `generate_evpn.yml` reports the same
+findings without failing, so you can still inspect a candidate for an unready
+switch.
 
-A first fabric-wide run may find problems on dozens of switches, so the role is
-built to report all of them rather than stop at the first:
+Everything below is a hard failure, because each one produces a fabric that
+configures cleanly and then silently fails to forward:
 
-- **One summary**, not per-host chatter — counts of ready / not ready /
-  unreachable, then each unready switch with its findings.
-- **One `<hostname>-readiness.cfg` per unready switch** in `readiness-results/`,
-  containing paste-ready CLI grouped by config context (an interface missing
-  five commands produces one stanza, not five). Findings needing a human
-  decision — a router-id change that would reset adjacencies, a missing anycast
-  RP loopback — appear as comments rather than commands. Nothing is ever
-  applied; the file is for you to review and paste.
-- **A switch that passes loses its file**, so the directory always lists
-  exactly what is still outstanding.
-- **One failure at the end**, not per host. Failing per-host would drop switches
-  out of the play and the summary would under-report exactly the ones you care
-  about.
-- **An unreachable switch is neither ready nor unready.** It gets its own line
-  in the summary and does not abort the run — at 500 switches some will be down.
-- **`readiness-summary.csv`** alongside the per-switch files: one row per switch
-  including the ready ones, with status, finding count, OSPF area size and the
-  findings joined. Tracking a remediation campaign across hundreds of switches
-  is a spreadsheet problem, and diffing two runs shows what regressed.
+| Check | Why |
+|---|---|
+| `system mtu 9100`, `ip multicast-routing`, PIM RP / register-source / SSM | VXLAN needs the headroom; no multicast routing means no BUM replication |
+| CEF load-sharing with `include-ports` | The default hashes on the outer header, which is identical for every flow between a pair of VTEPs — so the whole tunnel pins to one uplink |
+| IP routing enabled — **derived, not text-matched** | It is a silent platform default on the C9400/9500/9600, so absence proves nothing |
+| `Loopback0` is a /32, with `ip pim sparse-mode` and in OSPF | It is the VTEP source, the router-id and the PIM register source |
+| `router ospf` with `max-metric on-startup`, `nsf cisco`, `fast-reroute`, `bfd all-interfaces` | Convergence behaviour — a node must not attract traffic before it has converged |
+| OSPF `router-id` equals the `Loopback0` address | BGP takes its router-id from the same interface; disagreement makes route dumps unreadable |
+| Borders additionally originate the default route | `default-information originate` |
+| Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
+| SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group`, never by reading passwords |
+| **Spines:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine | A one-way MSDP mesh looks complete on each switch individually |
 
-Files are managed **per switch**, not by wiping the directory: a scoped run
-(`-e deploy_target=access1-1`) never deletes results for switches it did not
-evaluate, and a switch that has since been fixed loses its file, so the
-directory always lists exactly what is outstanding.
+The one **warning** is OSPF area size: above 200 routers in an area it
+recommends splitting, since the C9K supports 250. Nothing is wrong — the area
+has simply grown.
 
-### Quieter output
+#### What it writes
 
-The run is still one console line per host per task. To see only what changed
-and failed — roughly a third of the output, task names intact:
+- **`readiness-results/<hostname>-readiness.cfg`** per unready switch —
+  paste-ready CLI grouped by config context. Findings needing a human decision
+  (a router-id change that would reset adjacencies, say) appear as comments
+  rather than commands. Nothing is ever applied from these files.
+- **`readiness-results/readiness-summary.csv`** — one row per switch including
+  the ready ones, so a remediation campaign across hundreds of switches is a
+  spreadsheet, and diffing two runs shows what regressed.
+
+A switch that passes loses its file, so the directory always lists exactly what
+is outstanding. Results are managed per switch, so a scoped run never deletes
+results for switches it did not evaluate.
+
+The run reports **one summary and one failure at the end**, not per host —
+failing per-host would drop switches out of the play and under-report exactly
+the ones you care about. An unreachable switch is neither ready nor unready: it
+gets its own line and does not abort the run.
+
+#### What it changes
+
+Unlike everything else here, this role does configure two things — applied with
+`ios_config` in merge mode, so they add what is missing and remove nothing:
+
+- **The platform baseline** (`templates/platform_baseline.j2`) — local admin
+  user, AAA, NTP, VTY hardening, spanning-tree, errdisable, UDLD, CoPP, CEF
+  load-sharing and the routing/multicast globals. Set once at onboarding rather
+  than rendered on every overlay change.
+- **SNMPv3** — IOS-XE never reports `snmp-server user` back, so a full-replace
+  candidate could never converge on it. It is applied here and checked from
+  operational state instead.
+
+Two consequences worth knowing: **rotating the local admin password is a
+`readiness.yml` run, not a deploy**, and on an established switch readiness
+should report **no baseline change at all** — anything it does report is real
+drift.
+
+Set `readiness_apply_baseline: false` or `readiness_apply_snmp: false` to check
+without configuring anything.
+
+#### Quieter output
 
 ```bash
 ANSIBLE_DISPLAY_OK_HOSTS=false ANSIBLE_DISPLAY_SKIPPED_HOSTS=false \
   ansible-playbook readiness.yml
 ```
 
-`community.general.dense` looks like the obvious answer and is not: it prints
-`task 1.task 2.` with no task names, and throws callback dispatch errors against
-this inventory. `community.general.yaml` was removed in that collection's v12 —
-`result_format = yaml`, already set in `ansible.cfg`, replaces it.
-
-It also runs automatically as a **pre-flight inside `acm_evpn`**, after the
-running config is fetched and before anything is rendered — so it costs one
-extra round-trip and no extra config fetch. A switch that fails it is not
-deployed to. `generate_evpn.yml` reports the same findings without failing, so
-you can still inspect a candidate for an unready switch.
-
-Everything is a hard failure, because every item is something that produces a
-fabric which configures cleanly and then silently fails to forward:
-
-| Check | Why |
-|---|---|
-| `system mtu 9100`, `ip multicast-routing`, PIM RP / register-source / SSM | VXLAN needs the headroom; no multicast routing means no BUM replication |
-| IP routing enabled — **derived, not text-matched** | See below |
-| `Loopback0` is a /32, with `ip pim sparse-mode` and in OSPF | It is the VTEP source, the router-id and the PIM register source |
-| `router ospf` with `max-metric on-startup`, `nsf cisco`, `fast-reroute`, `bfd all-interfaces` | Convergence behaviour — a node must not attract traffic before it has converged |
-| OSPF `router-id` equals the `Loopback0` address | BGP takes its router-id from the same interface; disagreement makes route dumps unreadable |
-| Borders additionally originate the default route | `default-information originate` |
-| Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
-| SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group` — see below |
-| **Spines:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine | A one-way MSDP mesh is invisible per-device. This fabric has already been bitten by it once |
-
-The one **warning** is the OSPF area size: at more than 200 routers in an area
-it recommends splitting, since the C9K supports 250. That is topology-driven
-rather than configuration-driven — nothing is wrong, the area has just grown.
-
-#### Platform defaults, and why `ip routing` is derived
-
-Absence from `show running-config` means one of two things — not configured, or
-configured as the **platform default** — and a text match cannot tell them
-apart.
-
-`ip routing` is the worked example. It is **default-on for the C9400, C9500 and
-C9600**, so those never print it; the **C9300 has it off by default** and does.
-Because the access layer is C9300 — 30-40 of them per pair of distribution
-switches — most devices in a real fabric print the line, which is exactly why a
-text match looks correct right up until it meets a distribution or core switch.
-
-Asserting the literal line made access2-2 (a C9400) report it missing while
-passing every OSPF check on the same run, which is impossible: IOS rejects
-`router ospf` when routing is disabled, and `no ip routing` tears down protocol
-configuration rather than leaving it stranded.
-
-The check is therefore **asymmetric**. Absence of `ip routing` proves nothing,
-but presence of `no ip routing` proves everything — a running config states
-deviations from the default, so a C9400/9500/9600 with routing switched off by
-hand says so explicitly. That is a hard failure on its own, and it overrides the
-positive evidence below (someone can disable routing while OSPF config is still
-in the file).
-
-Otherwise it is satisfied by any of three things, all from data already
-gathered, so the check costs no extra device interaction:
-
-- the literal `ip routing` line, on platforms that print it;
-- `router ospf <pid>` being configured, which cannot exist without it;
-- a non-empty OSPF database — proof the switch is actually routing, not merely
-  configured to.
-
-**Before adding a line to `readiness_global_lines`, check it is not a default on
-every platform in the fabric.** If it might be, derive it from something
-observable instead. This is the mirror image of the SNMPv3 problem below: those
-are lines the device will not report *even when set*; this is a line it will not
-report *because it is default*.
-
-Uplinks are **discovered, not named**: any routed (non-loopback, non-SVI)
-interface enrolled in the fabric OSPF process. Nothing depends on an interface
-naming convention, and an uplink placed in the wrong area is still found — so it
-gets reported rather than silently dropping out of the check.
-
-#### The platform baseline lives here too
-
-`platform_baseline.j2` — local admin user, AAA, NTP, VTY hardening, clock, VTP,
-spanning-tree, errdisable, UDLD, CoPP, licensing, `Vlan1`, the management VRF,
-and the routing/multicast globals — moved out of `acm_evpn` into this role. It
-is **applied** once at onboarding with `ios_config` (a merge: it installs what
-is missing and removes nothing), rather than rendered on every overlay change.
-
-Two things were wrong with rendering it. It is set once for the life of a
-switch, so re-rendering it every deploy was pure churn — it was where nearly all
-the residual ACM diff came from, because IOS-XE renders back platform defaults
-the template did not model. And the checks above assert those same lines: while
-`acm_evpn` still rendered them, a readiness failure blocked the very deploy that
-would have installed them.
-
-Running switches are unaffected — the config stops being template-owned, so the
-candidate preserves it from the device, the same mechanism that carries the
-underlay forward.
-
-Two consequences worth knowing:
-
-- **Rotating the local admin password is now a `readiness.yml` run, not a
-  deploy.** `acm_evpn` no longer renders a `username` line.
-- Anything IOS-XE hides from `show running-config` **must** live in this role.
-  A full-replace candidate can never converge on a line the device will not read
-  back. `snmp-server user` is the one that matters, and it is applied here by
-  merge rather than rendered into a candidate.
-
-#### Two kinds of invisible config, handled opposite ways
-
-`show running-config` omits config for two quite different reasons, and they
-need opposite treatment. Telling them apart is what keeps the apply count low.
-
-**Set but never reported.** The device accepts the line and will not read it
-back — `snmp-server user` is the one that matters. A full-replace candidate can
-never converge on these, which is why they live in this role and are applied by
-merge, and they cannot be asserted from the running config either, so
-operational state is used instead (`show snmp user`).
-
-The corollary is worth stating, because it removed more lines than any clever
-handling did: **if an invisible line is also pointless, drop it.** The VTP
-password and `vtp version 3` were both removed on that basis — neither is a
-prerequisite for `vtp mode transparent` or `vtp domain`, and in transparent mode
-neither does anything.
-
-**Not reported because it is already the default.** `ip routing` on the
-C9400/9500/9600, `ip tcp window-size 131072`, `hidekeys`. Pushing these achieves
-nothing — the default is already in effect — and the device still will not
-render them, so they reported changed forever while buying nothing.
-
-The fix is to **stop pushing them and assert the negative instead**. A
-non-default value *is* rendered, so `ip tcp window-size 65536` or `no hidekeys`
-shows up and is caught. `ip routing` is the exception that stays in the
-template, because the C9300 genuinely needs it.
-
-Between the two, `readiness.yml` on an established switch should now report
-**no baseline change at all**. That is a far more useful signal than a stable
-non-zero count you have to remember the expected value of: anything it reports
-is real drift. The report lists the lines, withholding only credential-bearing
-ones.
-
-#### The local admin hash is verified before it is pushed
-
-A wrong `ios_password_secret_hash` is the one failure mode that defeats every
-other safeguard here, so it is checked on the control node before anything
-reaches a device:
-
-- the switch **accepts** the command — a type-9 hash is opaque, so there is
-  nothing to reject — and `ios_config` reports `changed` with no error;
-- the existing SSH session stays up, so nothing fails during the run;
-- IOS never renders the plaintext back, so no assertion against the running
-  config can catch it;
-- the lockout appears on the **next** connection, by which point every switch in
-  the run has it.
-
-Batching would not help, because nothing fails at a batch boundary; neither
-would a post-apply reconnect probe, which contains the blast radius but still
-loses a switch. The hash and the plaintext both come from Infisical, so
-`filter_plugins/ios_secret.py` simply checks one against the other —
-type 9 is scrypt with the salt embedded in the hash, so it is directly
-verifiable with no device interaction.
-
-Blocked: a valid hash of the wrong password, a plaintext pasted into the hash
-variable, and any other hash type. Allowed: a correct hash, or an empty one —
-which makes the template fall back to `secret 0 <plaintext>` for the device to
-hash itself.
-
-#### SNMPv3 lives here, not in the render
-
-`snmp-server user` is hidden from `show running-config`. A full-replace
-candidate could therefore never converge on it: the line was pushed, accepted,
-and appeared in the next deploy's diff again because the device would not read
-it back. Rendering it also wrote the auth and priv passwords in plaintext into
-every candidate file on disk.
-
-So this role owns SNMPv3 — credentials, ACL and configuration — and applies it
-with `ios_config` in merge mode (it adds, it never removes). Presence is
-verified from operational state; the passwords are never compared, only set.
-Credentials come from `ios_snmp_auth` / `ios_snmp_priv` in the environment.
-
-Existing switches are unaffected: SNMP is simply no longer template-owned, so
-the candidate preserves whatever the device already has.
+Note this hides every `debug` summary too, since those report `ok`.
 
 ## Phase 2 — Onboarding: model the device in NetBox
 
