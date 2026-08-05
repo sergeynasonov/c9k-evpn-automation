@@ -18,7 +18,10 @@ linter so an operator running playbooks does not install one:
 venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-Then the tests. Stdlib `unittest` only — no pytest, no live NetBox, no devices:
+Then the tests. Stdlib `unittest` only — no pytest, no live NetBox, no devices.
+`test_fabric_resolve.py` is the one case that needs `ansible-playbook` on
+`PATH`: fabric resolution is Jinja, not Python, so it is tested by running the
+real tasks against a static inventory. It skips itself if Ansible is absent:
 
 ```bash
 venv/bin/python -m unittest discover -s roles/acm_evpn/tests/unit

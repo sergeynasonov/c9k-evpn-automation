@@ -25,6 +25,15 @@
 - name: Verify site configuration
   ansible.builtin.import_tasks: assert_site_config.yml
 
+# Which fabric each device is in, resolved once from inventory and read by
+# everything site-scoped below. Lives in underlay_readiness because that role
+# needs the same answer for its fabric-wide MSDP check and this role already
+# imports from it; see the header of fabric_resolve.yml.
+- name: Resolve fabric membership
+  ansible.builtin.import_role:
+    name: underlay_readiness
+    tasks_from: fabric_resolve.yml
+
 - name: Gather NetBox facts
   ansible.builtin.import_tasks: netbox_facts.yml
 
@@ -117,20 +126,56 @@
       {%- endif -%}
       {{ bad | to_json }}
 
+# EVPN is an iBGP overlay inside ONE fabric: a spine reflects only for the
+# clients in its own site group (or its own site, where there is no site group),
+# and a client peers only with that fabric's spines. Peering across fabrics
+# would join two underlays that share no ASN and no RP.
+#
+# fabric_members comes from inventory, not from play membership, so a narrow
+# deploy_target still renders the full peer list -- the property that fixed the
+# --limit bug (see filter_plugins/fabric_peers.py).
 - name: 15. Determine Local Role and Peer IPs
   ansible.builtin.set_fact:
     is_spine: "{{ 'tags_fabric_spine' in group_names }}"
     peer_ips: >-
       {{ inventory_hostname | evpn_peer_ips(
-           groups['site_group_evpn_campus'] | intersect(groups['tags_fabric_spine']),
-           groups['site_group_evpn_campus'] | intersect(groups['device_roles_fabric_leaf']),
-           groups['site_group_evpn_campus'] | intersect(groups['device_roles_fabric_border']),
+           fabric_members | intersect(groups['tags_fabric_spine']),
+           fabric_members | intersect(groups['device_roles_fabric_leaf']),
+           fabric_members | intersect(groups['device_roles_fabric_border']),
            _fabric_addresses | from_json) }}
   vars:
     _fabric_addresses: >-
       {%- set out = {} -%}
-      {%- for host in groups['site_group_evpn_campus'] | default([]) -%}
+      {%- for host in fabric_members -%}
       {%-   set addr = hostvars[host].get('ansible_host') -%}
       {%-   if addr -%}{%- set _ = out.update({host: addr}) -%}{%- endif -%}
       {%- endfor -%}
       {{ out | to_json }}
+
+# A client with no reflector renders a 'router bgp' carrying no EVPN neighbours,
+# which 'acm replace' applies as a teardown of every overlay session on the
+# switch. That is the failure this whole step exists to prevent, so it is caught
+# here rather than left to the blast-radius guard downstream.
+#
+# No false positives on a spine: a spine is always in its own fabric's spine
+# list, so the check is only ever load-bearing for leaves and pure borders --
+# which is also why a spine deployed before any leaf exists still passes.
+- name: 16. Verify this device's fabric has a route reflector
+  ansible.builtin.assert:
+    that:
+      - fabric_members | intersect(groups['tags_fabric_spine']) | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }} is in fabric '{{ fabric_id }}' but no device in
+      that fabric is tagged fabric_spine, so it has no EVPN route reflector to
+      peer with. Rendering it would produce a 'router bgp' with no overlay
+      neighbours and tear down every session on the switch. Tag this fabric's
+      spines in NetBox, or check that {{ inventory_hostname }} is in the site
+      you expect.
+    quiet: true
+  # Fabric nodes only. A distribution switch claims no overlay sessions, so a
+  # site holding nothing else is not a fabric missing its reflector -- failing
+  # it here would report a problem it does not have.
+  when:
+    - group_names | intersect(['device_roles_fabric_leaf',
+                               'device_roles_fabric_border',
+                               'tags_fabric_spine']) | length > 0

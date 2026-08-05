@@ -1,0 +1,153 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# The one answer to "which fabric is this device in".
+#
+# A FABRIC is a NetBox SITE GROUP -- a campus of several buildings sharing one
+# underlay and one iBGP ASN -- or, where a site has no site group, the SITE
+# itself, which is the single-building case. Nothing else defines the boundary,
+# and no new NetBox data is needed to express it: nb_inventory already creates
+# 'site_group_<slug>' and 'sites_<slug>' groups, so a device's own inventory
+# groups carry its fabric.
+#
+# Why ONE resolver rather than a site filter at each call site: every
+# fabric-scoped lookup has to agree on the boundary. A peer list built from the
+# site group while a validation is scoped to the site would disagree only in the
+# multi-building case -- the case that is hardest to test and most expensive to
+# get wrong, since a short peer list renders a 'router bgp' that 'acm replace'
+# applies as a session teardown.
+#
+# This lives in underlay_readiness rather than acm_evpn because BOTH roles need
+# it (acm_evpn for overlay peer selection, this role for the fabric-wide MSDP
+# mesh check) and acm_evpn already imports from here. The reverse direction
+# would make the two roles mutually dependent.
+#
+# Resolution reads 'groups', never hostvars or play membership: 'groups' is
+# complete inventory and is populated before any task runs, so the answer is the
+# same whether or not a device is in the current play. That is the same property
+# filter_plugins/fabric_peers.py depends on, and for the same reason.
+#
+# Sets, for every host in the play:
+#   fabric_map     {device: fabric group name} for the whole inventory
+#   fabric_id      this device's fabric, as an inventory group name ('' if none)
+#   fabric_members every device in this device's fabric, sorted
+
+- name: 1. Resolve every device's fabric from inventory
+  ansible.builtin.set_fact:
+    fabric_map: "{{ (_resolved | from_json).map }}"
+    fabric_ambiguous: "{{ (_resolved | from_json).ambiguous }}"
+    fabric_orphans: "{{ (_resolved | from_json).orphans }}"
+  vars:
+    # Device roles and tags that make a device a fabric node. Hardcoded here as
+    # they are everywhere else in both roles; a device outside all three (a
+    # distribution switch, say) is site-scoped like any other but renders
+    # nothing, so it is not reported when it cannot be placed.
+    _fabric_node_groups:
+      - device_roles_fabric_leaf
+      - device_roles_fabric_border
+      - tags_fabric_spine
+    _resolved: >-
+      {%- set sgs = {} -%}
+      {%- set sites = {} -%}
+      {#- One pass over the inventory, bucketing each device's site-group and
+          site memberships. nb_inventory nests site_group_<parent> above
+          site_group_<child> above sites_<slug>, so a device under a NESTED site
+          group lands in more than one 'site_group_*' -- which is exactly how a
+          nested tree is detected below. -#}
+      {%- for group, members in groups | dictsort -%}
+      {%-   if group.startswith('site_group_') -%}
+      {%-     for host in members -%}
+      {%-       set _ = sgs.update({host: sgs.get(host, []) + [group]}) -%}
+      {%-     endfor -%}
+      {%-   elif group.startswith('sites_') -%}
+      {%-     for host in members -%}
+      {%-       set _ = sites.update({host: sites.get(host, []) + [group]}) -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%- endfor -%}
+
+      {#- Every device that is expected to be in a fabric, so that one which
+          cannot be placed is reported rather than dropped in silence. -#}
+      {%- set fabric_nodes = [] -%}
+      {%- for group in _fabric_node_groups -%}
+      {%-   for host in groups.get(group, []) -%}
+      {%-     set _ = fabric_nodes.append(host) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+
+      {%- set out = {} -%}
+      {%- set ambiguous = [] -%}
+      {%- set orphans = [] -%}
+      {%- for host in groups['all'] | sort -%}
+      {%-   set host_sgs = sgs.get(host, []) -%}
+      {%-   set host_sites = sites.get(host, []) -%}
+      {%-   if host_sgs | length > 1 -%}
+      {#-     Nested site groups are REFUSED, not resolved to the innermost one.
+              The parent spans buildings that do not share an underlay, and
+              picking a level here would silently decide which. -#}
+      {%-     set _ = ambiguous.append(host ~ ' is in nested site groups ('
+                                       ~ (host_sgs | join(', ')) ~ ')') -%}
+      {%-   elif host_sites | length > 1 -%}
+      {%-     set _ = ambiguous.append(host ~ ' is in more than one site ('
+                                       ~ (host_sites | join(', ')) ~ ')') -%}
+      {%-   elif host_sgs | length == 1 -%}
+      {%-     set _ = out.update({host: host_sgs[0]}) -%}
+      {%-   elif host_sites | length == 1 -%}
+      {%-     set _ = out.update({host: host_sites[0]}) -%}
+      {%-   elif host in fabric_nodes -%}
+      {%-     set _ = orphans.append(host) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ {'map': out, 'ambiguous': ambiguous, 'orphans': orphans} | to_json }}
+  run_once: true
+  delegate_to: localhost
+
+# Fatal, and fatal for the whole run rather than per device: an inventory whose
+# site tree does not partition cleanly into fabrics cannot be trusted for ANY
+# device's peer list, including the ones that happen to resolve.
+- name: 2. Refuse an inventory that does not partition into fabrics
+  ansible.builtin.assert:
+    that:
+      - fabric_ambiguous | length == 0
+    fail_msg: |-
+      The NetBox site tree does not partition into fabrics — {{ fabric_ambiguous | length }} device(s):
+      {% for problem in fabric_ambiguous %}
+        - {{ problem }}
+      {% endfor %}
+      A fabric is one site group, or one site where there is no site group.
+      Nested site groups span buildings that do not share an underlay, so there
+      is no safe way to choose a level here. Flatten the tree in NetBox: give
+      each fabric its own top-level site group, and model anything above it as a
+      region instead (regions are not used for scoping).
+    success_msg: "inventory partitions into fabrics"
+    quiet: true
+  run_once: true
+  delegate_to: localhost
+
+# Reported, never fatal. A device that cannot be placed is simply not part of
+# any fabric -- it is left alone rather than blocking the fabrics that are fine.
+# The devices themselves drop out of the play in task 4.
+- name: 3. Report fabric devices that belong to no fabric
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['NetBox: device(s) ' ~ (fabric_orphans | join(', '))
+          ~ ' have a fabric role or the fabric_spine tag but no site, so they'
+          ~ ' belong to no fabric and are skipped — assign each a site in'
+          ~ ' NetBox to bring it into one'] }}
+  when: fabric_orphans | length > 0
+  run_once: true
+  delegate_to: localhost
+
+- name: 4. Determine this device's fabric
+  ansible.builtin.set_fact:
+    fabric_id: "{{ fabric_map.get(inventory_hostname, '') }}"
+    fabric_members: "{{ groups.get(fabric_map.get(inventory_hostname, ''), []) | sort }}"
+
+# Ending the play for this host is what "ignored" means in practice: nothing is
+# rendered for it and nothing is pushed to it, while the rest of the run
+# continues. Rendering it instead would be the dangerous option -- with no
+# fabric it has no peers, and an empty peer list is a session teardown.
+- name: 5. Skip a device that belongs to no fabric
+  ansible.builtin.meta: end_host
+  when: fabric_id | length == 0

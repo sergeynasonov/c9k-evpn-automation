@@ -258,10 +258,15 @@ Then model your fabric. The minimum for a device to be provisioned at all:
 | Device role | `fabric_border` or `fabric_leaf` — or the `fabric_spine` **tag** for spines |
 | Status | **Active** (the inventory filters on it) |
 | Primary IPv4 | **The `Loopback0`/VTEP address** — asserted on every run |
-| Site | Required; drives which VLANs reach the device |
+| Site | Required; decides which fabric the device is in and which VLANs reach it |
 
 Sites are buildings and site groups are campuses, which is what decides whether
 a VLAN lands on one building or the whole campus.
+
+A **fabric** is one site group — or one site, where that site has no site group.
+That is the boundary of an underlay, an ASN and a set of route reflectors, so
+switches peer only within it. Site groups must not be nested; use a region for
+anything above a fabric.
 
 **[roles/acm_evpn/README.md](roles/acm_evpn/README.md) is the full data-model
 contract** — every field, role and tag with its meaning. Read it before

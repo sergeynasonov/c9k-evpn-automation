@@ -1,0 +1,59 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# Drives the REAL fabric resolver and the REAL peer-selection tasks against a
+# static inventory. Driven by tests/unit/test_fabric_resolve.py, which copies
+# this file into a temp directory alongside a peer_tasks.yml extracted from
+# roles/acm_evpn/tasks/01_gather_data.yml -- so neither half can drift from the
+# code that ships.
+#
+# No NetBox and no device: fabric membership is decided entirely from inventory
+# groups, which is the property that makes it testable offline at all.
+
+- name: Fabric resolution and per-fabric peer selection
+  hosts: all
+  gather_facts: false
+  # run_once is ignored under the 'free' strategy that ansible.cfg sets, and the
+  # resolver leans on it. Same override as every playbook in the repo.
+  strategy: linear
+  vars:
+    # The harness has no running config to scrape, so the Loopback0-matches-
+    # NetBox check has nothing to compare. Irrelevant to fabric scoping.
+    fabric_verify_peer_addressing: false
+  tasks:
+    - name: Resolve fabric membership
+      ansible.builtin.import_role:
+        name: underlay_readiness
+        tasks_from: fabric_resolve.yml
+
+    - name: Peer selection
+      ansible.builtin.import_tasks: peer_tasks.yml
+
+    # Collected from hostvars rather than written per host, so that hosts which
+    # ended the play still appear -- their absence from ansible_play_hosts is
+    # itself one of the things under test.
+    - name: Write the result for the test to read
+      ansible.builtin.copy:
+        content: "{{ _result | to_nice_json }}"
+        dest: "{{ result_file }}"
+        mode: "0644"
+      vars:
+        _hosts: >-
+          {%- set out = {} -%}
+          {%- for host in ansible_play_hosts_all | sort -%}
+          {%-   set hv = hostvars[host] -%}
+          {%-   set _ = out.update({host: {
+                  'fabric_id': hv.fabric_id | default(''),
+                  'fabric_members': hv.fabric_members | default([]),
+                  'peer_ips': hv.peer_ips | default([])}}) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+        _result:
+          targeted: "{{ ansible_play_hosts_all | sort }}"
+          survivors: "{{ ansible_play_hosts | sort }}"
+          orphans: "{{ fabric_orphans }}"
+          fabric_map: "{{ fabric_map }}"
+          hosts: "{{ _hosts | from_json }}"
+      run_once: true
+      delegate_to: localhost
