@@ -18,13 +18,14 @@ exclude_paths:
   - old files/            # pre-rewrite material, kept for reference, not linted
   - switch-configuration/ # rendered device configs, not source
   - .github/
-  # Offline test harness and its static inventories. fabric_harness.yml imports
-  # a peer_tasks.yml that does not exist here: the test extracts it from
-  # 01_gather_data.yml into a temp directory at run time, so that the tasks
-  # under test are the ones that ship rather than a copy. Linting it standalone
-  # therefore fails on a missing include, and the .ini fixtures are inventory
-  # rather than source in any case.
+  # Offline test harnesses and their static inventories. Each harness imports a
+  # task file that does not exist here: the tests extract it from the shipped
+  # role at run time into a temp directory, so the tasks under test are the ones
+  # that ship rather than a copy. Linting a harness standalone therefore fails on
+  # a missing include, and the .ini fixtures are inventory rather than source in
+  # any case.
   - roles/acm_evpn/tests/fixtures/
+  - roles/underlay_readiness/tests/fixtures/
 
 skip_list:
   # var-naming[no-role-prefix]: wants every variable a role defines to be

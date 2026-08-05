@@ -117,9 +117,15 @@ route-map WAN-INBOUND-FILTER permit 10
   fact another host sets at run time: a scoped run must still render the whole
   mesh, and hostvars[...]['ansible_host'] is populated for every device in the
   inventory whether or not it is in the play.
+
+  Scoped to THIS fabric's borders. The remote-as is the fabric ASN, so an
+  unscoped mesh would render an iBGP session to another fabric's border -- a
+  device in a different underlay that this one cannot reach, and that does not
+  share the ASN the session claims. Same fabric boundary as peer_ips above.
 #}
 {% set border_mesh = [] %}
-{% for host in groups.get('device_roles_fabric_border', []) | sort if host != inventory_hostname %}
+{% for host in groups.get('device_roles_fabric_border', []) | sort
+     if host != inventory_hostname and host in fabric_members | default([]) %}
 {%   if hostvars[host].get('ansible_host') %}
 {%     set _ = border_mesh.append(hostvars[host]['ansible_host']) %}
 {%   endif %}

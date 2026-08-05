@@ -172,6 +172,13 @@
     # config looks complete -- so it can only be caught against the inventory.
     # This fabric has been bitten by it: core2 pointed at core1, core1 did not
     # point back.
+    #
+    # Scoped to THIS fabric's spines, not every spine in the inventory. MSDP
+    # carries source-active state for the underlay anycast RP, and a separate
+    # fabric has a different RP on a different underlay: a session between them
+    # would be wrong even if it came up. Unscoped, this check demanded one
+    # anyway, and reported every correctly-built spine as unready the moment a
+    # second fabric appeared in NetBox.
     _spine: >-
       {%- set bad = [] -%}
       {%- if 'tags_fabric_spine' in group_names -%}
@@ -192,7 +199,9 @@
                                   'parents': [],
                                   'lines': ['ip msdp originator-id ' ~ vtep_source_intf]}) -%}
       {%-   endif -%}
-      {%-   for peer in groups.get('tags_fabric_spine', []) | sort if peer != inventory_hostname -%}
+      {%-   set _fabric_spines = fabric_members | default([])
+                                | intersect(groups.get('tags_fabric_spine', [])) -%}
+      {%-   for peer in _fabric_spines | sort if peer != inventory_hostname -%}
       {%-     set addr = hostvars[peer].get('ansible_host') -%}
       {%-     if addr and ('ip msdp peer ' ~ addr ~ ' connect-source ' ~ vtep_source_intf) not in _stanzas -%}
       {%-       set _ = bad.append({

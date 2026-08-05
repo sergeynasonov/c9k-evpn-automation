@@ -242,11 +242,16 @@ ip msdp originator-id Loopback0
 ip msdp peer 10.0.0.12 connect-source Loopback0
 ```
 
-One `ip msdp peer` per **other** spine switch, addressed to that switch's
-`Loopback0`.
+One `ip msdp peer` per **other** spine switch **in the same fabric**, addressed
+to that switch's `Loopback0`.
 It is a full mesh and **must be configured on both ends** — a one-way
 configuration looks complete on each switch individually, so `readiness.yml`
 checks every pair rather than each device in isolation.
+
+The mesh stops at the fabric boundary. MSDP carries source-active state for the
+underlay anycast RP, and another fabric has a different RP on an underlay this
+switch has no route into, so a session between them would be wrong even if it
+came up.
 
 ### Border switches only — underlay handoff and default route
 
@@ -321,7 +326,7 @@ configures cleanly and then silently fails to forward:
 | Border switches additionally originate the default route | `default-information originate` |
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
 | SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group`, never by reading passwords |
-| **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch | A one-way MSDP mesh looks complete on each switch individually |
+| **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch **in the same fabric** | A one-way MSDP mesh looks complete on each switch individually |
 
 The one **warning** is OSPF area size: above 200 routers in an area it
 recommends splitting, since the C9K supports 250. Nothing is wrong — the area
