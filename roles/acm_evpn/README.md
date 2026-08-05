@@ -111,6 +111,19 @@ used for scoping. Two fabrics are otherwise fully independent: they may reuse
 the same VRFs, the same L3VNIs and the same multicast groups, because they never
 exchange them.
 
+**VNI uniqueness is therefore scoped to one fabric**, and both halves of that
+matter:
+
+- *Within* a fabric nothing is relaxed. Validation still runs against every VRF
+  and VLAN in the NetBox dataset rather than only those in scope for the
+  rendering host, so a clash between two buildings of one campus fails **every**
+  host in it — including hosts that see only half of it.
+- *Across* fabrics, reuse is the design. Carrying the same VRF at the same
+  `l3vni` in every fabric is what keeps the RD, the route-targets and the
+  multicast index consistent between them. And since a run is always scoped to
+  one fabric, a clash modelled in another building must not be able to block
+  this one's deploy — it fails the run that actually concerns it.
+
 **Scope is required.** A VLAN with no site and no VLAN group scope is enrolled
 **nowhere** — enrolment is opt-in throughout this project, and scope is how a
 VLAN says where it belongs. One that has not said is not a decision to honour.
@@ -521,7 +534,7 @@ checks run before a switch is touched:
 
 | Guard | Behaviour |
 |---|---|
-| VNI validation | Fails on out-of-range, duplicate, or L2/L3-colliding VNIs. Fabric-wide. |
+| VNI validation | Fails on out-of-range, duplicate, or L2/L3-colliding VNIs. Scoped to the rendering host's own fabric — see [Sites, site groups and VLAN scope](#sites-site-groups-and-vlan-scope). |
 | Multicast validation | Fails on a missing, malformed, or duplicated group, one outside the carve, or one outside the owning VRF's own `/16`. |
 | Anycast RP assertions | The RP loopback must match the fabric's anycast RP, every spine switch must carry it, and every spine switch in a fabric must carry the **same** address — differing addresses configure cleanly and then silently fail to forward. |
 | Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |

@@ -200,7 +200,9 @@
                                       evpn_l3vni_base,
                                       trm_netbox,
                                       inventory_hostname,
-                                      trm_require_register_source | default(true)) }}
+                                      trm_require_register_source | default(true),
+                                      fabric_scope_map,
+                                      fabric_id) }}
 
     vlan_list: "{{ graphql_vlans.json.data.vlan_list }}"
     _mcast_carve: >-
