@@ -120,9 +120,15 @@
 # The stamp is computed ONCE for the whole run, so every switch in one deploy
 # shares a filename. That makes "roll the fabric back to the 11:16 deploy" one
 # identifiable set rather than 500 names differing by seconds.
+# LOCAL time, not UTC. The filename exists to be recognised next to the entry
+# ACM prints for it, and ACM stamps that entry from the SWITCH clock -- so a UTC
+# filename disagrees with the table it sits in. It read 'flash:acm-evpn/
+# 0805-013928.cfg' beside '08/05 11:39:30': ten hours apart, and between
+# midnight and 10:00 local the DATE disagreed as well, putting yesterday's date
+# on today's checkpoint.
 - name: 12l. Name this deploy's checkpoint
   ansible.builtin.set_fact:
-    acm_checkpoint_stamp: "{{ now(utc=true, fmt='%m%d-%H%M%S') }}"
+    acm_checkpoint_stamp: "{{ now(fmt='%m%d-%H%M%S') }}"
   run_once: true
   when: acm_checkpoint | bool
 

@@ -30,13 +30,13 @@ vlan {{ vid }}
 vlan {{ vid }}
  name {{ vlan.name }}
 !
+vlan configuration {{ vid }}
+ member evpn-instance {{ vid }} vni {{ vlan.l2vni }}
+!
 l2vpn evpn instance {{ vid }} vlan-based
  encapsulation vxlan
  replication-type {{ vlan.replication_mode }}
  advertise mac enable
-!
-vlan configuration {{ vid }}
- member evpn-instance {{ vid }} vni {{ vlan.l2vni }}
 !
 {% endfor %}
 !
