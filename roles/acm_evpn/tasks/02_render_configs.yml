@@ -174,8 +174,23 @@
       {%- endfor -%}
       {%- set gone_vlans = (_dev_evi_vlans + _dev_cfg_vlans + _dev_fabric_svis) | unique
                            | difference(_new_evi_vlans + _new_cfg_vlans) -%}
-      {%- for vid in gone_vlans if vid in _dev_fabric_svis -%}
-      {%-   set _ = out.append('interface Vlan' ~ vid) -%}
+      {#- The SVI is pruned only where the device HAD one; the 'vlan <id>'
+          definition is pruned for every gone fabric VLAN.
+
+          These were one condition until an L2-only overlay was un-tagged from a
+          border. That segment has no SVI by definition, so it never matched
+          'vid in _dev_fabric_svis': ACM removed its EVPN instance, its 'vlan
+          configuration' and its NVE member, while 'vlan 104' survived as a
+          preserved orphan. Half a teardown.
+
+          Safe because gone_vlans only ever contains VLANs the device carried as
+          an EVPN instance, a 'vlan configuration', or a fabric SVI -- all
+          unambiguously fabric-owned. A hand-configured access VLAN is in none of
+          those sets and is never touched. -#}
+      {%- for vid in gone_vlans -%}
+      {%-   if vid in _dev_fabric_svis -%}
+      {%-     set _ = out.append('interface Vlan' ~ vid) -%}
+      {%-   endif -%}
       {%-   set _ = out.append('vlan ' ~ vid) -%}
       {%- endfor -%}
       {%- for vrf in (_dev_fabric_vrfs | difference(_new_fabric_vrfs)) -%}
