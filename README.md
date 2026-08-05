@@ -17,22 +17,23 @@ the commit.
 
 - **EVPN overlays, IPv4 address-family** — VRFs, anycast-gateway SVIs, EVPN
   instances, the NVE interface and overlay BGP, rendered from NetBox.
-- **Per-VRF BGP IPv4 handoffs on borders** — the handoff SVI and its eBGP
+- **Per-VRF BGP IPv4 handoffs on border switches** — the handoff SVI and its eBGP
   neighbour, so a tenant VRF reaches the outside world.
 - **IPv4 TRM** (tenant routed multicast) — MVPN auto-discovery, default and data
   MDTs, anycast or external RP.
 - **L2-only overlays** — a VLAN bridged across the fabric with no VRF and no
   gateway. Enrolled with the `l2vni` custom field, replicated via a multicast
-  group, and opt-in on borders.
+  group, and opt-in on border switches.
 
 **Not functional today. Near-term roadmap:**
 
 - **ESI multihoming**
 - **IPv6** — no `address-family ipv6` in the overlay, and no IPv6 TRM.
 
-**The fabric it builds** is **iBGP EVPN**: one ASN across the fabric, spines as
-route reflectors for both `l2vpn evpn` and `ipv4 mvpn`. Reachability between
-VTEPs comes from an **IGP — OSPFv2** — not from BGP. That IGP, and everything
+**The fabric it builds** is **iBGP EVPN**: one ASN across the fabric, spine
+switches as route reflectors for both `l2vpn evpn` and `ipv4 mvpn`.
+Reachability between VTEPs comes from an **IGP — OSPFv2** — not from BGP.
+That IGP, and everything
 else in the underlay, is **built by hand** and never touched by Ansible; see
 [Phase 1](#phase-1--day-0-hand-build-the-underlay) for exactly what it must
 contain.
@@ -166,7 +167,7 @@ ipv6 cef load-sharing algorithm include-ports source destination
 
 `ip routing` prints on a C9300 and is a silent default on the C9400/9500/9600 —
 harmless to paste on any of them. `10.0.0.100` is the fabric anycast RP, which
-lives on the spines; it must match `underlay_rp_address` in
+lives on the spine switches; it must match `underlay_rp_address` in
 `group_vars/all/fabric.yml`.
 
 ### Every node — Loopback0
@@ -225,9 +226,9 @@ same interface, and a disagreement makes route dumps unreadable. `max-metric
 on-startup` holds a rebooting node out of the transit topology until it has
 converged.
 
-### Spines only — anycast RP and MSDP
+### Spine switches only — anycast RP and MSDP
 
-The RP loopback carries the **same address on every spine**, which is what makes
+The RP loopback carries the **same address on every spine switch**, which is what makes
 it anycast.
 
 ```
@@ -240,12 +241,13 @@ ip msdp originator-id Loopback0
 ip msdp peer 10.0.0.12 connect-source Loopback0
 ```
 
-One `ip msdp peer` per **other** spine, addressed to that spine's `Loopback0`.
+One `ip msdp peer` per **other** spine switch, addressed to that switch's
+`Loopback0`.
 It is a full mesh and **must be configured on both ends** — a one-way
 configuration looks complete on each switch individually, so `readiness.yml`
 checks every pair rather than each device in isolation.
 
-### Borders only — underlay handoff and default route
+### Border switches only — underlay handoff and default route
 
 The handoff SVI lives in the **global** table (no `vrf forwarding`) and carries
 the underlay eBGP session to upstream. Allow its VLAN on the trunk to the
@@ -280,8 +282,9 @@ everything in any other ASN verbatim. So this eBGP session survives every
 deploy untouched, and you never re-declare it anywhere.
 
 `default-information originate` is **border-only**. It injects the default the
-border learned from upstream into the fabric's OSPF, which is what gives every
-leaf and spine a path out. A leaf running it would advertise a default it cannot
+border switch learned from upstream into the fabric's OSPF, which is what gives
+every leaf and spine switch a path out. A leaf switch running it would advertise
+a default it cannot
 honour.
 
 Once this is done the node is reachable and self-sufficient; everything from here
@@ -314,10 +317,10 @@ configures cleanly and then silently fails to forward:
 | `Loopback0` is a /32, with `ip pim sparse-mode` and in OSPF | It is the VTEP source, the router-id and the PIM register source |
 | `router ospf` with `max-metric on-startup`, `nsf cisco`, `fast-reroute`, `bfd all-interfaces` | Convergence behaviour — a node must not attract traffic before it has converged |
 | OSPF `router-id` equals the `Loopback0` address | BGP takes its router-id from the same interface; disagreement makes route dumps unreadable |
-| Borders additionally originate the default route | `default-information originate` |
+| Border switches additionally originate the default route | `default-information originate` |
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
 | SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group`, never by reading passwords |
-| **Spines:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine | A one-way MSDP mesh looks complete on each switch individually |
+| **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch | A one-way MSDP mesh looks complete on each switch individually |
 
 The one **warning** is OSPF area size: above 200 routers in an area it
 recommends splitting, since the C9K supports 250. Nothing is wrong — the area
@@ -430,14 +433,15 @@ diff -ru switch-configuration.before switch-configuration
 
 ```bash
 ansible-playbook deploy_evpn.yml                             # whole fabric
-ansible-playbook deploy_evpn.yml -e deploy_target=access1-1  # one leaf
+ansible-playbook deploy_evpn.yml -e deploy_target=access1-1  # one leaf switch
 ansible-playbook deploy_evpn.yml -e deploy_target=sites_evpn_building_a
 ```
 
 **Scope with `deploy_target`, never `--limit`.** `--limit` is refused by the
-role's first task. It can drop spines out of the play, and a spine that is not in
-the play keeps a stale EVPN peer list on the device; `deploy_target` goes through
-the playbook's host pattern, which always unions the spines back in.
+role's first task. It can drop spine switches out of the play, and a spine
+switch that is not in the play keeps a stale EVPN peer list on the device;
+`deploy_target` goes through the playbook's host pattern, which always unions
+the spine switches back in.
 
 Per device the deploy: uploads the candidate over SCP → `acm replace … validate`
 → `acm replace … timeout <n>` → waits → `acm confirm-commit` →
@@ -483,7 +487,7 @@ address, so something has to record which switch got it.
 
 Before the first run:
 
-- **Borders are allocated first, then leaves**, as two plays.
+- **Border switches are allocated first, then leaf switches**, as two plays.
 - **The pool is size-checked before anything is written**, against *free*
   capacity. A pool too small for every VTEP fails the run with nothing
   allocated.
@@ -502,7 +506,7 @@ freeing its address would hand it to another switch.
 |---|---|
 | New tenant VLAN | Add it in NetBox with role `edge`; deploy |
 | New VRF | Set `l3vni` and `mcast_base_group`; create its multicast carve; deploy |
-| New VRF handoff | Add the handoff VLAN with role `vrf_l3_handoff_vlan`, tagged with the border's hostname. The trunk list updates itself |
+| New VRF handoff | Add the handoff VLAN with role `vrf_l3_handoff_vlan`, tagged with the border switch's hostname. The trunk list updates itself |
 | New switch | Day 0 by hand, then onboard in NetBox, then `readiness.yml`, then deploy |
 | Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a `trm_allocate.yml` run |
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
@@ -522,7 +526,7 @@ front-loads its checks. All of these run **before a switch is touched**:
 | Underlay readiness | A hand-built underlay that cannot carry the overlay — see [Phase 1](#checking-day-0-the-underlay_readiness-role) |
 | VNI validation | Out-of-range, duplicate or L2/L3-colliding VNIs — fabric-wide |
 | Multicast validation | A missing, malformed, duplicated or out-of-carve replication group |
-| Anycast RP assertions | RP loopback disagreeing with `underlay_rp_address`, or a spine missing it |
+| Anycast RP assertions | RP loopback disagreeing with `underlay_rp_address`, or a spine switch missing it |
 | Peer addressing assertion | `Loopback0` disagreeing with the device's NetBox primary IP |
 | Blast-radius guard | Removing >50% of any tracked object class, or **any** underlay object (zero tolerance) |
 
