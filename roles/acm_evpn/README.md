@@ -160,6 +160,7 @@ a guessing game.
 |---|---|---|---|
 | `l2vni` | Integer | **conditional** | Two meanings, decided by whether the VLAN has a VRF. **In a VRF:** an override for the derived L2VNI (`evpn_l2vni_base + vid`, 10001–14094) — leave blank unless pinning a brownfield VNI. **With no VRF:** the marker that **enrols the VLAN as an L2-only overlay**; see below. |
 | `mcast_group` | Text (IPv4) | **conditional** | Overrides the VRF's `mcast_base_group` for this VLAN alone — an escape hatch, most VLANs in a VRF inherit. **Required on an L2-only overlay**, which has no VRF to inherit from. |
+| `upstream_asn` | Integer | no *(deprecating to yes)* | The eBGP peer ASN for a **`vrf_l3_handoff_vlan`**, rendered as its `remote-as`. Set it per handoff: a border can face a different upstream per tenant, and two fabrics almost certainly do. Blank falls back to the global `evpn_ext_bgp_asn` from `fabric.yml` and is reported on every run — **that fallback is deprecated and will be removed.** A value that is present but not a valid ASN (1–4294967295) fails the render rather than falling back, because substituting the global for a number someone set deliberately renders a session to the wrong ASN, which simply never comes up. Ignored on any other VLAN role. |
 
 ### VLAN roles
 

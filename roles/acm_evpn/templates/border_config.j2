@@ -205,7 +205,11 @@ router bgp {{ evpn_bgp_asn }}
   redistribute connected
   maximum-paths ibgp 2
 {% for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags %}
-  neighbor {{ vlan.get('neighbor_ip_v4') }} remote-as {{ evpn_ext_bgp_asn }}
+{#- The handoff's own upstream_asn when NetBox carries one, else the global
+    evpn_ext_bgp_asn from fabric.yml. Per VRF and per fabric rather than one
+    number for the whole estate; the fallback is reported as a deprecation by
+    02b_netbox_hygiene.yml and will be removed once every handoff is modelled. #}
+  neighbor {{ vlan.get('neighbor_ip_v4') }} remote-as {{ vlan.get('upstream_asn') or evpn_ext_bgp_asn }}
   neighbor {{ vlan.get('neighbor_ip_v4') }} fall-over bfd
   neighbor {{ vlan.get('neighbor_ip_v4') }} activate
   neighbor {{ vlan.get('neighbor_ip_v4') }} route-map WAN-INBOUND-FILTER in

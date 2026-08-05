@@ -50,6 +50,25 @@
                                ~ ' enrolled nowhere -- assign a scope if they should be'
                                ~ ' fabric segments') -%}
       {%- endif -%}
+
+      {#- Handoffs still riding the global evpn_ext_bgp_asn. Reported per VLAN
+          rather than per host: it is a property of NetBox, and the same handoff
+          appears on both borders of a dual-homed pair. -#}
+      {%- set no_asn = [] -%}
+      {%- for vrf_name, vrf in (hostvars[_hosts[0]].netbox_vlan_groups
+                                | default({})).get('vrfs', {}) | dictsort -%}
+      {%-   for vid, vlan in vrf.get('handoff_vlans', {}) | dictsort(by='key')
+              if not vlan.get('upstream_asn') -%}
+      {%-     set _ = no_asn.append(vid ~ ' (' ~ vrf_name ~ ')') -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- if no_asn -%}
+      {%-   set _ = out.append('NetBox: L3 handoff VLAN(s) ' ~ (no_asn | join(', '))
+                               ~ ' carry no upstream_asn, so the eBGP session falls'
+                               ~ ' back to evpn_ext_bgp_asn (' ~ evpn_ext_bgp_asn ~ ')'
+                               ~ ' from fabric.yml -- set upstream_asn on the VLAN;'
+                               ~ ' the fallback is deprecated and will be removed') -%}
+      {%- endif -%}
       {{ out | to_json }}
   when: _lines | from_json | length > 0
   run_once: true

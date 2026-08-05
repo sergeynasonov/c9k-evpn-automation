@@ -34,7 +34,7 @@ from ios_underlay import render_vlan_spec  # noqa: E402
 
 
 def _render(template, edge_vlans, l2_only=None, hostname="access1-1",
-            fabric_members=None, groups=None):
+            fabric_members=None, groups=None, vrfs=None):
     """Render a real shipped template with the given VLANs.
 
     ``fabric_members`` is the campus fabric by default. border_config.j2 scopes
@@ -51,11 +51,12 @@ def _render(template, edge_vlans, l2_only=None, hostname="access1-1",
     env.filters["ansible.utils.ipaddr"] = lambda value, query=None: value
     return env.get_template(template).render(
         all_edge_vlans=edge_vlans,
-        netbox_vlan_groups={"vrfs": {}, "l2_vlans": l2_only or {},
+        netbox_vlan_groups={"vrfs": vrfs or {}, "l2_vlans": l2_only or {},
                             "l2_only_vlans": l2_only or {}},
         inventory_hostname=hostname,
         vtep_source_intf="Loopback0",
         evpn_bgp_asn=64513,
+        evpn_ext_bgp_asn=64512,
         evpn_peer_group_name="EVPN-PEERS",
         fabric_edge_subnets={},
         underlay={"bgp": {"direct": [], "af_ipv4": []}},
@@ -190,6 +191,49 @@ class TestL2OnlyOverlay(unittest.TestCase):
     def test_border_nve_member_carries_the_group(self):
         out = render_border(l2_only_vlan(900, tags=["core1"]), "core1")
         self.assertIn(" member vni 10900 mcast-group 239.0.1.1", out)
+
+
+class TestHandoffUpstreamAsn(unittest.TestCase):
+    """The eBGP handoff's remote-as comes from the VLAN, not from fabric.yml.
+
+    The global ``evpn_ext_bgp_asn`` had one value for every fabric and every
+    tenant. It survives only as a fallback while NetBox is being populated, and
+    is reported as a deprecation whenever it is used.
+    """
+
+    def handoff(self, upstream_asn, vid="197"):
+        vlan = {"name": "VRF_CORP_HANDOFF", "tags": ["core1"],
+                "neighbor_ip_v4": "10.67.118.6", "local_ip_v4": "10.67.118.7/31",
+                "upstream_asn": upstream_asn}
+        vrfs = {"CORP": {"l3vni": 20199, "rd": "199", "handoff_vlans": {vid: vlan},
+                         "core_vlans": {}, "edge_vlans": {}}}
+        return _render("border_config.j2", {}, None, "core1", vrfs=vrfs)
+
+    def remote_as_for(self, rendered, neighbour="10.67.118.6"):
+        return re.findall(r"^  neighbor %s remote-as (\d+)$" % re.escape(neighbour),
+                          rendered, re.M)
+
+    def test_the_vlans_own_asn_is_used(self):
+        self.assertEqual(self.remote_as_for(self.handoff(64500)), ["64500"])
+
+    def test_it_wins_over_the_global(self):
+        """The fixture's global is 64512, so a rendered 64500 can only have come
+        from the VLAN."""
+        self.assertNotIn("64512", self.remote_as_for(self.handoff(64500)))
+
+    def test_absent_falls_back_to_the_global(self):
+        self.assertEqual(self.remote_as_for(self.handoff(None)), ["64512"])
+
+    def test_a_four_byte_asn_renders_whole(self):
+        self.assertEqual(self.remote_as_for(self.handoff(4200000000)), ["4200000000"])
+
+    def test_only_the_remote_as_line_changes(self):
+        """The other three neighbour lines are not ASN-dependent and must be
+        rendered for the session either way."""
+        for asn in (64500, None):
+            out = self.handoff(asn)
+            for suffix in ("fall-over bfd", "activate", "route-map WAN-INBOUND-FILTER in"):
+                self.assertIn("  neighbor 10.67.118.6 " + suffix, out)
 
 
 class TestBorderMeshIsFabricScoped(unittest.TestCase):
