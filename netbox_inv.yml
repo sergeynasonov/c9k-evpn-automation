@@ -22,6 +22,33 @@ prefixes: true
 
 compose:
   ansible_host: primary_ip4.address | ipaddr('address')
+
+# NetBox exposes a device's 'serial' and 'tags' as host variables, and both
+# names are RESERVED by Ansible -- they are play/task keywords. Every run
+# therefore opened with two "Found variable using reserved name" warnings, and
+# an operator who learns to scroll past a warning on every run is the actual
+# cost here.
+#
+# Renamed rather than suppressed. A reserved-name collision is a real hazard,
+# not cosmetic: 'serial' is the batching keyword, which this project's backlog
+# intends to use for canary deploys, and a host variable shadowing it is exactly
+# the kind of thing that would be debugged twice.
+#
+# 'pattern' and 'repl' are regexes fed to re.sub, matched with re.match (so
+# anchored at the start already); the '$' is what keeps this from also renaming
+# a future variable merely BEGINNING with these names. First match wins.
+#
+# This renames HOST VARIABLES only. Group creation runs through a different code
+# path in the plugin, so 'group_by: tags' still produces tags_<slug> groups --
+# tags_fabric_spine, which selects every spine in this project, is untouched.
+# Nothing in this repository reads either variable: 'vlan.tags' throughout the
+# templates is a VLAN's tags from GraphQL, not a device's.
+rename_variables:
+  - pattern: "^serial$"
+    repl: "netbox_serial"
+  - pattern: "^tags$"
+    repl: "netbox_tags"
+
 group_by:
   - device_roles
   - site_group
