@@ -111,10 +111,15 @@ acm_save_startup: true
 # checkpoints and rotates the oldest out; it does NOT delete the files it
 # evicts, so the directory is worth a look occasionally.
 #
-# The filename is <MMDD-HHMMSS>.cfg. It carries no fabric or role name because
-# the DIRECTORY already says what wrote it, and the rollback table already shows
-# the date, time and username -- repeating either in the filename only makes the
+# The filename is <MMDD-HHMMSS>.cfg in the CONTROL NODE's local time, chosen to
+# agree with the switch clock ACM stamps its rollback table from. It carries no
+# fabric or role name because the DIRECTORY already says what wrote it, and the
+# table already shows date, time and username -- repeating either only makes the
 # table harder to read, since a long path wraps onto a second line.
+#
+# If your control node and your switches are in different timezones, the
+# filename will not match the table. Set the control node to the fabric's
+# timezone, or accept the offset.
 acm_checkpoint: true
 acm_checkpoint_dir: "flash:acm-evpn"
 
