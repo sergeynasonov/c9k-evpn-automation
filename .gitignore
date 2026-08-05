@@ -16,7 +16,12 @@ __pycache__/
 
 # --- Rendered device candidate configs (regenerated on every run) ------------
 switch-configuration/
-switch-configuration-inverted/
+# Retired mechanism, still ignored ON PURPOSE. The directory was removed
+# from .gitignore when the mechanism went away, while it still existed on
+# disk -- and 'git add -A' committed seven candidate configs carrying the
+# local admin type-9 hash. An ignore rule for a path nothing creates costs
+# nothing; deleting one is how that happens.
+switch-configuration.before/
 
 # --- ACM deploy results ------------------------------------------------------
 #     The commit-results/ directory is intentionally kept in the repo (via its
