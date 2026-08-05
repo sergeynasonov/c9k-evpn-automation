@@ -48,7 +48,7 @@ looks provisioned and is not.
 
 | What | NetBox object | Slug | Effect |
 |---|---|---|---|
-| Border | Device role | `fabric_border` | Renders the handoff SVIs, eBGP handoff and the border-to-border iBGP mesh within its own fabric. Allocated first by `trm_allocate.yml`. |
+| Border | Device role | `fabric_border` | Renders the handoff SVIs, the eBGP handoff, the border-to-border iBGP mesh, and a `network` statement per edge subnet — all scoped to its own fabric. Allocated first by `trm_allocate.yml`. |
 | Leaf | Device role | `fabric_leaf` | Renders tenant SVIs, EVPN instances and the NVE interface. |
 | Spine | **Tag** | `fabric_spine` | Route reflector: EVPN and MVPN clients, anycast RP. |
 
@@ -91,6 +91,7 @@ disagree about where a fabric ends. Three things are scoped to it:
 | **EVPN overlay peers** — a spine reflects only for clients in its own fabric, a client peers only with its own fabric's spines | Too short a peer list renders a valid `router bgp` that `acm replace` applies as a session teardown |
 | **The border-to-border iBGP mesh** (`border_config.j2`) | Render a neighbour in another fabric: a device in an ASN it is not in, reachable over an underlay this switch has no route into |
 | **The MSDP mesh check** (`underlay_readiness`) | Demand a session across two underlays, reporting every correctly-built spine as unready |
+| **The border's edge-subnet `network` statements** | Advertise another fabric's prefixes. Inert while they are unreachable — `network` needs a matching route in the RIB — so the visible cost is dead configuration that grows with every fabric. It becomes a real advertisement, competing with that fabric's own border, the moment a shared upstream or a DCI makes them resolvable |
 
 **The fabric's iBGP ASN comes from its sites.** Assign one NetBox ASN object to
 every site in the fabric — the same one to all of them. Exactly one is
@@ -110,6 +111,11 @@ of it. Model anything above a fabric as a **region** instead — regions are not
 used for scoping. Two fabrics are otherwise fully independent: they may reuse
 the same VRFs, the same L3VNIs and the same multicast groups, because they never
 exchange them.
+
+Note what is scoped to the fabric but **not** to the site: a border is the exit
+for its *whole* fabric, so it advertises the edge subnets of every building in
+it, not only its own. That is why `fabric_edge_subnets` ignores the per-host
+site filter that `all_edge_vlans` obeys.
 
 **VNI uniqueness is therefore scoped to one fabric**, and both halves of that
 matter:

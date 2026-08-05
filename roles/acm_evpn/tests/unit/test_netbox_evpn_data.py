@@ -974,6 +974,60 @@ class TestVniUniquenessIsPerFabric(unittest.TestCase):
             self.build(vlans)
         self.assertIn("10101", str(ctx.exception))
 
+    def test_edge_subnets_cover_every_building_of_this_fabric(self):
+        """THE property that must not be lost while scoping.
+
+        fabric_edge_subnets deliberately ignores the per-HOST site filter: a
+        border is the exit for its whole fabric, so it advertises the subnets of
+        every building in it, not only its own. Narrowing this to per-site would
+        stop a working campus advertising half its own address space.
+        """
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(102, "B", site_id="52", prefixes=[prefix("10.0.2.0/24", vrf=CORP_VRF)]),
+        ]
+        subnets = self.build(vlans)["fabric_edge_subnets"]["CORP"]
+        self.assertEqual(sorted(subnets), ["101", "102"])
+        self.assertEqual(subnets["102"]["network"], "10.0.2.0")
+
+    def test_edge_subnets_stop_at_the_fabric_boundary(self):
+        """The other fabric's subnet is unreachable from this border. Inert
+        today, since 'network' needs a matching route -- but it becomes a real
+        advertisement the moment the two fabrics can reach each other."""
+        vlans = [
+            vlan(101, "LOCAL", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(701, "REMOTE", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=CORP_VRF)]),
+        ]
+        subnets = self.build(vlans)["fabric_edge_subnets"]["CORP"]
+        self.assertEqual(sorted(subnets), ["101"])
+
+    def test_the_other_fabric_gets_its_own_subnets(self):
+        """Same data, rendered for a host in the remote fabric."""
+        vlans = [
+            vlan(101, "LOCAL", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(701, "REMOTE", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=CORP_VRF)]),
+        ]
+        subnets = self.build(vlans, my_site="60",
+                             my_fabric="sites_evpn_remote")["fabric_edge_subnets"]["CORP"]
+        self.assertEqual(sorted(subnets), ["701"])
+
+    def test_a_site_group_scoped_vlan_is_an_edge_subnet_of_that_fabric(self):
+        """A VLAN stretched across the campus via its VLAN group's scope, rather
+        than pinned to one site."""
+        vlans = [vlan(101, "STRETCHED", site_id=None, scope_type="SiteGroup", scope_id="3",
+                      prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)])]
+        subnets = self.build(vlans, my_sg="3")["fabric_edge_subnets"]["CORP"]
+        self.assertEqual(sorted(subnets), ["101"])
+
+    def test_edge_subnets_are_unscoped_without_a_map(self):
+        """Single-fabric callers keep every subnet, as before."""
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(701, "B", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=CORP_VRF)]),
+        ]
+        result = build_evpn_data(vlans, [], my_site="51", my_sg=None)
+        self.assertEqual(sorted(result["fabric_edge_subnets"]["CORP"]), ["101", "701"])
+
     def test_no_scope_map_keeps_the_single_fabric_behaviour(self):
         """Callers that pass no map get one bucket and the pre-fabric semantics,
         which is what keeps every other test in this file meaningful."""
