@@ -45,7 +45,7 @@
       - _bgp_missing | length == 0
     fail_msg: >-
       {{ inventory_hostname }}: BGP neighbour(s) {{ _bgp_missing | join(', ') }}
-      are in the fabric ASN {{ evpn_bgp_asn }}, so they were removed from the
+      are in the fabric ASN {{ fabric_asn }}, so they were removed from the
       preserved configuration on the assumption a template renders them - but
       they do not appear in the candidate. Deploying this would delete those
       sessions. Either render them, or exclude them from fabric ownership.

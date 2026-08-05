@@ -115,7 +115,7 @@ ip routing
 ipv6 unicast-routing
 ip multicast-routing
 ip pim ssm default
-ip pim rp-address {{ underlay_rp_address }} override
+ip pim rp-address {{ fabric_rp_address }} override
 ip pim register-source {{ vtep_source_intf }}
 !
 ip cef load-sharing algorithm include-ports source destination

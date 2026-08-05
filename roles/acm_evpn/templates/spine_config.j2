@@ -47,13 +47,13 @@ interface nve1
 {% endfor %}
 !
 ! --- 10. BGP ROUTING ---
-router bgp {{ evpn_bgp_asn }}
+router bgp {{ fabric_asn }}
  bgp router-id interface {{ vtep_source_intf }}
  bgp log-neighbor-changes
  bgp graceful-restart
  no bgp default ipv4-unicast
  neighbor {{ evpn_peer_group_name }} peer-group
- neighbor {{ evpn_peer_group_name }} remote-as {{ evpn_bgp_asn }}
+ neighbor {{ evpn_peer_group_name }} remote-as {{ fabric_asn }}
  neighbor {{ evpn_peer_group_name }} update-source {{ vtep_source_intf }}
  neighbor {{ evpn_peer_group_name }} fall-over host-route
 {% for ip in peer_ips %}

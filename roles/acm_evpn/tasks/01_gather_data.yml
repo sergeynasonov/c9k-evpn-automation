@@ -34,6 +34,11 @@
     name: underlay_readiness
     tasks_from: fabric_resolve.yml
 
+- name: Resolve the fabric's anycast RP
+  ansible.builtin.import_role:
+    name: underlay_readiness
+    tasks_from: fabric_anycast_rp.yml
+
 - name: Gather NetBox facts
   ansible.builtin.import_tasks: netbox_facts.yml
 
@@ -54,9 +59,15 @@
   ansible.builtin.set_fact:
     ios_version: "{{ ns.ver }}"
     loopback0_ip: "{{ ns.ip if ns.ip else ansible_host }}"
+    # fabric_asn, NOT the global evpn_bgp_asn. This is the BGP OWNERSHIP rule --
+    # a neighbour in this ASN is automation-managed and is stripped from the
+    # preserved config on the assumption a template re-renders it. Ownership and
+    # the render must therefore read the SAME number: were they to differ, every
+    # overlay neighbour would be stripped as owned and then not rendered, and
+    # 'acm replace' would delete every EVPN session on the switch.
     underlay: >-
       {{ current_run_config.stdout[0]
-         | ios_underlay_config(evpn_peer_group_name, evpn_bgp_asn) }}
+         | ios_underlay_config(evpn_peer_group_name, fabric_asn) }}
   vars:
     ns: >-
       {%- set ns = namespace(ip='', in_lo=false, ver='17.3') -%}
@@ -96,22 +107,22 @@
 
       {#- The generated 'ip pim rp-address' must point at an address the fabric
           actually owns, so where this interface exists it has to agree. -#}
-      {%- if anycast_rp_interface in underlay.addresses
-             and underlay.addresses[anycast_rp_interface] != underlay_rp_address -%}
-      {%-   set _ = bad.append(anycast_rp_interface ~ ' carries '
-                               ~ underlay.addresses[anycast_rp_interface]
-                               ~ ' but underlay_rp_address is ' ~ underlay_rp_address
-                               ~ ' -- correct the device, or update the variable,'
+      {%- if fabric_rp_interface in underlay.addresses
+             and underlay.addresses[fabric_rp_interface] != fabric_rp_address -%}
+      {%-   set _ = bad.append(fabric_rp_interface ~ ' carries '
+                               ~ underlay.addresses[fabric_rp_interface]
+                               ~ ' but this fabric\'s anycast RP is ' ~ fabric_rp_address
+                               ~ ' -- correct the device, or correct NetBox,'
                                ~ ' since "ip pim rp-address" is generated from it') -%}
       {%- endif -%}
 
       {#- A spine that does not carry the anycast RP cannot be one. The RP
           loopback is day-0 topology and is no longer generated. -#}
       {%- if 'tags_fabric_spine' in group_names
-             and underlay_rp_address not in (underlay.addresses.values() | list) -%}
+             and fabric_rp_address not in (underlay.addresses.values() | list) -%}
       {%-   set _ = bad.append('tagged fabric_spine but no global-table interface carries'
-                               ~ ' the anycast RP address ' ~ underlay_rp_address
-                               ~ ' (previously created as ' ~ anycast_rp_interface ~ ')') -%}
+                               ~ ' the anycast RP address ' ~ fabric_rp_address
+                               ~ ' (previously created as ' ~ fabric_rp_interface ~ ')') -%}
       {%- endif -%}
 
       {#- EVPN peers are addressed from NetBox, so a device managed on anything

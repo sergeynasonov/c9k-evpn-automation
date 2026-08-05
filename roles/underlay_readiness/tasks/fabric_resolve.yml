@@ -32,6 +32,13 @@
 #   fabric_map     {device: fabric group name} for the whole inventory
 #   fabric_id      this device's fabric, as an inventory group name ('' if none)
 #   fabric_members every device in this device's fabric, sorted
+#   fabric_asn     this fabric's iBGP ASN, from its sites in NetBox
+#
+# fabric_asn is resolved here rather than in acm_evpn for the same reason as the
+# rest: it is a property of the fabric, from the same inventory data, and having
+# two places decide it is how they come to disagree. underlay_readiness does not
+# use it -- but it validates it, which catches the data error at onboarding
+# rather than on the first render.
 
 # Tasks 1-3 are guarded so that re-entering this file is free. acm_evpn resolves
 # in 01_gather_data.yml and then imports underlay_readiness as a pre-flight,
@@ -167,3 +174,107 @@
 - name: 5. Skip a device that belongs to no fabric
   ansible.builtin.meta: end_host
   when: fabric_id | length == 0
+
+# --- the fabric's BGP ASN ---------------------------------------------------
+#
+# From NetBox, and from INVENTORY rather than a query: nb_inventory fetches
+# sites with the full serializer (/api/dcim/sites/?limit=0), so each device's
+# 'sites[0].asns' already carries them, for every device whether or not it is in
+# the play. One less round trip and one less thing to keep in step.
+#
+# ONE ASN PER FABRIC is definitional, not a policy choice -- the render builds
+# an iBGP EVPN fabric, and every session in it is inside that ASN. So a site
+# carrying two, or two sites in one fabric disagreeing, is not something to pick
+# a winner from.
+- name: 6. Resolve each fabric's BGP ASN from its sites
+  ansible.builtin.set_fact:
+    fabric_asn_map: "{{ (_asns | from_json).map }}"
+    fabric_asn_problems: "{{ (_asns | from_json).problems }}"
+    fabric_asn_missing: "{{ (_asns | from_json).missing }}"
+  vars:
+    _asns: >-
+      {%- set out = {} -%}
+      {%- set problems = [] -%}
+      {%- set missing = [] -%}
+      {%- for fabric in fabric_map.values() | unique | sort -%}
+      {#-   Collect (site, asn) across every device in the fabric, so a
+            disagreement can name the sites rather than just the fabric. -#}
+      {%-   set seen = {} -%}
+      {%-   for host in groups.get(fabric, []) -%}
+      {%-     set sites = hostvars[host].get('sites') or [] -%}
+      {%-     if sites | length > 0 -%}
+      {%-       set site = sites[0] -%}
+      {%-       set asns = (site.get('asns') or []) | map(attribute='asn')
+                           | map('int') | unique | sort | list -%}
+      {%-       set _ = seen.update({site.get('slug', site.get('id')): asns}) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+
+      {%-   set multi = [] -%}
+      {%-   for site, asns in seen | dictsort if asns | length > 1 -%}
+      {%-     set _ = multi.append(site ~ ' has ' ~ (asns | join(', '))) -%}
+      {%-   endfor -%}
+      {%-   set distinct = seen.values() | list | flatten | unique | sort | list -%}
+
+      {%-   if multi -%}
+      {%-     set _ = problems.append(fabric ~ ': ' ~ (multi | join('; '))
+                                      ~ ' -- a fabric site must carry exactly one ASN') -%}
+      {%-   elif distinct | length > 1 -%}
+      {%-     set _ = problems.append(fabric ~ ': its sites disagree -- '
+                                      ~ (seen | dictsort | map('join', ' = ') | join('; '))) -%}
+      {%-   elif distinct | length == 1 -%}
+      {%-     set _ = out.update({fabric: distinct[0]}) -%}
+      {%-   else -%}
+      {%-     set _ = missing.append(fabric) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ {'map': out, 'problems': problems, 'missing': missing} | to_json }}
+  when: fabric_asn is not defined
+  run_once: true
+  delegate_to: localhost
+
+- name: 7. Refuse a fabric whose ASN is ambiguous
+  ansible.builtin.assert:
+    that:
+      - fabric_asn_problems | length == 0
+    fail_msg: |-
+      {{ fabric_asn_problems | length }} fabric(s) do not have exactly one BGP ASN:
+      {% for problem in fabric_asn_problems %}
+        - {{ problem }}
+      {% endfor %}
+      Every EVPN session in a fabric is iBGP inside one ASN, so there is nothing
+      to choose between two. In NetBox, assign ONE ASN object to every site in
+      the fabric, and the same one to all of them.
+    success_msg: "every fabric has exactly one BGP ASN"
+    quiet: true
+  when: fabric_asn is not defined
+  run_once: true
+  delegate_to: localhost
+
+# Deprecation, not an error: fabric.yml still supplies evpn_bgp_asn, so a fabric
+# with no ASN in NetBox renders exactly as it did before. The notice is what
+# makes the migration finishable -- once no fabric reports here, the fallback
+# and the fabric.yml key can both go.
+- name: 8. Report fabrics still using the ASN from fabric.yml
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['NetBox: fabric(s) ' ~ (fabric_asn_missing | join(', '))
+          ~ ' have no ASN on their sites, so BGP falls back to evpn_bgp_asn ('
+          ~ evpn_bgp_asn | default('unset') ~ ') from fabric.yml — assign an ASN'
+          ~ ' object to each site in NetBox; the fallback is deprecated and will'
+          ~ ' be removed'] }}
+  when:
+    - fabric_asn is not defined
+    - fabric_asn_missing | length > 0
+  run_once: true
+  delegate_to: localhost
+
+- name: 9. Determine this device's BGP ASN
+  ansible.builtin.set_fact:
+    # '| int' so both paths yield the same type. Without it the NetBox value and
+    # the fabric.yml fallback come back differently typed, which renders the same
+    # text but makes anything comparing the two behave differently depending on
+    # which path a given fabric took. evpn_bgp_asn is asserted present by
+    # acm_evpn, and this role does not use the ASN, so the 0 is unreachable
+    # wherever it would matter.
+    fabric_asn: "{{ (fabric_asn_map.get(fabric_id) or evpn_bgp_asn | default(0)) | int }}"

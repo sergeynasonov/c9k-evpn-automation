@@ -92,6 +92,17 @@ disagree about where a fabric ends. Three things are scoped to it:
 | **The border-to-border iBGP mesh** (`border_config.j2`) | Render a neighbour in another fabric: a device in an ASN it is not in, reachable over an underlay this switch has no route into |
 | **The MSDP mesh check** (`underlay_readiness`) | Demand a session across two underlays, reporting every correctly-built spine as unready |
 
+**The fabric's iBGP ASN comes from its sites.** Assign one NetBox ASN object to
+every site in the fabric — the same one to all of them. Exactly one is
+definitional rather than a policy: every EVPN session in the fabric is iBGP
+inside it, so a site carrying two, or two sites in one fabric disagreeing, is
+refused outright rather than resolved by picking a winner. The ASN needs no
+GraphQL query: `nb_inventory` fetches sites with the full serializer, so it
+already rides along in each device's `sites` hostvar.
+
+A fabric with no ASN in NetBox falls back to `evpn_bgp_asn` from `fabric.yml`
+and says so on every run. **That fallback is deprecated and will be removed.**
+
 **Site groups must not be nested.** A parent group spans buildings that do not
 share an underlay, and there is no safe way to guess which level was meant to be
 the fabric, so a nested tree is refused outright rather than resolved to one end
@@ -160,6 +171,7 @@ a guessing game.
 |---|---|---|---|
 | `l2vni` | Integer | **conditional** | Two meanings, decided by whether the VLAN has a VRF. **In a VRF:** an override for the derived L2VNI (`evpn_l2vni_base + vid`, 10001–14094) — leave blank unless pinning a brownfield VNI. **With no VRF:** the marker that **enrols the VLAN as an L2-only overlay**; see below. |
 | `mcast_group` | Text (IPv4) | **conditional** | Overrides the VRF's `mcast_base_group` for this VLAN alone — an escape hatch, most VLANs in a VRF inherit. **Required on an L2-only overlay**, which has no VRF to inherit from. |
+| `upstream_asn` | Integer | no *(deprecating to yes)* | The eBGP peer ASN for a **`vrf_l3_handoff_vlan`**, rendered as its `remote-as`. Set it per handoff: a border can face a different upstream per tenant, and two fabrics almost certainly do. Blank falls back to the global `evpn_ext_bgp_asn` from `fabric.yml` and is reported on every run — **that fallback is deprecated and will be removed.** A value that is present but not a valid ASN (1–4294967295) fails the render rather than falling back, because substituting the global for a number someone set deliberately renders a session to the wrong ASN, which simply never comes up. Ignored on any other VLAN role. |
 
 ### VLAN roles
 
@@ -511,7 +523,7 @@ checks run before a switch is touched:
 |---|---|
 | VNI validation | Fails on out-of-range, duplicate, or L2/L3-colliding VNIs. Fabric-wide. |
 | Multicast validation | Fails on a missing, malformed, or duplicated group, one outside the carve, or one outside the owning VRF's own `/16`. |
-| Anycast RP assertions | The RP loopback must match `underlay_rp_address`, and every spine switch must carry it. |
+| Anycast RP assertions | The RP loopback must match the fabric's anycast RP, every spine switch must carry it, and every spine switch in a fabric must carry the **same** address — differing addresses configure cleanly and then silently fail to forward. |
 | Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |
 | Fabric partition | Refuses the whole run if the NetBox site tree does not partition into fabrics — today, if any device sits under nested site groups. Fabric-wide: an ambiguous tree makes every peer list suspect, not just the ambiguous device's. |
 | Route reflector assertion | Fails a device whose fabric contains no `fabric_spine`. It would otherwise render a `router bgp` with no overlay neighbours, which `acm replace` applies as a teardown of every EVPN session on the switch. Per device, so one mis-sited leaf does not stop a healthy fabric. |

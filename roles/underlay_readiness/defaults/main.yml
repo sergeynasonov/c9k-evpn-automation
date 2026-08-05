@@ -31,7 +31,7 @@ readiness_global_lines:
   - "ip multicast-routing"
   - "ip pim register-source {{ vtep_source_intf }}"
   - "ip pim ssm default"
-  - "ip pim rp-address {{ underlay_rp_address }} override"
+  - "ip pim rp-address {{ fabric_rp_address }} override"
   # ECMP hashing across the fabric uplinks. The IOS-XE default is 'universal',
   # which hashes on the OUTER header -- and for VXLAN every flow between the
   # same pair of VTEPs has an identical outer header, so the whole tunnel pins
@@ -132,6 +132,13 @@ readiness_write_csv: true
 
 # Set false to check a switch without configuring anything at all.
 readiness_apply_baseline: true
+
+# Tag(s) marking an IPAddress as a fabric's UNDERLAY anycast RP. One object per
+# spine, all with the same address and role Anycast (which is what lets NetBox
+# hold the duplicates), each assigned to that spine's RP loopback. See
+# tasks/fabric_anycast_rp.yml. Unrelated to TRM's per-VRF tenant RPs.
+underlay_anycast_rp_tags:
+  - underlay_anycast_rp
 
 # Highest VTY line number to harden, beyond the first five. Must cover every VTY
 # line the platform actually has: any line left unhardened falls back to the

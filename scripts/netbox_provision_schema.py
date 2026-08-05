@@ -80,6 +80,14 @@ TAGS = {
                         "TRM: an RP outside the fabric for a VRF"),
     "trm_register_source": ("TRM Register Source",
                             "TRM: the allocation pool prefix, and each VTEP's PIM register-source address"),
+    # Selects the UNDERLAY anycast RP. The IPAddress must ALSO carry NetBox's
+    # built-in Anycast role -- that is what permits the duplicate address across
+    # the spines, and the resolver reports an object that has the tag without
+    # it. Role alone would be far too broad a selector: an anycast gateway SVI
+    # carries the same role and is not an RP.
+    "underlay_anycast_rp": ("Underlay Anycast RP",
+                            "The fabric's underlay anycast RP: one IPAddress per spine, all the "
+                            "same address, role Anycast, each assigned to that spine's RP loopback"),
 }
 
 # --- VLAN roles ------------------------------------------------------------
@@ -132,6 +140,11 @@ CUSTOM_FIELDS = [
      "Overrides the VRF's mcast_base_group for this VLAN alone, and is REQUIRED "
      "on an L2-only overlay, which has no VRF to inherit from.",
      MCAST_REGEX),
+    ("upstream_asn", "integer", ["ipam.vlan"], "Upstream ASN",
+     "eBGP peer ASN for a vrf_l3_handoff_vlan, rendered as its remote-as. Per "
+     "handoff, since a border can face a different upstream per tenant and two "
+     "fabrics almost certainly do. Blank falls back to evpn_ext_bgp_asn in "
+     "fabric.yml, which is deprecated."),
     # On the PREFIX, not the VLAN: _apply_prefix() reads these from the
     # prefix's custom_field_data. A VLAN can carry an IPv4 and an IPv6 prefix
     # with different relay destinations, which a VLAN-level field could not

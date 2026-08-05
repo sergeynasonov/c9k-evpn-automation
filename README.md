@@ -168,8 +168,11 @@ ipv6 cef load-sharing algorithm include-ports source destination
 
 `ip routing` prints on a C9300 and is a silent default on the C9400/9500/9600 —
 harmless to paste on any of them. `10.0.0.100` is the fabric anycast RP, which
-lives on the spine switches; it must match `underlay_rp_address` in
-`group_vars/all/fabric.yml`.
+lives on the spine switches. Model it in NetBox as one IPAddress per spine —
+same address, role **Anycast** (which is what lets NetBox hold the duplicates),
+tagged `underlay_anycast_rp`, each assigned to that spine's RP loopback. It falls
+back to `underlay_rp_address` in `group_vars/all/fabric.yml` while NetBox is
+being populated, and says so on every run.
 
 ### Every node — Loopback0
 
@@ -281,7 +284,10 @@ router ospf 1
  default-information originate
 ```
 
-`64513` is the fabric ASN (`evpn_bgp_asn`); `64512` is upstream's. **Ownership
+`64513` is the fabric ASN — read from the ASN object on the fabric's NetBox
+sites, falling back to `evpn_bgp_asn` in `fabric.yml`. `64512` is upstream's,
+from the handoff VLAN's `upstream_asn`, falling back to `evpn_ext_bgp_asn`.
+Both fallbacks are deprecated and report themselves on every run. **Ownership
 of this stanza is by ASN**: the automation regenerates neighbours in the fabric
 ASN — the EVPN peer group and the border-to-border session — and preserves
 everything in any other ASN verbatim. So this eBGP session survives every
@@ -589,7 +595,7 @@ front-loads its checks. All of these run **before a switch is touched**:
 | Underlay readiness | A hand-built underlay that cannot carry the overlay — see [Phase 1](#checking-day-0-the-underlay_readiness-role) |
 | VNI validation | Out-of-range, duplicate or L2/L3-colliding VNIs — fabric-wide |
 | Multicast validation | A missing, malformed, duplicated or out-of-carve replication group |
-| Anycast RP assertions | RP loopback disagreeing with `underlay_rp_address`, or a spine switch missing it |
+| Anycast RP assertions | RP loopback disagreeing with the fabric's anycast RP, a spine switch missing it, or two spine switches in one fabric carrying **different** addresses |
 | Peer addressing assertion | `Loopback0` disagreeing with the device's NetBox primary IP |
 | Blast-radius guard | Removing >50% of any tracked object class, or **any** underlay object (zero tolerance) |
 

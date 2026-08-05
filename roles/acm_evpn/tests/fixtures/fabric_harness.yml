@@ -56,6 +56,7 @@
           {%-   set _ = out.update({host: {
                   'fabric_id': hv.fabric_id | default(''),
                   'fabric_members': hv.fabric_members | default([]),
+                  'fabric_asn': hv.fabric_asn | default(''),
                   'peer_ips': hv.peer_ips | default([])}}) -%}
           {%- endfor -%}
           {{ out | to_json }}
@@ -64,6 +65,8 @@
           survivors: "{{ ansible_play_hosts | sort }}"
           orphans: "{{ fabric_orphans }}"
           fabric_map: "{{ fabric_map }}"
+          fabric_asn_map: "{{ fabric_asn_map }}"
+          fabric_asn_missing: "{{ fabric_asn_missing }}"
           hosts: "{{ _hosts | from_json }}"
       run_once: true
       delegate_to: localhost

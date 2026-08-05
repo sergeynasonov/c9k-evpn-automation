@@ -625,6 +625,42 @@ def _coerce_vni(value: Any) -> Optional[int]:
         return None
 
 
+_ASN_MAX = 4294967295
+
+
+def _upstream_asn(vlan: Dict[str, Any]) -> Optional[int]:
+    """The eBGP peer ASN for an L3 handoff, from the VLAN's ``upstream_asn``.
+
+    Per VRF and per handoff rather than one global for the whole fabric: a
+    border can hand off to a different upstream per tenant, and two fabrics
+    almost certainly do. Absent means "not modelled yet" and the render falls
+    back to ``evpn_ext_bgp_asn`` from fabric.yml, reported by
+    02b_netbox_hygiene.yml.
+
+    A PRESENT but unusable value fails the render instead of falling back.
+    Silently substituting the global for a value someone set deliberately
+    would render an eBGP session to the wrong ASN, which does not come up and
+    gives no clue why.
+    """
+    raw = (vlan.get("custom_field_data") or {}).get("upstream_asn")
+    if raw is None or raw == "":
+        return None
+    try:
+        asn = int(raw)
+    except (TypeError, ValueError):
+        raise AnsibleFilterError(
+            "VLAN {} ({}) has upstream_asn {!r}, which is not a number. It is "
+            "the remote-as of a real eBGP session, so it cannot be guessed."
+            .format(vlan.get("vid"), vlan.get("name"), raw)
+        )
+    if not 1 <= asn <= _ASN_MAX:
+        raise AnsibleFilterError(
+            "VLAN {} ({}) has upstream_asn {}, outside the valid range "
+            "1-{}.".format(vlan.get("vid"), vlan.get("name"), asn, _ASN_MAX)
+        )
+    return asn
+
+
 def _vlan_l2vni(vlan: Dict[str, Any], vid: Any, l2vni_base: int) -> Optional[int]:
     """L2VNI for a VLAN: derived from the VLAN ID, or an explicit override.
 
@@ -880,6 +916,9 @@ def _new_vlan_record(vlan: Dict[str, Any], role: str, scope_type: Optional[str],
         "local_ip_v4": "", "neighbor_ip_v4": "",
         "prefix_ipv6": "", "network_ipv6": "", "netmask_ipv6": "",
         "local_ip_v6": "", "neighbor_ip_v6": "",
+        # eBGP peer ASN for an L3 handoff. None means the VLAN does not carry
+        # one and border_config.j2 falls back to the global evpn_ext_bgp_asn.
+        "upstream_asn": _upstream_asn(vlan),
         "vrf_name": "", "vrf_rd": "", "vrf_mcast_group": "",
         "vrf_l3vni": None, "vrf_l3vni_raw": None,
         # Effective underlay replication group: the VLAN's own 'mcast_group'

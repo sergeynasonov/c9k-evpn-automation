@@ -315,6 +315,67 @@ class TestHandoffVlan(unittest.TestCase):
         self.assertEqual(v["local_ip_v6"], "2001:db8:ee::1/127")
 
 
+class TestUpstreamAsn(unittest.TestCase):
+    """The eBGP peer ASN for an L3 handoff, per VLAN rather than per estate.
+
+    It replaces the global ``evpn_ext_bgp_asn``, which had exactly one call
+    site and one value for every fabric and every tenant. Two fabrics hand off
+    to different upstreams, and so can two VRFs in the same fabric.
+    """
+
+    def handoff(self, cfd=None, vid=197):
+        vlan_list = [vlan(vid, "VRF_CORP_HANDOFF%d" % vid, role="vrf_l3_handoff_vlan",
+                          tags=["core1"], scope_type="SiteGroup", scope_id="3", cfd=cfd,
+                          prefixes=[prefix("10.67.118.6/31", vrf=CORP_VRF)])]
+        result = build_evpn_data(vlan_list, [], my_site=None, my_sg="3")
+        return result["vrfs"]["CORP"]["handoff_vlans"][str(vid)]
+
+    def test_carried_through_to_the_handoff(self):
+        self.assertEqual(self.handoff({"upstream_asn": 64512})["upstream_asn"], 64512)
+
+    def test_absent_is_none_so_the_template_can_fall_back(self):
+        self.assertIsNone(self.handoff()["upstream_asn"])
+
+    def test_blank_is_none_rather_than_zero(self):
+        """A cleared custom field arrives as "" and must read as 'not set', not
+        as ASN 0 -- which would render a session that never comes up."""
+        self.assertIsNone(self.handoff({"upstream_asn": ""})["upstream_asn"])
+
+    def test_a_text_typed_field_still_coerces(self):
+        """The field is Integer, but the same field typed as text arrives as a
+        string. Both are usable and must give the same number."""
+        self.assertEqual(self.handoff({"upstream_asn": "64512"})["upstream_asn"], 64512)
+
+    def test_four_byte_asn_is_accepted(self):
+        self.assertEqual(self.handoff({"upstream_asn": 4200000000})["upstream_asn"],
+                         4200000000)
+
+    def test_a_non_numeric_value_fails_the_render(self):
+        """Deliberately NOT a fallback. Substituting the global for a value
+        someone set on purpose renders a session to the wrong ASN, which does
+        not come up and gives no clue why."""
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.handoff({"upstream_asn": "AS64512"})
+        self.assertIn("197", str(ctx.exception))
+
+    def test_zero_is_rejected(self):
+        with self.assertRaises(AnsibleFilterError):
+            self.handoff({"upstream_asn": 0})
+
+    def test_above_four_byte_range_is_rejected(self):
+        with self.assertRaises(AnsibleFilterError):
+            self.handoff({"upstream_asn": 4294967296})
+
+    def test_an_edge_vlan_carrying_one_is_harmless(self):
+        """Only handoffs render an eBGP neighbour, so the field is ignored
+        elsewhere rather than being an error."""
+        vlan_list = [vlan(100, "EDGE", tags=["core1"], scope_type="SiteGroup", scope_id="3",
+                          cfd={"upstream_asn": 64512},
+                          prefixes=[prefix("10.0.0.0/24", vrf=CORP_VRF)])]
+        result = build_evpn_data(vlan_list, [], my_site=None, my_sg="3")
+        self.assertIn("100", result["all_edge_vlans"])
+
+
 class TestPureL2Vlan(unittest.TestCase):
     def test_l2_only_segment_is_enrolled_by_l2vni(self):
         """No VRF, so 'l2vni' is what says this VLAN is a fabric overlay at

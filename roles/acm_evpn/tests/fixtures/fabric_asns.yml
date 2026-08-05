@@ -1,0 +1,76 @@
+---
+# Two fabrics, each with its ASN modelled in NetBox.
+#
+# YAML rather than .ini because the ASN comes from the 'sites' hostvar, which is
+# a nested structure an ini file cannot express. The shape below is what
+# nb_inventory produces with site_data: true -- a one-element list holding the
+# site as /api/dcim/sites/ returns it, 'asns' included, since the plugin fetches
+# the full serializer rather than the brief one.
+#
+#   campus  building_a + building_b under site group evpn_campus, both AS 64513
+#   remote  a standalone site, AS 65001
+#
+# test_fabric_resolve.py mutates this in memory to build the broken variants, so
+# the failure cases stay one edit away from the working one.
+all:
+  children:
+    site_group_evpn_campus:
+      children:
+        sites_building_a:
+          hosts:
+            core1:
+              ansible_host: 10.0.0.1
+              sites:
+                - id: 51
+                  slug: building_a
+                  asns:
+                    - {id: 1, asn: 64513}
+            access1-1:
+              ansible_host: 10.0.0.11
+              sites:
+                - id: 51
+                  slug: building_a
+                  asns:
+                    - {id: 1, asn: 64513}
+        sites_building_b:
+          hosts:
+            access2-1:
+              ansible_host: 10.0.0.21
+              sites:
+                - id: 52
+                  slug: building_b
+                  asns:
+                    - {id: 1, asn: 64513}
+    sites_evpn_remote:
+      hosts:
+        rcore1:
+          ansible_host: 10.1.0.1
+          sites:
+            - id: 60
+              slug: evpn_remote
+              asns:
+                - {id: 2, asn: 65001}
+        raccess1:
+          ansible_host: 10.1.0.11
+          sites:
+            - id: 60
+              slug: evpn_remote
+              asns:
+                - {id: 2, asn: 65001}
+    tags_fabric_spine:
+      hosts:
+        core1:
+        rcore1:
+    device_roles_fabric_border:
+      hosts:
+        core1:
+        rcore1:
+    device_roles_fabric_leaf:
+      hosts:
+        access1-1:
+        access2-1:
+        raccess1:
+  vars:
+    ansible_connection: local
+    # The fallback the deprecation path lands on when NetBox carries no ASN.
+    evpn_bgp_asn: 64999

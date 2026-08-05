@@ -13,11 +13,21 @@
 # Addresses use RFC 5737 documentation ranges. Replace all of them.
 
 # --- BGP ------------------------------------------------------------------
+#
+# BOTH KEYS BELOW ARE DEPRECATED FALLBACKS. They are single global values, and
+# a multi-fabric estate has neither: each fabric has its own iBGP ASN, and each
+# tenant handoff can face its own upstream. Both now come from NetBox, and both
+# fall back to the value here only until NetBox carries them -- every run that
+# uses a fallback says so. Populate NetBox and these can be deleted.
+#
 # The fabric's iBGP ASN. Every EVPN session runs inside it, and it is also how
 # the role decides which BGP neighbours it owns: a neighbour in this ASN is
 # automation-managed, anything else belongs to the device.
+#   NetBox: assign ONE ASN object to every site in the fabric, the same one to
+#           all of them (dcim.site -> ASNs).
 evpn_bgp_asn: 65001
 # The ASN upstream of the borders, used for the eBGP handoff sessions.
+#   NetBox: 'upstream_asn' integer custom field on each vrf_l3_handoff_vlan.
 evpn_ext_bgp_asn: 65000
 
 # --- Underlay -------------------------------------------------------------
@@ -25,6 +35,13 @@ evpn_ext_bgp_asn: 65000
 # match the device's NetBox primary IP -- the role asserts this on every run.
 vtep_source_intf: "Loopback0"
 
+# DEPRECATED FALLBACKS, like the ASNs above. The anycast RP is per fabric, and
+# both values now come from NetBox: one IPAddress per spine, all with the SAME
+# address, role Anycast (which is what permits the duplicate), tagged
+# 'underlay_anycast_rp', each assigned to that spine's RP loopback. The
+# interface name then comes from the same object as the address, so the two can
+# no longer drift apart. Every run that falls back here says so.
+#
 # The fabric's anycast RP for UNDERLAY multicast (L2VNI BUM replication). Every
 # spine carries this address on a dedicated loopback.
 # NOTE: unrelated to TRM's per-VRF RPs, which are tenant addresses from NetBox.
