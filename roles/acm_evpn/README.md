@@ -71,7 +71,7 @@ Every managed device additionally needs:
 |---|---|
 | Status **Active** | `netbox_inv.yml` filters on it; anything else is invisible to the inventory. |
 | **Primary IPv4 = the `Loopback0`/VTEP address** | EVPN peers are addressed from each device's primary IP, so a peer outside the current play still gets a correct address. Asserted on every host — see [Safety guards](#safety-guards). |
-| A **site** | Drives VLAN scope, below. |
+| A **site** | Decides which fabric the device is in, and drives VLAN scope — both below. A fabric device with no site belongs to no fabric: it is reported and skipped, and nothing is rendered or deployed for it. |
 
 ### Sites, site groups and VLAN scope
 
@@ -79,6 +79,22 @@ The fabric's own convention, and the part with no substitute in code:
 
 - **Site = building.** Each switch belongs to one.
 - **Site group = campus.** Sites are grouped into it.
+
+**A fabric is a site group — or a site, where that site has no site group.**
+This is the boundary of one underlay, one iBGP ASN and one set of EVPN route
+reflectors, and it is what scopes peer selection: a spine reflects only for the
+clients in its own fabric, and a client peers only with its own fabric's spines.
+One resolver decides it for every device
+(`roles/underlay_readiness/tasks/fabric_resolve.yml`), so no two lookups can
+disagree about where a fabric ends.
+
+**Site groups must not be nested.** A parent group spans buildings that do not
+share an underlay, and there is no safe way to guess which level was meant to be
+the fabric, so a nested tree is refused outright rather than resolved to one end
+of it. Model anything above a fabric as a **region** instead — regions are not
+used for scoping. Two fabrics are otherwise fully independent: they may reuse
+the same VRFs, the same L3VNIs and the same multicast groups, because they never
+exchange them.
 
 **Scope is required.** A VLAN with no site and no VLAN group scope is enrolled
 **nowhere** — enrolment is opt-in throughout this project, and scope is how a
@@ -493,6 +509,8 @@ checks run before a switch is touched:
 | Multicast validation | Fails on a missing, malformed, or duplicated group, one outside the carve, or one outside the owning VRF's own `/16`. |
 | Anycast RP assertions | The RP loopback must match `underlay_rp_address`, and every spine switch must carry it. |
 | Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |
+| Fabric partition | Refuses the whole run if the NetBox site tree does not partition into fabrics — today, if any device sits under nested site groups. Fabric-wide: an ambiguous tree makes every peer list suspect, not just the ambiguous device's. |
+| Route reflector assertion | Fails a device whose fabric contains no `fabric_spine`. It would otherwise render a `router bgp` with no overlay neighbours, which `acm replace` applies as a teardown of every EVPN session on the switch. Per device, so one mis-sited leaf does not stop a healthy fabric. |
 | Blast-radius guard | Blocks a deploy removing >`acm_safety_max_removal_pct` of any tracked object class, and **any** underlay removal (zero tolerance). Override with `-e acm_safety_force=true`. Generate runs warn instead of failing. |
 
 ## Tests
@@ -501,4 +519,14 @@ checks run before a switch is touched:
 venv/bin/python -m unittest discover -s roles/acm_evpn/tests/unit
 ```
 
-Stdlib `unittest` only — no pytest, no live NetBox, no Ansible runtime.
+Stdlib `unittest` only — no pytest and no live NetBox.
+
+Most of it is plain Python against the filter plugins. The exception is
+`test_fabric_resolve.py`, which runs the real fabric resolver and the real
+peer-selection tasks under `ansible-playbook` against the static inventories in
+`tests/fixtures/`. That logic lives in Jinja, where `--syntax-check` evaluates
+nothing, and it is testable offline only because fabric membership is decided
+entirely from inventory groups — no NetBox and no device in the path. The tasks
+under test are lifted out of `01_gather_data.yml` at run time rather than
+copied, so the fixtures cannot drift from the code that ships. The test skips
+itself if `ansible-playbook` is not on `PATH`.

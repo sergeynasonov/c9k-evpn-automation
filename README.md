@@ -626,7 +626,10 @@ Before changing anything, read **[CONTRIBUTING.md](CONTRIBUTING.md)** — it lis
 the failure modes that have actually cost outages here, and the Ansible
 mechanics that behave differently from how they read.
 
-Stdlib `unittest` only: no pytest, no live NetBox, no Ansible runtime, no devices.
+Stdlib `unittest` only: no pytest, no live NetBox, no devices. One test
+(`test_fabric_resolve.py`) drives the real fabric-resolution tasks under
+`ansible-playbook` against static inventories, because that logic is Jinja
+rather than Python; it skips itself if `ansible-playbook` is not on `PATH`.
 The dense logic — the NetBox transform, underlay extraction, VNI and multicast
 allocation, peer selection, the deploy guard — lives in
 `roles/acm_evpn/filter_plugins/` as plain Python precisely so it can be tested
