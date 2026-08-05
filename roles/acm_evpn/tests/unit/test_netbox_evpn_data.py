@@ -1187,6 +1187,74 @@ class TestMulticastGroupResolution(unittest.TestCase):
         self.assertIn("100", result["all_edge_vlans"])
 
 
+class TestMulticastOwnershipIsPerFabric(unittest.TestCase):
+    """Two segments must not replicate to the same underlay group.
+
+    This check used to run against the VLANs in scope for the RENDERING HOST,
+    which made it blind to the case that matters most: two edge VLANs in
+    different buildings of one campus, both overriding to the same group.
+    Neither building's switches see the other's VLAN, so no host ever saw the
+    collision -- while on the wire both segments flooded BUM traffic into the
+    same underlay tree and each received the other's.
+
+    It is one fabric's shared underlay, so it takes a fabric-wide view. Across
+    fabrics the same group is fine: separate underlays never exchange these
+    trees.
+    """
+
+    SCOPES = {"site:51": "site_group_evpn_campus", "site:52": "site_group_evpn_campus",
+              "site:60": "sites_evpn_remote"}
+
+    def build(self, vlans, my_site="51", my_fabric="site_group_evpn_campus"):
+        return build_evpn_data(vlans, [], my_site=my_site, my_sg=None,
+                               fabric_scope_map=self.SCOPES, my_fabric=my_fabric)
+
+    def edge(self, vid, site_id, group=None):
+        return vlan(vid, "SEG_%d" % vid, site_id=site_id,
+                    cfd={"mcast_group": group} if group else None,
+                    prefixes=[prefix("10.0.%d.0/24" % (vid % 250), vrf=CORP_VRF)])
+
+    def test_a_collision_between_two_buildings_of_one_fabric_is_caught(self):
+        """The regression. Invisible to every host before this was scoped to
+        the fabric rather than to the renderer."""
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.build([self.edge(101, "51", "239.199.1.9"),
+                        self.edge(202, "52", "239.199.1.9")])
+        msg = str(ctx.exception)
+        self.assertIn("239.199.1.9", msg)
+        self.assertIn("101", msg)
+        self.assertIn("202", msg)
+
+    def test_it_is_caught_from_either_building(self):
+        """Not just from the one that happens to hold the lower VLAN ID."""
+        for site in ("51", "52"):
+            with self.assertRaises(AnsibleFilterError):
+                self.build([self.edge(101, "51", "239.199.1.9"),
+                            self.edge(202, "52", "239.199.1.9")], my_site=site)
+
+    def test_two_fabrics_may_use_the_same_group(self):
+        """Separate underlays never exchange these trees."""
+        result = self.build([self.edge(101, "51", "239.199.1.9"),
+                             self.edge(202, "60", "239.199.1.9")])
+        self.assertIn("101", result["all_edge_vlans"])
+
+    def test_vlans_inheriting_one_vrfs_base_group_still_share_it(self):
+        """The normal case, and the reason ownership is per-VRF rather than
+        per-VLAN for inherited groups."""
+        result = self.build([self.edge(101, "51"), self.edge(202, "52")])
+        self.assertIn("101", result["all_edge_vlans"])
+
+    def test_a_non_fabric_vrf_claims_nothing(self):
+        """Enrolment is opt-in: a VRF with no l3vni renders nothing, so it
+        cannot collide with a real one that shares its base group."""
+        oob = vrf("OOB", rd="65000:2", l3vni=None)
+        result = self.build([
+            vlan(80, "OOB_MGMT", site_id="51", prefixes=[prefix("172.16.80.0/24", vrf=oob)]),
+            self.edge(101, "51"),
+        ])
+        self.assertEqual(set(result["vrfs"]), {"CORP"})
+
+
 class TestMulticastGroupValidation(unittest.TestCase):
     def _fails(self, vlan_list, *fragments, reserved=None):
         with self.assertRaises(AnsibleFilterError) as ctx:

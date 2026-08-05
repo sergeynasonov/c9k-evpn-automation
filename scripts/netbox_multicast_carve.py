@@ -30,6 +30,13 @@ Idempotent: existing objects are left alone. Dry-run unless --apply is given.
     scripts/netbox_multicast_carve.py --vrf CORP=1 --vrf MEDICAL=2
     scripts/netbox_multicast_carve.py --vrf CORP=1 --vrf MEDICAL=2 --apply
 
+The carve is shared by every fabric and needs no per-fabric run. Two fabrics
+carrying the same VRF at the same L3VNI land on the same index and therefore the
+same prefixes, which is the intent -- separate underlays never exchange these
+groups, so there is nothing to keep apart. Re-running is idempotent, so a second
+fabric adds nothing. An index may also be given more than one VRF name, for the
+case where two fabrics reuse an L3VNI for different VRFs.
+
     scripts/netbox_multicast_carve.py --l2-only --apply    # just the L2 block
 """
 
@@ -89,6 +96,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def parse_vrfs(pairs: list) -> dict:
+    """{index: [vrf name, ...]}.
+
+    An index may carry SEVERAL names. The carve is one shared address plan
+    across every fabric, and the index is derived from the L3VNI -- which two
+    fabrics may legitimately reuse, since separate underlays never exchange
+    these groups. Two DIFFERENT VRFs on one index is therefore fine when they
+    live in different fabrics, and is refused at render time by
+    netbox_evpn_data.py when they do not, which is where the fabric is known.
+    Rejecting it here would block a legitimate estate on a guess this script
+    has no information to make.
+    """
     out = {}
     for pair in pairs:
         if "=" not in pair:
@@ -103,10 +121,9 @@ def parse_vrfs(pairs: list) -> dict:
             # VRF index; 239.255.0.0/16 is IPv4 Local Scope.
             sys.exit(f"VRF {name}: index must be 1-254, got {index}. "
                      f"For the L2-only block use --l2-only.")
-        if index in out.values():
-            sys.exit(f"VRF {name}: index {index} is already used by "
-                     f"{[k for k, v in out.items() if v == index][0]}")
-        out[name.strip()] = index
+        name = name.strip()
+        if name not in out.setdefault(index, []):
+            out[index].append(name)
     return out
 
 
@@ -192,13 +209,17 @@ def main() -> int:
         ensure_prefix("239.0.0.0/16", "active", "l2vni_replication",
                       "L2-only overlays - BUM replication (no VRF)")
 
-    for name, index in sorted(vrfs.items(), key=lambda kv: kv[1]):
-        print(f"\n== VRF {name} (index {index}) ==")
+    for index, names in sorted(vrfs.items()):
+        # One description covering every VRF on this index. The machine-readable
+        # link is the index itself, not this text -- 239.<index>.x belongs to
+        # whichever VRF has l3vni index + evpn_l3vni_base, in whichever fabric.
+        label_vrf = "VRF " + ", ".join(sorted(names))
+        print(f"\n== {label_vrf} (index {index}) ==")
         ensure_prefix(f"239.{index}.0.0/16", "container", None,
-                      f"VRF {name} - multicast")
+                      f"{label_vrf} - multicast")
         for octet, length, role_slug, status, label in FUNCTIONS:
             ensure_prefix(f"239.{index}.{octet}.0/{length}", status, role_slug,
-                          f"VRF {name} - {label}")
+                          f"{label_vrf} - {label}")
 
     print(f"\n{created} to create, {existing} already present.")
     if not args.apply:

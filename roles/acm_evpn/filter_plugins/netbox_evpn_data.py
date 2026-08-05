@@ -322,18 +322,19 @@ def _validate_multicast_groups(
         otherwise the template emits a bare ``member vni <n> mcast-group`` and
         IOS-XE rejects it as ``% Incomplete command``;
       * every group is an administratively scoped IPv4 multicast address;
-      * no two distinct owners claim the same group. VLANs inheriting one VRF's
-        base group legitimately share it, so ownership is per-VRF for inherited
-        groups and per-VLAN for overrides;
       * no group falls inside a prefix reserved for multicast infrastructure
         (``default_mdt`` / ``data_mdt``), which lives in the same shared
         underlay irrespective of VRF.
 
     Checked against the in-scope VLANs: unlike VNI uniqueness, a missing group
     is a local problem that matters exactly where the segment is configured.
+
+    Collisions BETWEEN segments are the exception and live in
+    _validate_mcast_ownership, which is scoped to the fabric rather than to the
+    host -- two segments can only collide with each other, and neither is
+    necessarily in scope where the other is.
     """
     errors: List[str] = []
-    owners: Dict[str, str] = {}
 
     for vid in sorted(all_edge_vlans, key=lambda v: int(v)):
         v_data = all_edge_vlans[vid]
@@ -416,20 +417,7 @@ def _validate_multicast_groups(
                 )
                 continue
 
-        # Inherited groups are owned by the VRF (many VLANs legitimately share
-        # one); an override is owned by the VLAN itself.
-        owner = ("VLAN {} '{}'".format(vid, name)
-                 if v_data.get("mcast_group_is_override")
-                 else "VRF '{}'".format(v_data.get("vrf_name") or "<none>"))
-        previous = owners.get(group)
-        if previous is not None and previous != owner:
-            errors.append(
-                "multicast group {} is claimed by both {} and {} — distinct segments "
-                "must replicate to distinct groups".format(group, previous, owner)
-            )
-        else:
-            owners[group] = owner
-
+        # Ownership is checked per FABRIC, in _validate_mcast_ownership below.
     if errors:
         raise AnsibleFilterError(
             "EVPN multicast validation failed ({} problem{}):\n  - {}".format(
@@ -914,6 +902,58 @@ def _validate_fabric_vnis(
         )
 
 
+
+def _validate_mcast_ownership(fabric_vlans: Dict[str, Any]) -> None:
+    """Refuse two distinct segments replicating to the same underlay group.
+
+    Scoped to the FABRIC, not to the rendering host, and that is the whole
+    point. Two edge VLANs in different buildings of one campus that both
+    override to the same group are invisible per host -- neither building's
+    switches see the other's VLAN -- while on the wire both segments flood BUM
+    traffic into the same underlay tree and each receives the other's. It is one
+    fabric's shared underlay, so it takes a fabric-wide view to see it.
+
+    Across fabrics the same group is fine: separate underlays never exchange
+    these trees, which is why the caller passes one fabric's VLANs.
+
+    VLANs inheriting one VRF's base group legitimately share it, so ownership is
+    per-VRF for inherited groups and per-VLAN for overrides.
+
+    Only well-formed groups are considered. Anything missing or malformed is
+    already reported by _validate_multicast_groups against the host it actually
+    affects, and reporting it twice helps nobody.
+    """
+    errors: List[str] = []
+    owners: Dict[str, str] = {}
+
+    for vid in sorted(fabric_vlans, key=lambda v: int(v)):
+        v_data = fabric_vlans[vid]
+        group = v_data.get("mcast_group") or ""
+        if v_data.get("replication_mode") != "static" or not group:
+            continue
+        if _mcast_group_problem(group):
+            continue
+
+        owner = ("VLAN {} '{}'".format(vid, v_data.get("name"))
+                 if v_data.get("mcast_group_is_override")
+                 else "VRF '{}'".format(v_data.get("vrf_name") or "<none>"))
+        previous = owners.get(group)
+        if previous is not None and previous != owner:
+            errors.append(
+                "multicast group {} is claimed by both {} and {} — distinct segments "
+                "must replicate to distinct groups".format(group, previous, owner)
+            )
+        else:
+            owners[group] = owner
+
+    if errors:
+        raise AnsibleFilterError(
+            "EVPN multicast validation failed ({} problem{}):\n  - {}".format(
+                len(errors), "" if len(errors) == 1 else "s", "\n  - ".join(errors)
+            )
+        )
+
+
 def _build_ip_map(ip_list: Iterable[Dict[str, Any]]) -> Dict[str, str]:
     """id (str) -> bare host address (str), stripped of any /prefixlen.
 
@@ -1167,6 +1207,10 @@ def build_evpn_data(
     fabric_l3: Dict[str, Dict[str, int]] = {}
     fabric_l3_bad: Dict[str, Dict[str, Any]] = {}
     fabric_l2: Dict[str, Dict[int, Tuple[Optional[int], str]]] = {}
+    # Every edge VLAN of each fabric, regardless of which host it is in scope
+    # for. Two segments colliding on a replication group can sit in different
+    # buildings, so seeing it takes a fabric-wide view.
+    fabric_edge_vlans: Dict[str, Dict[str, Any]] = {}
 
     for vlan in vlan_list:
         site = vlan.get("site")
@@ -1203,6 +1247,13 @@ def build_evpn_data(
             v_data["l2vni"] = _vlan_l2vni(vlan, vlan["vid"], l2vni_base)
             fabric_l2.setdefault(_fab, {})[int(vlan["vid"])] = (
                 v_data["l2vni"], v_data["name"])
+            # Enrolment is opt-in: a VLAN whose VRF carries no l3vni is not a
+            # fabric segment at all and renders nothing, so it claims no
+            # replication group. Same rule all_edge_vlans applies downstream --
+            # without it a non-fabric VRF sharing a base group with a real one
+            # would be reported as a collision, which the existing suite caught.
+            if not v_data["vrf_name"] or _is_evpn_vrf(v_data):
+                fabric_edge_vlans.setdefault(_fab, {})[vid_str] = v_data
         if v_data["vrf_name"]:
             if _is_evpn_vrf(v_data):
                 fabric_l3.setdefault(_fab, {}).setdefault(
@@ -1314,6 +1365,7 @@ def build_evpn_data(
     _validate_fabric_vnis(fabric_l3.get(_host_fabric, {}),
                           fabric_l3_bad.get(_host_fabric, {}),
                           fabric_l2.get(_host_fabric, {}), l3vni_base)
+    _validate_mcast_ownership(fabric_edge_vlans.get(_host_fabric, {}))
     _validate_multicast_groups(all_edge_vlans, reserved_mcast_prefixes,
                                allowed_mcast_prefixes, l3vni_base)
 
