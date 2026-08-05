@@ -39,6 +39,62 @@
     name: underlay_readiness
     tasks_from: fabric_anycast_rp.yml
 
+# The playbooks union tags_fabric_spine into the host pattern so that adding or
+# removing a leaf always re-renders its spines' peer lists. That union is
+# unscoped -- it pulls in EVERY fabric's spines, not just those of the fabric
+# being targeted -- so a run scoped to one building also opens a session to
+# another campus's core switches and pushes them a candidate.
+#
+# Not a correctness bug: each spine renders its own fabric and converges to an
+# empty diff. But it is a deploy touching devices the operator did not ask for,
+# and the cost grows with every fabric added.
+#
+# It cannot be fixed in the host pattern -- see fabric_resolve.yml task 6 for
+# why -- so the targeted fabrics are worked out here, from deploy_target
+# resolved through the inventory rather than from play membership, which the
+# union has already widened.
+- name: 13. Determine which fabrics this run targets
+  ansible.builtin.set_fact:
+    targeted_fabrics: "{{ _fabrics | from_json }}"
+  vars:
+    # deploy_target as the OPERATOR wrote it, resolved to hosts independently of
+    # the spine union. Defaulting to 'all' means an unscoped run targets every
+    # fabric, which is exactly the pre-existing behaviour.
+    _target_hosts: "{{ query('ansible.builtin.inventory_hostnames', deploy_target | default('all')) }}"
+    _fabrics: >-
+      {%- set out = [] -%}
+      {%- for host in _target_hosts
+            if fabric_map.get(host) and fabric_map[host] not in out -%}
+      {%-   set _ = out.append(fabric_map[host]) -%}
+      {%- endfor -%}
+      {{ out | sort | to_json }}
+  run_once: true
+  delegate_to: localhost
+
+# A deploy_target that matches nothing would otherwise leave a play containing
+# only the unioned spines -- i.e. a typo quietly becomes "deploy to every spine
+# in the estate".
+- name: 14. Verify deploy_target matches at least one device in a fabric
+  ansible.builtin.assert:
+    that:
+      - targeted_fabrics | length > 0
+    fail_msg: >-
+      deploy_target={{ deploy_target | default('') }} matches no device that
+      belongs to a fabric. Check the pattern: a group name from the NetBox
+      inventory (sites_<slug>, site_group_<slug>) or a hostname. Refusing
+      rather than continuing, because the spines are unioned into the host
+      pattern and this run would otherwise deploy to all of them.
+    quiet: true
+  when: deploy_target is defined
+  run_once: true
+  delegate_to: localhost
+
+- name: 15. Skip a spine unioned in from a fabric this run is not targeting
+  ansible.builtin.meta: end_host
+  when:
+    - targeted_fabrics | length > 0
+    - fabric_id not in targeted_fabrics
+
 - name: Gather NetBox facts
   ansible.builtin.import_tasks: netbox_facts.yml
 
@@ -145,7 +201,7 @@
 # fabric_members comes from inventory, not from play membership, so a narrow
 # deploy_target still renders the full peer list -- the property that fixed the
 # --limit bug (see filter_plugins/fabric_peers.py).
-- name: 15. Determine Local Role and Peer IPs
+- name: 16. Determine Local Role and Peer IPs
   ansible.builtin.set_fact:
     is_spine: "{{ 'tags_fabric_spine' in group_names }}"
     peer_ips: >-
@@ -171,7 +227,7 @@
 # No false positives on a spine: a spine is always in its own fabric's spine
 # list, so the check is only ever load-bearing for leaves and pure borders --
 # which is also why a spine deployed before any leaf exists still passes.
-- name: 16. Verify this device's fabric has a route reflector
+- name: 17. Verify this device's fabric has a route reflector
   ansible.builtin.assert:
     that:
       - fabric_members | intersect(groups['tags_fabric_spine']) | length > 0

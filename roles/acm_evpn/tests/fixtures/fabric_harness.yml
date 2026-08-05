@@ -37,6 +37,11 @@
         tasks_from: fabric_resolve.yml
       when: reentry | default(false) | bool
 
+    # Tasks 13-15: which fabrics this run targets, and dropping the spines the
+    # playbooks' unscoped ':tags_fabric_spine' union pulls in from the others.
+    - name: Target scoping
+      ansible.builtin.import_tasks: target_tasks.yml
+
     - name: Peer selection
       ansible.builtin.import_tasks: peer_tasks.yml
 
@@ -64,6 +69,7 @@
           targeted: "{{ ansible_play_hosts_all | sort }}"
           survivors: "{{ ansible_play_hosts | sort }}"
           orphans: "{{ fabric_orphans }}"
+          targeted_fabrics: "{{ targeted_fabrics | default([]) }}"
           fabric_map: "{{ fabric_map }}"
           fabric_asn_map: "{{ fabric_asn_map }}"
           fabric_asn_missing: "{{ fabric_asn_missing }}"

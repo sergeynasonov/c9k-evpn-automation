@@ -3,7 +3,7 @@
 """Fabric resolution and per-fabric EVPN peer selection.
 
 Unlike its neighbours here this is not a plugin test: the logic lives in Jinja,
-in roles/underlay_readiness/tasks/fabric_resolve.yml and in tasks 15-16 of
+in roles/underlay_readiness/tasks/fabric_resolve.yml and in tasks 16-17 of
 roles/acm_evpn/tasks/01_gather_data.yml. ``--syntax-check`` does not evaluate
 Jinja, so the only honest way to test it is to run it -- which is possible
 offline because fabric membership is decided entirely from inventory groups,
@@ -54,16 +54,29 @@ def _peer_tasks():
     """
     with open(GATHER) as fh:
         tasks = yaml.safe_load(fh)
-    wanted = [t for t in tasks if t.get("name", "").startswith(("15.", "16."))]
+    wanted = [t for t in tasks if t.get("name", "").startswith(("16.", "17."))]
     if len(wanted) != 2:
         raise AssertionError(
-            "expected tasks 15 and 16 of 01_gather_data.yml to be the peer-selection "
+            "expected tasks 16 and 17 of 01_gather_data.yml to be the peer-selection "
             "tasks, found {}".format([t.get("name") for t in wanted])
         )
     return wanted
 
 
-def run_fabric(inventory, reentry=False, mutate=None):
+def _target_tasks():
+    """Tasks 13-15 of 01_gather_data.yml: deploy_target -> targeted fabrics."""
+    with open(GATHER) as fh:
+        tasks = yaml.safe_load(fh)
+    wanted = [t for t in tasks if t.get("name", "").startswith(("13.", "14.", "15."))]
+    if len(wanted) != 3:
+        raise AssertionError(
+            "expected tasks 13-15 of 01_gather_data.yml to be the target-scoping "
+            "tasks, found {}".format([t.get("name") for t in wanted])
+        )
+    return wanted
+
+
+def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None):
     """Run the harness against a fixture inventory.
 
     ``reentry`` imports the resolver a second time, the way acm_evpn does when
@@ -92,6 +105,8 @@ def run_fabric(inventory, reentry=False, mutate=None):
                 yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
         with open(os.path.join(workdir, "peer_tasks.yml"), "w") as fh:
             yaml.safe_dump(_peer_tasks(), fh, default_flow_style=False, sort_keys=False)
+        with open(os.path.join(workdir, "target_tasks.yml"), "w") as fh:
+            yaml.safe_dump(_target_tasks(), fh, default_flow_style=False, sort_keys=False)
 
         result_file = os.path.join(workdir, "result.json")
         env = dict(
@@ -106,7 +121,8 @@ def run_fabric(inventory, reentry=False, mutate=None):
         proc = subprocess.run(
             [ANSIBLE, "-i", inv_path, "harness.yml",
              "-e", "result_file=" + result_file,
-             "-e", "reentry=" + ("true" if reentry else "false")],
+             "-e", "reentry=" + ("true" if reentry else "false")]
+            + (["-e", "deploy_target=" + deploy_target] if deploy_target else []),
             cwd=workdir, env=env, capture_output=True, text=True,
         )
         output = proc.stdout + proc.stderr
@@ -173,8 +189,9 @@ class TestTwoFabrics(unittest.TestCase):
         self.assertEqual(len(self.peers("core2")), 2)
 
     def test_non_fabric_node_in_a_fabric_gets_no_peers(self):
-        """A distribution switch is site-scoped like anything else and renders
-        nothing, so it must resolve a fabric but claim no sessions."""
+        """A distribution switch is site-scoped like anything else, so it
+        resolves a fabric -- but claims no sessions and, below, is not rendered
+        for at all."""
         self.assertEqual(self.result["fabric_map"]["dist1"], "site_group_evpn_campus")
         self.assertEqual(self.peers("dist1"), [])
 
@@ -204,10 +221,54 @@ class TestDeviceWithNoSite(unittest.TestCase):
         self.assertIn("orphan1", self.result["targeted"])
         self.assertNotIn("orphan1", self.result["survivors"])
 
-    def test_everyone_else_survives(self):
+    def test_every_fabric_node_survives(self):
+        """dist1 is absent for a different reason -- see TestNonFabricNodes."""
         self.assertEqual(
             self.result["survivors"],
-            ["access1-1", "access2-1", "core1", "core2", "dist1", "raccess1", "rcore1"])
+            ["access1-1", "access2-1", "core1", "core2", "raccess1", "rcore1"])
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestNonFabricNodesAreDropped(unittest.TestCase):
+    """A host pattern can select devices this role renders nothing for.
+
+    Not hypothetical: ':' is a UNION, so '-e deploy_target=<site>' selects every
+    device in that site, distribution switches included. The render step picks
+    its template as border / spine / else-leaf, with no "not ours" branch, so
+    such a device used to be handed a full EVPN LEAF configuration and have it
+    applied by 'acm replace'.
+
+    It cannot be fixed in the host pattern: Ansible applies ':&' intersections
+    after every union regardless of position, so intersecting with the fabric
+    roles would also intersect away the spines the pattern deliberately unions
+    in -- leaving their peer lists stale, which is the exact bug that union
+    exists to prevent. Verified against real ansible, not assumed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini")
+
+    def test_run_still_succeeds(self):
+        """One targeted device being none of our business is not an error."""
+        self.assertEqual(self.rc, 0, self.out)
+
+    def test_the_distribution_switch_was_targeted(self):
+        """Guards the fixture: if it stopped being selected, the assertions
+        below would pass for the wrong reason."""
+        self.assertIn("dist1", self.result["targeted"])
+
+    def test_it_drops_out_before_anything_is_rendered(self):
+        self.assertNotIn("dist1", self.result["survivors"])
+
+    def test_it_is_reported_by_name(self):
+        """An operator who targeted a site deserves to know which of its
+        devices were left alone."""
+        self.assertIn("are not fabric nodes: dist1", self.out)
+
+    def test_fabric_nodes_are_not_dropped_with_it(self):
+        for host in ("core1", "core2", "access1-1", "access2-1", "raccess1", "rcore1"):
+            self.assertIn(host, self.result["survivors"], host)
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
@@ -459,6 +520,62 @@ class TestFabricAsnFallsBackWhileMigrating(unittest.TestCase):
 
     def test_the_migrated_fabric_is_not_reported(self):
         self.assertNotIn("site_group_evpn_campus", self.result["fabric_asn_missing"])
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestSpineUnionIsScopedToTheTargetedFabric(unittest.TestCase):
+    """The playbooks union tags_fabric_spine into the host pattern so that a
+    scoped run always re-renders its spines' peer lists. That union is
+    unscoped, so it also drags in every OTHER fabric's spines.
+
+    The rule is deliberately conservative: a host is dropped only when its
+    fabric contains none of the devices deploy_target actually matched. The
+    targeted fabric's own spines therefore always stay, which is what keeps the
+    peer-list protection the union exists for.
+    """
+
+    def test_a_scoped_run_targets_only_that_fabric(self):
+        _, _, result = run_fabric("fabric_multi.ini", deploy_target="sites_building_a")
+        self.assertEqual(result["targeted_fabrics"], ["site_group_evpn_campus"])
+
+    def test_the_targeted_fabrics_own_spines_stay(self):
+        """The load-bearing half. Dropping these is the stale-peer-list bug."""
+        _, _, result = run_fabric("fabric_multi.ini", deploy_target="sites_building_a")
+        for spine in ("core1", "core2"):
+            self.assertIn(spine, result["survivors"], spine)
+
+    def test_another_fabrics_spine_is_dropped(self):
+        _, _, result = run_fabric("fabric_multi.ini", deploy_target="sites_building_a")
+        self.assertNotIn("rcore1", result["survivors"])
+
+    def test_scoping_to_a_single_leaf_keeps_its_fabrics_spines(self):
+        """The case the union exists for: deploy one leaf, and its spines must
+        still be re-rendered so their peer lists include it."""
+        _, _, result = run_fabric("fabric_multi.ini", deploy_target="access1-1")
+        for spine in ("core1", "core2"):
+            self.assertIn(spine, result["survivors"], spine)
+        self.assertNotIn("rcore1", result["survivors"])
+
+    def test_targeting_the_other_fabric_inverts_it(self):
+        _, _, result = run_fabric("fabric_multi.ini", deploy_target="raccess1")
+        self.assertEqual(result["targeted_fabrics"], ["sites_evpn_remote"])
+        self.assertIn("rcore1", result["survivors"])
+        for spine in ("core1", "core2"):
+            self.assertNotIn(spine, result["survivors"], spine)
+
+    def test_an_unscoped_run_targets_every_fabric(self):
+        _, _, result = run_fabric("fabric_multi.ini")
+        self.assertEqual(result["targeted_fabrics"],
+                         ["site_group_evpn_campus", "sites_evpn_remote"])
+        for host in ("core1", "core2", "rcore1"):
+            self.assertIn(host, result["survivors"], host)
+
+    def test_a_deploy_target_matching_nothing_is_refused(self):
+        """Without this a typo becomes 'deploy to every spine in the estate',
+        since the union would be all that is left in the play."""
+        rc, out, _ = run_fabric("fabric_multi.ini", deploy_target="no_such_group")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("matches no device that belongs to a fabric", out)
 
 
 if __name__ == "__main__":

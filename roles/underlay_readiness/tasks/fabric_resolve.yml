@@ -35,7 +35,7 @@
 #   fabric_asn     this fabric's iBGP ASN, from its sites in NetBox
 #   fabric_scope_map  {"site:<id>"|"sitegroup:<id>": fabric} for the inventory,
 #                     which is how NetBox-scoped data (VLANs) is placed in a
-#                     fabric at all -- see task 10
+#                     fabric at all -- see task 12
 #
 # fabric_asn is resolved here rather than in acm_evpn for the same reason as the
 # rest: it is a property of the fabric, from the same inventory data, and having
@@ -61,14 +61,6 @@
     fabric_ambiguous: "{{ (_resolved | from_json).ambiguous }}"
     fabric_orphans: "{{ (_resolved | from_json).orphans }}"
   vars:
-    # Device roles and tags that make a device a fabric node. Hardcoded here as
-    # they are everywhere else in both roles; a device outside all three (a
-    # distribution switch, say) is site-scoped like any other but renders
-    # nothing, so it is not reported when it cannot be placed.
-    _fabric_node_groups:
-      - device_roles_fabric_leaf
-      - device_roles_fabric_border
-      - tags_fabric_spine
     _resolved: >-
       {%- set sgs = {} -%}
       {%- set sites = {} -%}
@@ -92,7 +84,7 @@
       {#- Every device that is expected to be in a fabric, so that one which
           cannot be placed is reported rather than dropped in silence. -#}
       {%- set fabric_nodes = [] -%}
-      {%- for group in _fabric_node_groups -%}
+      {%- for group in fabric_node_groups -%}
       {%-   for host in groups.get(group, []) -%}
       {%-     set _ = fabric_nodes.append(host) -%}
       {%-   endfor -%}
@@ -178,6 +170,46 @@
   ansible.builtin.meta: end_host
   when: fabric_id | length == 0
 
+# A host pattern can select devices this automation renders nothing for. That is
+# not hypothetical: '-e deploy_target=<site>' selects EVERY device in the site,
+# distribution switches included, because ':' is a union and a distribution
+# switch has the site like any other device. Ansible applies ':&' intersections
+# AFTER every union regardless of where they appear in the pattern, so this
+# cannot be expressed as a host pattern without also intersecting away the
+# spines the pattern deliberately unions in -- which would leave their peer
+# lists stale, the exact bug the union exists to prevent.
+#
+# So it is enforced here instead, before anything touches a device. Reported
+# rather than silent: an operator who targeted a site deserves to know which of
+# its devices were left alone.
+- name: 6. Report devices in the play that this fabric renders nothing for
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['Skipped ' ~ (_not_fabric_nodes | from_json | length) ~ ' targeted device(s) that'
+          ~ ' are not fabric nodes: ' ~ (_not_fabric_nodes | from_json | join(', '))
+          ~ ' — they carry no fabric role and no fabric_spine tag, so nothing is'
+          ~ ' rendered or deployed for them'] }}
+  vars:
+    _not_fabric_nodes: >-
+      {%- set out = [] -%}
+      {%- for host in ansible_play_hosts | sort -%}
+      {%-   set groups_of = [] -%}
+      {%-   for group in fabric_node_groups if host in groups.get(group, []) -%}
+      {%-     set _ = groups_of.append(group) -%}
+      {%-   endfor -%}
+      {%-   if groups_of | length == 0 -%}
+      {%-     set _ = out.append(host) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  when: _not_fabric_nodes | from_json | length > 0
+  run_once: true
+  delegate_to: localhost
+
+- name: 7. Skip a device that is not a fabric node
+  ansible.builtin.meta: end_host
+  when: group_names | intersect(fabric_node_groups) | length == 0
+
 # --- the fabric's BGP ASN ---------------------------------------------------
 #
 # From NetBox, and from INVENTORY rather than a query: nb_inventory fetches
@@ -189,7 +221,7 @@
 # an iBGP EVPN fabric, and every session in it is inside that ASN. So a site
 # carrying two, or two sites in one fabric disagreeing, is not something to pick
 # a winner from.
-- name: 6. Resolve each fabric's BGP ASN from its sites
+- name: 8. Resolve each fabric's BGP ASN from its sites
   ansible.builtin.set_fact:
     fabric_asn_map: "{{ (_asns | from_json).map }}"
     fabric_asn_problems: "{{ (_asns | from_json).problems }}"
@@ -236,7 +268,7 @@
   run_once: true
   delegate_to: localhost
 
-- name: 7. Refuse a fabric whose ASN is ambiguous
+- name: 9. Refuse a fabric whose ASN is ambiguous
   ansible.builtin.assert:
     that:
       - fabric_asn_problems | length == 0
@@ -258,7 +290,7 @@
 # with no ASN in NetBox renders exactly as it did before. The notice is what
 # makes the migration finishable -- once no fabric reports here, the fallback
 # and the fabric.yml key can both go.
-- name: 8. Report fabrics still using the ASN from fabric.yml
+- name: 10. Report fabrics still using the ASN from fabric.yml
   ansible.builtin.debug:
     msg: >-
       {{ ['NetBox: fabric(s) ' ~ (fabric_asn_missing | join(', '))
@@ -272,7 +304,7 @@
   run_once: true
   delegate_to: localhost
 
-- name: 9. Determine this device's BGP ASN
+- name: 11. Determine this device's BGP ASN
   ansible.builtin.set_fact:
     # '| int' so both paths yield the same type. Without it the NetBox value and
     # the fabric.yml fallback come back differently typed, which renders the same
@@ -292,7 +324,7 @@
 # Consumed by netbox_evpn_data.py to scope VNI uniqueness per fabric. Sites with
 # no devices never appear, which is correct -- a VLAN scoped to one is in scope
 # for no host and renders nowhere.
-- name: 10. Map each NetBox site and site group to its fabric
+- name: 12. Map each NetBox site and site group to its fabric
   ansible.builtin.set_fact:
     fabric_scope_map: "{{ _scopes | from_json }}"
   vars:
