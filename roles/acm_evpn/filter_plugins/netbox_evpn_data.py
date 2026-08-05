@@ -1120,16 +1120,19 @@ def build_evpn_data(
                                              # all. Reported rather than
                                              # silently dropped.
           "fabric_edge_subnets": {vrf_name: {vid: {"network", "mask"}}},
-                                             # ALL edge subnets fabric-wide,
-                                             # ignoring site scope — used by
-                                             # border switches to redistribute
-                                             # every VRF subnet regardless of
-                                             # which building it lives in.
+                                             # Every edge subnet in THIS HOST'S
+                                             # FABRIC, ignoring per-host site
+                                             # scope — a border is the exit for
+                                             # its whole fabric, so it
+                                             # advertises every building's
+                                             # subnets, but only its own
+                                             # fabric's.
         }
 
-    Every VLAN is included in ``fabric_edge_subnets`` fabric-wide
-    (independent of site scope) but only included in ``vrfs``/``l2_vlans``/
-    ``all_edge_vlans`` if it is in scope for this host: globally scoped
+    Every VLAN in this host's fabric is included in ``fabric_edge_subnets``
+    (independent of its site scope *within* that fabric) but only included in
+    ``vrfs``/``l2_vlans``/``all_edge_vlans`` if it is in scope for this host:
+    globally scoped
     (no site and no group scope at all), directly assigned to this site,
     or reachable via its VLAN group's scope (a site-group scope matching
     this host's site group, or a site scope matching this host's site).
@@ -1154,7 +1157,8 @@ def build_evpn_data(
     # 'vlan <id> / name <name>', so every one of them is checked.
     named_vlans: List[Dict[str, Any]] = []
     all_edge_vlans: Dict[str, Any] = {}
-    fabric_edge_subnets: Dict[str, Any] = {}
+    # Keyed by FABRIC first, like the VNI registries below.
+    fabric_edge_subnets: Dict[str, Dict[str, Any]] = {}
     skipped_vlans: Dict[str, Any] = {}
 
     # VNI registries, keyed by FABRIC first and populated before the per-host
@@ -1209,11 +1213,15 @@ def build_evpn_data(
                 fabric_l3_bad.setdefault(_fab, {}).setdefault(
                     v_data["vrf_name"], v_data["vrf_l3vni_raw"])
 
-        # --- Fabric-wide edge subnets (ignores site scope entirely) ---
+        # --- Edge subnets, per FABRIC and across every site within it ---
+        # Deliberately ignores the per-HOST scope filter below: a border is the
+        # exit for its whole fabric, so it must advertise the subnets of every
+        # building in it, not only those of its own. Bucketed by fabric for the
+        # opposite reason -- another fabric's subnets are unreachable from here.
         if v_data["vrf_name"] and _is_evpn_vrf(v_data) and role in _EDGE_ROLES and v_data["network_ipv4"]:
             vrf_name = v_data["vrf_name"]
-            fabric_edge_subnets.setdefault(vrf_name, {})
-            fabric_edge_subnets[vrf_name][vid_str] = {
+            fabric_edge_subnets.setdefault(_fab, {}).setdefault(vrf_name, {})
+            fabric_edge_subnets[_fab][vrf_name][vid_str] = {
                 "network": v_data["network_ipv4"],
                 "mask": v_data["netmask_ipv4"],
             }
@@ -1298,12 +1306,14 @@ def build_evpn_data(
 
     _validate_vlan_names(named_vlans)
     _validate_l2_only(l2_only_bad)
-    # The rendering host's own fabric, and only that one. A run is always
-    # scoped to a single fabric, so another building's data error must not be
-    # able to block this one's deploy.
-    _fab = my_fabric if fabric_scope_map else _SINGLE_FABRIC
-    _validate_fabric_vnis(fabric_l3.get(_fab, {}), fabric_l3_bad.get(_fab, {}),
-                          fabric_l2.get(_fab, {}), l3vni_base)
+    # The rendering host's own fabric, and only that one -- for validation and
+    # for the edge subnets returned below. A run is always scoped to a single
+    # fabric, so another building's data error must not be able to block this
+    # one's deploy.
+    _host_fabric = my_fabric if fabric_scope_map else _SINGLE_FABRIC
+    _validate_fabric_vnis(fabric_l3.get(_host_fabric, {}),
+                          fabric_l3_bad.get(_host_fabric, {}),
+                          fabric_l2.get(_host_fabric, {}), l3vni_base)
     _validate_multicast_groups(all_edge_vlans, reserved_mcast_prefixes,
                                allowed_mcast_prefixes, l3vni_base)
 
@@ -1334,7 +1344,15 @@ def build_evpn_data(
         "l2_vlans": l2_vlans,
         "l2_only_vlans": l2_only_vlans,
         "all_edge_vlans": all_edge_vlans,
-        "fabric_edge_subnets": fabric_edge_subnets,
+        # This host's own fabric only. Advertising another fabric's prefixes
+        # is inert while they are unreachable -- 'network' needs a matching
+        # route in the RIB -- so today the cost is dead configuration, one line
+        # per foreign VLAN per VRF, growing with every fabric added. The reason
+        # to scope it is what happens when they stop being unreachable: give the
+        # fabrics a shared upstream that leaks routes back, or a DCI, and this
+        # border starts advertising the other fabric's prefixes in competition
+        # with that fabric's own border, with no config change to point at.
+        "fabric_edge_subnets": fabric_edge_subnets.get(_host_fabric, {}),
         "skipped_vlans": skipped_vlans,
     }
 
