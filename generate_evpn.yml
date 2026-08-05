@@ -1,6 +1,7 @@
 ---
 # Scope a run with  -e deploy_target=<pattern>  rather than --limit.
-# See the note in deploy_evpn.yml for why the spines are always included.
+# See the note in deploy_evpn.yml for why the spines are always included, and
+# for the two things the host pattern deliberately leaves to tasks.
 - name: Generate EVPN Configurations (Check Mode)
   hosts: >-
     {{ deploy_target

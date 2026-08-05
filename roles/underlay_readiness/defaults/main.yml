@@ -133,6 +133,20 @@ readiness_write_csv: true
 # Set false to check a switch without configuring anything at all.
 readiness_apply_baseline: true
 
+# The device roles and tags that make a device a FABRIC NODE -- something this
+# automation renders configuration for. A device outside all of these (a
+# distribution switch, say) is site-scoped like any other and belongs to a
+# fabric, but nothing is rendered or deployed for it: fabric_resolve.yml drops
+# it from the play before any device is contacted.
+#
+# Named here rather than hardcoded per call site because three places need the
+# same answer, and a device silently missing from one of them is the single most
+# expensive kind of mistake this project can make.
+fabric_node_groups:
+  - device_roles_fabric_leaf
+  - device_roles_fabric_border
+  - tags_fabric_spine
+
 # Tag(s) marking an IPAddress as a fabric's UNDERLAY anycast RP. One object per
 # spine, all with the same address and role Anycast (which is what lets NetBox
 # hold the duplicates), each assigned to that spine's RP loopback. See

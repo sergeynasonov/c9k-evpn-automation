@@ -59,6 +59,28 @@
   run_once: true
   delegate_to: localhost
 
+# The leaf template is the FALL-THROUGH, so anything that is neither a border
+# nor a spine is rendered as a leaf. That is right for a leaf and catastrophic
+# for anything else: a distribution switch selected by a site-scoped
+# deploy_target would be handed a full EVPN leaf configuration and have it
+# applied by 'acm replace'.
+#
+# fabric_resolve.yml drops non-fabric devices from the play before this runs, so
+# this assertion should never fire. It is here because "should never" is exactly
+# what was true of the union bug until it was looked at, and the cost of being
+# wrong is a wrong full-config replacement on a switch nobody meant to touch.
+- name: Refuse to render a device that is not a fabric node
+  ansible.builtin.assert:
+    that:
+      - group_names | intersect(fabric_node_groups) | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }} carries no fabric role and no fabric_spine tag,
+      so this role renders nothing for it — but it reached the render step,
+      which means it was not dropped from the play as it should have been.
+      Refusing rather than falling through to the leaf template, which would
+      hand it a full EVPN configuration.
+    quiet: true
+
 - name: Render the fabric block (the config this role owns)
   ansible.builtin.set_fact:
     fabric_config: >-

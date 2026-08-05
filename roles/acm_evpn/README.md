@@ -27,6 +27,17 @@ leaving their EVPN peer lists stale on the device; the playbooks union
 the host pattern so that cannot happen. Peer *addresses* come from inventory
 (`fabric_peers.py`), so a narrowly scoped run still renders correct peer lists.
 
+Two consequences of `deploy_target` being a **host pattern**, where `:` is a
+union. Neither can be fixed in the pattern itself — Ansible applies `:&`
+intersections *after* every union regardless of where they appear, so
+intersecting would also remove the spines the union just added — so both are
+enforced as tasks, before anything touches a device:
+
+| What the pattern selects | What happens |
+|---|---|
+| `deploy_target=<site>` also selects that site's **distribution switches**, which have the site like any other device | Dropped and reported. The render step picks its template as border / spine / *else leaf*, so without this they would be handed a full EVPN **leaf** configuration |
+| The spine union is estate-wide, so it also pulls in **other fabrics' spines** | Dropped. The run works out which fabrics `deploy_target` actually names; the targeted fabric's own spines always stay, which is the whole point of the union |
+
 ---
 
 ## NetBox data-model contract
@@ -51,6 +62,10 @@ looks provisioned and is not.
 | Border | Device role | `fabric_border` | Renders the handoff SVIs, the eBGP handoff, the border-to-border iBGP mesh, and a `network` statement per edge subnet — all scoped to its own fabric. Allocated first by `trm_allocate.yml`. |
 | Leaf | Device role | `fabric_leaf` | Renders tenant SVIs, EVPN instances and the NVE interface. |
 | Spine | **Tag** | `fabric_spine` | Route reflector: EVPN and MVPN clients, anycast RP. |
+
+A device carrying none of these is **not a fabric node**. It still belongs to a
+fabric (it has a site) but nothing is rendered or deployed for it, even when a
+host pattern selects it — see [Running it](#running-it).
 
 **Underscores, not hyphens.** Ansible's `TRANSFORM_INVALID_GROUP_CHARS`
 defaults to `never`, so the inventory plugin does not rewrite a hyphen: a slug
