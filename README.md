@@ -475,7 +475,8 @@ the spine switches back in.
 
 Per device the deploy: uploads the candidate over SCP → `acm replace … validate`
 → `acm replace … timeout <n>` → waits → `acm confirm-commit` →
-`acm save startup-config` → downloads the net-diff to `commit-results/`. If the
+`acm save startup-config` → `acm save flash:acm-evpn/<MMDD-HHMMSS>.cfg` →
+downloads the net-diff to `commit-results/`. If the
 change breaks the management path the confirm never lands and the switch rolls
 itself back when the timer expires.
 
@@ -529,6 +530,33 @@ A final play prints every register source with the switch and interface holding
 it. An address whose owner has left the inventory is reported as **orphaned and
 never reclaimed**, since a switch can be temporarily out of the play and
 freeing its address would hand it to another switch.
+
+## Rolling back on the switch itself
+
+Each successful deploy leaves a checkpoint on the device, so a switch can be
+returned to its last automation-verified state without the control node, NetBox
+or this repository:
+
+```
+switch# acm rollback ?
+  <1-2>
+Sno  Event   Result   Username   Time(M/D H:M:S)   Target-config
+1    SAVE    Success  admin      08/05 11:28:12    flash:acm-evpn/0805-112812.cfg
+```
+
+The checkpoint is taken **after** the change is applied, confirmed and saved, so
+it captures the state the automation just verified — which is what you want back
+when a later hand-edit goes wrong.
+
+**Filenames are unique per deploy and never reused.** `acm save` refuses to
+overwrite, and deleting the file first leaves the old rollback entry in place
+still naming that path — so rolling back to it would silently restore the newer
+configuration. Every switch in one deploy shares the same filename, so "roll the
+fabric back to the 11:28 deploy" is one identifiable set.
+
+ACM keeps roughly 50 checkpoints and rotates the oldest out, but does not delete
+the evicted files. Set `acm_checkpoint: false` to disable, or point
+`acm_checkpoint_dir` elsewhere.
 
 ## Changing something
 
