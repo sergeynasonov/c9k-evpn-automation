@@ -86,13 +86,14 @@ Then, per switch, in order:
 | 2 | `scripts/netbox_provision_schema.py --apply` | Create the custom fields, tags and roles NetBox must carry. Once per NetBox |
 | 3 | *(in NetBox)* | Model the device, then the tenants. **[The role README is the data contract](roles/acm_evpn/README.md)** |
 | 4 | `ansible-playbook readiness.yml` | Assert the underlay is fit to provision; report what is not |
-| 5 | `ansible-playbook generate_evpn.yml` | Render candidates to `switch-configuration/`. **No device changes** |
-| 6 | *(read the diff)* | Compare against the previous render — see [Rendering](#rendering-safe--no-device-changes) |
+| 5 | `ansible-playbook generate_evpn.yml` | Render candidates, then ask each switch what it would change. **Nothing is applied** |
+| 6 | *(read the diff)* | `commit-results/<host>-proposed-diff.cfg` — see [Rendering](#rendering-safe--no-configuration-changes) |
 | 7 | `ansible-playbook deploy_evpn.yml` | Apply under a rollback timer, confirm, save |
 
-**Step 5 is the one to get into the habit of.** It touches nothing, and the
-candidate it produces is exactly what a deploy would push — so reading that diff
-is how you find out what a change actually does before it reaches a switch.
+**Step 5 is the one to get into the habit of.** It changes no configuration,
+and the diff it produces is the switch's own answer to the candidate a deploy
+would push — so it is how you find out what a change actually does before it
+does it.
 
 Scope any run with `-e deploy_target=<host-or-group>`; **never `--limit`**, which
 the role refuses. See [Deploying](#deploying) for why.
@@ -110,7 +111,7 @@ the role refuses. See [Deploying](#deploying) for why.
 | `roles/underlay_readiness/` | Day-0 assertions, platform baseline and SNMPv3. Run at onboarding, and as an `acm_evpn` pre-flight |
 | `scripts/` | One-off NetBox provisioning helpers — `netbox_provision_schema.py` (the schema) and `netbox_multicast_carve.py` (the multicast carve) |
 | `switch-configuration/` | Rendered candidate configs (regenerated every run) |
-| `commit-results/` | ACM net-diffs and validation failures from the last deploy |
+| `commit-results/` | `<host>-proposed-diff.cfg` from a generate; net-diffs and validation failures from a deploy |
 | `readiness-results/` | One `<hostname>-readiness.cfg` per unready switch — paste-ready remediation |
 
 Environment setup (Infisical, direnv, virtualenv, collections) is in
@@ -414,20 +415,49 @@ VLAN, so nothing has to be modelled or named by convention.
 
 # Operations
 
-## Rendering (safe — no device changes)
+## Rendering (safe — no configuration changes)
 
 ```bash
 ansible-playbook generate_evpn.yml
 ```
 
-Writes candidate configs to `switch-configuration/` and reports anything
-suspicious without failing. Always run this and read the diff before deploying:
+Renders each switch's candidate to `switch-configuration/`, then **asks the
+switch itself what it would change** and writes that to
+`commit-results/<host>-proposed-diff.cfg`. Nothing is applied and no rollback
+timer is armed.
 
-```bash
-rm -rf switch-configuration.before && cp -r switch-configuration switch-configuration.before
-ansible-playbook generate_evpn.yml
-diff -ru switch-configuration.before switch-configuration
+The run ends with a line per switch:
+
 ```
+core2         5 stanza(s) would change -- commit-results/core2-proposed-diff.cfg
+access1-1     3 stanza(s) would change -- commit-results/access1-1-proposed-diff.cfg
+dist3-1       already converged -- nothing to apply
+access2-2     CANDIDATE REJECTED by the switch -- see commit-results/access2-2-validate-failed.cfg
+```
+
+**Read the proposed diff, not a text diff of the rendered files.** It is the
+device's own answer, so it accounts for IOS-XE normalisation — VLAN ranges
+collapsing, line reordering, platform defaults — and shows removals in
+dependency order, which is what the switch will actually do:
+
+```
+Configuration Net-Diff:
+interface nve1
+ no member vni 10104 mcast-group 239.0.0.1
+vlan configuration 104
+ no member evpn-instance 104 vni 10104
+no vlan configuration 104
+...
+```
+
+It also needs no prior state, so changing `deploy_target` between runs cannot
+mislead it — which is exactly where comparing against a previous render used to
+fall down.
+
+**"No configuration changes", precisely.** The candidate is copied to bootflash
+and ACM is asked to validate and to diff. Neither applies anything. Generate has
+always contacted devices — it reads the running config to build the candidate —
+so this is not new contact, but it does leave a file on flash.
 
 ## Deploying
 

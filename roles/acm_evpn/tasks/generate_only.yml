@@ -27,6 +27,12 @@
   vars:
     acm_safety_enforce: false
 
+# Ask each switch what it would actually change. This is what makes a generate
+# run worth reading: the candidate on disk says what we WANT, and this says what
+# the device would DO about it.
+- name: Preview the Change on Each Switch
+  ansible.builtin.import_tasks: 04b_acm_preview.yml
+
 # No pre-deploy summary here. This playbook's OUTPUT is the rendered candidate
 # in switch-configuration/, which the operator inspects and diffs directly -- a
 # console summary would duplicate the artifact, less readably.

@@ -17,7 +17,6 @@ __pycache__/
 # --- Rendered device candidate configs (regenerated on every run) ------------
 switch-configuration/
 switch-configuration-inverted/
-switch-configuration.before/
 
 # --- ACM deploy results ------------------------------------------------------
 #     The commit-results/ directory is intentionally kept in the repo (via its
