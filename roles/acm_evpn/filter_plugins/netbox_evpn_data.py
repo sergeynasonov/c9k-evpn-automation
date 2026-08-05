@@ -138,6 +138,42 @@ def _prefix_version(prefix: str) -> int:
 _HANDOFF_ROLE = "vrf_l3_handoff_vlan"
 _CORE_ROLE = "core_vlan"
 
+# Bucket key used when the caller supplies no fabric map at all: every VLAN
+# lands in one bucket and validation behaves exactly as it did before fabrics
+# existed. Keeps single-fabric callers, and every test written against them,
+# working unchanged.
+_SINGLE_FABRIC = ""
+
+
+def _scope_fabric(
+    site_id: Optional[str],
+    scope_type: Optional[str],
+    scope_id: Optional[str],
+    fabric_scope_map: Optional[Dict[str, str]],
+) -> str:
+    """Which fabric a VLAN belongs to, from its NetBox scope.
+
+    The transform only ever sees NetBox IDs, while a fabric is defined by
+    inventory groups, so the mapping has to be supplied: fabric_resolve.yml
+    builds it from each device's own site and site group.
+
+    An unrecognised scope becomes its own bucket rather than joining a real
+    fabric. Such a VLAN is in scope for no host and renders nowhere, but
+    bucketing it separately means two of them still collide with each other
+    rather than silently merging into somebody's fabric.
+    """
+    if not fabric_scope_map:
+        return _SINGLE_FABRIC
+    if scope_type == "sitegroup" and scope_id:
+        key = "sitegroup:" + scope_id
+    elif scope_type == "site" and scope_id:
+        key = "site:" + scope_id
+    elif site_id:
+        key = "site:" + site_id
+    else:
+        return "unscoped"
+    return fabric_scope_map.get(key, key)
+
 # Overlay enrolment is OPT-IN: a VLAN becomes an EVPN segment only when NetBox
 # says so explicitly. The empty string used to be a member of this tuple, which
 # meant "no role set" defaulted to "stretch this VLAN across every leaf in
@@ -792,12 +828,21 @@ def _validate_fabric_vnis(
     l2_by_vid: Dict[int, Tuple[Optional[int], str]],
     l3vni_base: int = DEFAULT_L3VNI_BASE,
 ) -> None:
-    """Validate the whole fabric's VNI plan, raising on any problem.
+    """Validate ONE fabric's VNI plan, raising on any problem.
 
-    This deliberately runs against every VRF/VLAN in the NetBox dataset, not
-    just the subset in scope for the rendering host: a collision between two
-    buildings must fail every host's render, not only the render of a host
-    unlucky enough to see both halves of it.
+    The caller passes the registries for a single fabric; ``build_evpn_data``
+    partitions them and hands over the rendering host's own fabric. Two things
+    follow from that, and both are deliberate:
+
+      * Within the fabric this runs against every VRF/VLAN in the NetBox
+        dataset, not just the subset in scope for the rendering host. A
+        collision between two buildings of one campus must fail EVERY host's
+        render, not only that of a host unlucky enough to see both halves.
+      * Another fabric's VNIs are not consulted at all. Reuse across fabrics is
+        the intended design — the same VRF carrying the same L3VNI everywhere
+        keeps RD/RT semantics and the multicast index consistent — and since a
+        run is always scoped to one fabric, a collision modelled in some other
+        building must not block a deploy of this one.
 
     A VRF with no l3vni at all is not an error — it is simply not part of the
     EVPN fabric (see _is_evpn_vrf). Only a VRF whose l3vni is *set but
@@ -1035,6 +1080,8 @@ def build_evpn_data(
     trm_objects: Optional[Dict[str, Any]] = None,
     hostname: Optional[str] = None,
     require_register_source: bool = True,
+    fabric_scope_map: Optional[Dict[str, str]] = None,
+    my_fabric: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transform NetBox VLAN/prefix/VRF data into the acm_evpn fabric structure.
 
@@ -1048,6 +1095,14 @@ def build_evpn_data(
             ``01_gather_data.yml``) rather than the whole IPAM table.
         my_site: string ID of the rendering host's site, or None.
         my_sg: string ID of the rendering host's site group, or None.
+        fabric_scope_map: {"site:<id>"|"sitegroup:<id>": fabric} for the whole
+            inventory, built by fabric_resolve.yml. VNI uniqueness is scoped
+            with it. Omit it and every VLAN lands in one bucket, which is the
+            single-fabric behaviour this project had before fabrics existed.
+        my_fabric: the rendering host's own fabric, as fabric_resolve.yml
+            resolved it. Passed rather than re-derived: one resolver decides
+            where a fabric ends, and a second opinion here could disagree
+            with the peer list.
 
     Returns:
         {
@@ -1102,12 +1157,12 @@ def build_evpn_data(
     fabric_edge_subnets: Dict[str, Any] = {}
     skipped_vlans: Dict[str, Any] = {}
 
-    # Fabric-wide VNI registries, populated before the per-host scope filter
-    # so validation sees the whole fabric on every render (see
-    # _validate_fabric_vnis).
-    fabric_l3: Dict[str, int] = {}
-    fabric_l3_bad: Dict[str, Any] = {}
-    fabric_l2: Dict[int, Tuple[Optional[int], str]] = {}
+    # VNI registries, keyed by FABRIC first and populated before the per-host
+    # scope filter -- so validation sees the whole of one fabric on every
+    # render, and none of any other. See _validate_fabric_vnis.
+    fabric_l3: Dict[str, Dict[str, int]] = {}
+    fabric_l3_bad: Dict[str, Dict[str, Any]] = {}
+    fabric_l2: Dict[str, Dict[int, Tuple[Optional[int], str]]] = {}
 
     for vlan in vlan_list:
         site = vlan.get("site")
@@ -1135,17 +1190,24 @@ def build_evpn_data(
         v_data["replication_mode"] = _replication_mode(
             v_data["tags"], v_data["mcast_group"], v_data["vrf_name"])
 
-        # --- Fabric-wide VNI registry (ignores site scope entirely) ---
+        # --- Per-fabric VNI registry (ignores the per-HOST scope filter) ---
+        # Which fabric, not which host: a collision between two buildings of one
+        # campus has to fail every host in that campus, including the ones that
+        # only see half of it.
+        _fab = _scope_fabric(site_id, scope_type, scope_id, fabric_scope_map)
         if role in _EDGE_ROLES:
             v_data["l2vni"] = _vlan_l2vni(vlan, vlan["vid"], l2vni_base)
-            fabric_l2[int(vlan["vid"])] = (v_data["l2vni"], v_data["name"])
+            fabric_l2.setdefault(_fab, {})[int(vlan["vid"])] = (
+                v_data["l2vni"], v_data["name"])
         if v_data["vrf_name"]:
             if _is_evpn_vrf(v_data):
-                fabric_l3.setdefault(v_data["vrf_name"], v_data["vrf_l3vni"])
+                fabric_l3.setdefault(_fab, {}).setdefault(
+                    v_data["vrf_name"], v_data["vrf_l3vni"])
             elif v_data["vrf_l3vni_raw"] not in (None, ""):
                 # l3vni was set but is not a usable integer: the operator meant
                 # to enrol this VRF, so fail rather than silently skip it.
-                fabric_l3_bad.setdefault(v_data["vrf_name"], v_data["vrf_l3vni_raw"])
+                fabric_l3_bad.setdefault(_fab, {}).setdefault(
+                    v_data["vrf_name"], v_data["vrf_l3vni_raw"])
 
         # --- Fabric-wide edge subnets (ignores site scope entirely) ---
         if v_data["vrf_name"] and _is_evpn_vrf(v_data) and role in _EDGE_ROLES and v_data["network_ipv4"]:
@@ -1236,7 +1298,12 @@ def build_evpn_data(
 
     _validate_vlan_names(named_vlans)
     _validate_l2_only(l2_only_bad)
-    _validate_fabric_vnis(fabric_l3, fabric_l3_bad, fabric_l2, l3vni_base)
+    # The rendering host's own fabric, and only that one. A run is always
+    # scoped to a single fabric, so another building's data error must not be
+    # able to block this one's deploy.
+    _fab = my_fabric if fabric_scope_map else _SINGLE_FABRIC
+    _validate_fabric_vnis(fabric_l3.get(_fab, {}), fabric_l3_bad.get(_fab, {}),
+                          fabric_l2.get(_fab, {}), l3vni_base)
     _validate_multicast_groups(all_edge_vlans, reserved_mcast_prefixes,
                                allowed_mcast_prefixes, l3vni_base)
 

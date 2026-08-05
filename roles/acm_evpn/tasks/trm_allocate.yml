@@ -18,6 +18,14 @@
 #
 # Ordering is expressed as two plays in trm_allocate.yml, not a sort key here.
 
+# netbox_facts.yml scopes VNI validation to the rendering host's fabric, so the
+# fabric has to be resolved before it -- exactly as 01_gather_data.yml does.
+# Without this the transform is handed an undefined fabric and validates nothing.
+- name: Resolve fabric membership
+  ansible.builtin.import_role:
+    name: underlay_readiness
+    tasks_from: fabric_resolve.yml
+
 - name: Gather NetBox facts
   ansible.builtin.import_tasks: netbox_facts.yml
   vars:

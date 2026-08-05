@@ -33,6 +33,9 @@
 #   fabric_id      this device's fabric, as an inventory group name ('' if none)
 #   fabric_members every device in this device's fabric, sorted
 #   fabric_asn     this fabric's iBGP ASN, from its sites in NetBox
+#   fabric_scope_map  {"site:<id>"|"sitegroup:<id>": fabric} for the inventory,
+#                     which is how NetBox-scoped data (VLANs) is placed in a
+#                     fabric at all -- see task 10
 #
 # fabric_asn is resolved here rather than in acm_evpn for the same reason as the
 # rest: it is a property of the fabric, from the same inventory data, and having
@@ -278,3 +281,36 @@
     # acm_evpn, and this role does not use the ASN, so the 0 is unreachable
     # wherever it would matter.
     fabric_asn: "{{ (fabric_asn_map.get(fabric_id) or evpn_bgp_asn | default(0)) | int }}"
+
+# --- NetBox scope -> fabric -------------------------------------------------
+#
+# VLANs are scoped in NetBox by site or by site group, as IDs. A fabric is
+# defined by inventory groups. Nothing in the VLAN data connects the two, so the
+# mapping is built here, from the one place that already knows both: each
+# device's own site, and the fabric the resolver put that device in.
+#
+# Consumed by netbox_evpn_data.py to scope VNI uniqueness per fabric. Sites with
+# no devices never appear, which is correct -- a VLAN scoped to one is in scope
+# for no host and renders nowhere.
+- name: 10. Map each NetBox site and site group to its fabric
+  ansible.builtin.set_fact:
+    fabric_scope_map: "{{ _scopes | from_json }}"
+  vars:
+    _scopes: >-
+      {%- set out = {} -%}
+      {%- for host, fabric in fabric_map | dictsort -%}
+      {%-   set sites = hostvars[host].get('sites') or [] -%}
+      {%-   if sites | length > 0 -%}
+      {%-     set site = sites[0] -%}
+      {%-     if site.get('id') -%}
+      {%-       set _ = out.update({'site:' ~ site.id: fabric}) -%}
+      {%-     endif -%}
+      {%-     if site.get('group') and site.group.get('id') -%}
+      {%-       set _ = out.update({'sitegroup:' ~ site.group.id: fabric}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  when: fabric_scope_map is not defined
+  run_once: true
+  delegate_to: localhost

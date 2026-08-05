@@ -849,6 +849,144 @@ class TestVniValidationIsFabricWide(unittest.TestCase):
         self.assertIn("20030", str(ctx.exception))
 
 
+class TestVniUniquenessIsPerFabric(unittest.TestCase):
+    """Uniqueness is scoped to one fabric, and both halves are deliberate.
+
+    WITHIN a fabric nothing is relaxed: a clash between two buildings of one
+    campus still fails every host in it, including hosts that see only half.
+
+    ACROSS fabrics reuse is the intended design, not a collision. Two fabrics
+    never exchange a VNI, and carrying the same VRF at the same L3VNI in both
+    keeps RD/RT semantics and the multicast index consistent. Since a run is
+    always scoped to one fabric, another building's data must also not be able
+    to block this one's deploy.
+    """
+
+    # Campus = site group 3 over sites 51 and 52. Remote = standalone site 60.
+    SCOPES = {
+        "site:51": "site_group_evpn_campus",
+        "site:52": "site_group_evpn_campus",
+        "sitegroup:3": "site_group_evpn_campus",
+        "site:60": "sites_evpn_remote",
+    }
+
+    def build(self, vlans, my_site="51", my_fabric="site_group_evpn_campus", my_sg=None):
+        return build_evpn_data(vlans, [], my_site=my_site, my_sg=my_sg,
+                               fabric_scope_map=self.SCOPES, my_fabric=my_fabric)
+
+    def test_two_fabrics_may_reuse_the_same_l3vni(self):
+        """Different VRFs, same L3VNI, one per fabric. Legal: they never meet."""
+        a = vrf("CORP_A", "199", l3vni=20003)
+        b = vrf("CORP_B", "299", l3vni=20003)
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=a)]),
+            vlan(701, "B", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=b)]),
+        ]
+        result = self.build(vlans)
+        self.assertIn("CORP_A", result["vrfs"])
+
+    def test_the_same_vrf_in_both_fabrics_is_fine(self):
+        """The case the user actually wants: one VRF, one L3VNI, everywhere."""
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(701, "B", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=CORP_VRF)]),
+        ]
+        self.assertIn("CORP", self.build(vlans)["vrfs"])
+
+    def test_two_fabrics_may_reuse_the_same_vlan_id(self):
+        """Same VID, so the same derived L2VNI, in two fabrics."""
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(101, "B", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=CORP_VRF)]),
+        ]
+        self.assertIn("101", self.build(vlans)["all_edge_vlans"])
+
+    def test_a_collision_within_one_fabric_still_fails(self):
+        """The half that must not be relaxed."""
+        a = vrf("CORP", "199", l3vni=20003)
+        b = vrf("GUEST", "200", l3vni=20003)
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=a)]),
+            vlan(102, "B", site_id="51", prefixes=[prefix("10.0.2.0/24", vrf=b)]),
+        ]
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.build(vlans)
+        self.assertIn("20003", str(ctx.exception))
+
+    def test_a_collision_across_buildings_of_one_fabric_still_fails(self):
+        """Sites 51 and 52 are different buildings of the SAME campus, so this
+        is exactly the case the fabric-wide check was written for."""
+        a = vrf("CORP", "199", l3vni=20003)
+        b = vrf("GUEST", "200", l3vni=20003)
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=a)]),
+            vlan(102, "B", site_id="52", prefixes=[prefix("10.0.2.0/24", vrf=b)]),
+        ]
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.build(vlans)
+        self.assertIn("20003", str(ctx.exception))
+
+    def test_a_site_group_scoped_vlan_lands_in_that_fabric(self):
+        """Scope via a VLAN group rather than a site, which is how a stretched
+        campus VLAN is modelled."""
+        a = vrf("CORP", "199", l3vni=20003)
+        b = vrf("GUEST", "200", l3vni=20003)
+        vlans = [
+            vlan(101, "A", site_id=None, scope_type="SiteGroup", scope_id="3",
+                 prefixes=[prefix("10.0.1.0/24", vrf=a)]),
+            vlan(102, "B", site_id="51", prefixes=[prefix("10.0.2.0/24", vrf=b)]),
+        ]
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.build(vlans, my_sg="3")
+        self.assertIn("20003", str(ctx.exception))
+
+    def test_another_fabrics_collision_does_not_block_this_deploy(self):
+        """A run is always scoped to one fabric. A clash modelled entirely in
+        the remote building must not stop the campus deploying."""
+        a = vrf("R_ONE", "301", l3vni=20009)
+        b = vrf("R_TWO", "302", l3vni=20009)
+        vlans = [
+            vlan(101, "LOCAL", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(701, "R1", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=a)]),
+            vlan(702, "R2", site_id="60", prefixes=[prefix("10.7.2.0/24", vrf=b)]),
+        ]
+        self.assertIn("101", self.build(vlans)["all_edge_vlans"])
+
+    def test_but_that_collision_fails_when_that_fabric_is_deployed(self):
+        """Same data, rendering a host in the remote fabric. Not hidden --
+        deferred to the run it actually concerns."""
+        a = vrf("R_ONE", "301", l3vni=20009)
+        b = vrf("R_TWO", "302", l3vni=20009)
+        vlans = [
+            vlan(101, "LOCAL", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=CORP_VRF)]),
+            vlan(701, "R1", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=a)]),
+            vlan(702, "R2", site_id="60", prefixes=[prefix("10.7.2.0/24", vrf=b)]),
+        ]
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.build(vlans, my_site="60", my_fabric="sites_evpn_remote")
+        self.assertIn("20009", str(ctx.exception))
+
+    def test_an_l2_l3_clash_within_a_fabric_still_fails(self):
+        v = vrf("CORP", "199", l3vni=10101)
+        vlans = [vlan(101, "CLASH", site_id="51",
+                      prefixes=[prefix("10.0.1.0/24", vrf=v)])]
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.build(vlans)
+        self.assertIn("10101", str(ctx.exception))
+
+    def test_no_scope_map_keeps_the_single_fabric_behaviour(self):
+        """Callers that pass no map get one bucket and the pre-fabric semantics,
+        which is what keeps every other test in this file meaningful."""
+        a = vrf("CORP_A", "199", l3vni=20003)
+        b = vrf("CORP_B", "299", l3vni=20003)
+        vlans = [
+            vlan(101, "A", site_id="51", prefixes=[prefix("10.0.1.0/24", vrf=a)]),
+            vlan(701, "B", site_id="60", prefixes=[prefix("10.7.1.0/24", vrf=b)]),
+        ]
+        with self.assertRaises(AnsibleFilterError):
+            build_evpn_data(vlans, [], my_site="51", my_sg=None)
+
+
 # ---------------------------------------------------------------------------
 # Overlay enrolment is opt-in: role must be 'edge'
 #
