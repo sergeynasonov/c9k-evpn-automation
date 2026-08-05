@@ -214,12 +214,31 @@ prefixes: true
 
 compose:
   ansible_host: primary_ip4.address | ipaddr('address')
+
+rename_variables:
+  - pattern: "^serial$"
+    repl: "netbox_serial"
+  - pattern: "^tags$"
+    repl: "netbox_tags"
+
 group_by:
   - device_roles
   - site_group
   - sites
   - tags
 ```
+
+*NetBox exposes a device's `serial` and `tags` as host variables, and Ansible
+reserves both names — they are play keywords. Without the renames every run
+opens with two `Found variable using reserved name` warnings, and `serial` in
+particular is the batching keyword, so a host variable shadowing it is a real
+hazard rather than cosmetic noise. The `$` matters: nb_inventory matches with
+`re.match`, which anchors only at the start, so an unanchored pattern would also
+rename anything merely beginning with those names.*
+
+*This renames **host variables** only. Group creation runs through a different
+path in the plugin, so `group_by: tags` still produces `tags_<slug>` groups —
+`tags_fabric_spine`, which selects every spine switch, is unaffected.*
 
 ### 3. `group_vars/all/vars.yml`
 Map the Infisical secrets to standard Ansible connection variables using the `env` lookup plugin:
