@@ -1,0 +1,115 @@
+---
+# Ask each switch what it would actually change, without changing it.
+#
+# GENERATE PATH ONLY. The deploy path gets its net-diff from the apply itself
+# (06_run_acm.yml), so running this there would duplicate the round trip.
+#
+# Why this exists: the local alternative was to keep the previous render in
+# switch-configuration.before and 'diff -ru' the two. That depended on a prior
+# render existing, at the same scope, that nothing had clobbered -- and it
+# compared TEXT. This asks the device, which is categorically better:
+#
+#   * it accounts for IOS-XE normalisation -- VLAN ranges collapsing, line
+#     reordering, platform defaults -- so it shows real changes, not rendering
+#     differences that converge to the same config;
+#   * it shows removals in DEPENDENCY ORDER (the nve1 member before the EVI
+#     member before the 'vlan configuration' itself), which is what the switch
+#     will do, not merely what text differs;
+#   * it needs no prior state, so a scope change between runs cannot mislead it.
+#
+# NOTHING HERE CHANGES CONFIGURATION. The candidate is copied to bootflash and
+# ACM is asked to validate and to diff. Neither applies anything, and no
+# rollback timer is armed. It is not "no device contact" -- generate already
+# fetches the running config in 01_gather_data.yml -- but it is no config change.
+
+- name: 11a. Copy candidate to bootflash for preview
+  ansible.builtin.import_tasks: 04_scp_to_switch.yml
+
+- name: 11b. Validate the candidate on the device
+  cisco.ios.ios_command:
+    commands: "acm replace bootflash:{{ inventory_hostname }}-candidate-config.cfg validate"
+  register: acm_preview_validate
+  vars:
+    ansible_command_timeout: 180
+  # A rejected candidate is the finding, not a reason to abandon the run: the
+  # other switches' diffs are exactly what this playbook exists to produce.
+  failed_when: false
+  changed_when: false
+
+- name: 11c. Classify the validation result
+  ansible.builtin.set_fact:
+    # Both strings are verified against real ACM output, not inferred. A
+    # converged switch reports 'No Diff to Validate/Apply' and does NOT report
+    # 'Status : Success', so the two have to be tested separately.
+    acm_preview_no_diff: "{{ 'No Diff to Validate/Apply' in (acm_preview_validate.stdout[0] | default('')) }}"
+    acm_preview_ok: "{{ 'Status : Success' in (acm_preview_validate.stdout[0] | default('')) }}"
+
+- name: 11d. Ask the device for the net-diff
+  cisco.ios.ios_command:
+    commands: "acm replace bootflash:{{ inventory_hostname }}-candidate-config.cfg diff"
+  register: acm_preview_diff
+  vars:
+    ansible_command_timeout: 180
+  failed_when: false
+  changed_when: false
+  # Only when there is something to show. A converged switch has no diff to ask
+  # for, and a candidate that failed validation has nothing meaningful to
+  # compare -- its rejection is the finding.
+  when:
+    - not (acm_preview_no_diff | bool)
+    - acm_preview_ok | bool
+
+- name: 11e. Ensure the results directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/commit-results"
+    state: directory
+    mode: '0755'
+  run_once: true
+  delegate_to: localhost
+
+# Named -proposed-diff, never -success-diff: the deploy writes the latter, and
+# a stale deploy artifact must never be mistaken for what a generate is
+# currently proposing.
+- name: 11f. Save the proposed change
+  ansible.builtin.copy:
+    content: "{{ acm_preview_diff.stdout[0] }}"
+    dest: "{{ playbook_dir }}/commit-results/{{ inventory_hostname }}-proposed-diff.cfg"
+    # Device configuration, and a diff can carry secrets.
+    mode: '0600'
+  delegate_to: localhost
+  when: acm_preview_diff is not skipped and acm_preview_diff.stdout is defined
+
+- name: 11g. Save a rejected candidate for inspection
+  ansible.builtin.copy:
+    content: "{{ acm_preview_validate.stdout[0] }}"
+    dest: "{{ playbook_dir }}/commit-results/{{ inventory_hostname }}-validate-failed.cfg"
+    mode: '0600'
+  delegate_to: localhost
+  when:
+    - not (acm_preview_no_diff | bool)
+    - not (acm_preview_ok | bool)
+
+- name: 11h. Report what each switch would change
+  ansible.builtin.debug:
+    msg: "{{ _lines | from_json }}"
+  vars:
+    _lines: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts -%}
+      {%-   set hv = hostvars[h] -%}
+      {%-   if hv.acm_preview_no_diff | default(false) -%}
+      {%-     set _ = out.append('%-14s' | format(h) ~ 'already converged -- nothing to apply') -%}
+      {%-   elif not (hv.acm_preview_ok | default(false)) -%}
+      {%-     set _ = out.append('%-14s' | format(h) ~ 'CANDIDATE REJECTED by the switch'
+                                 ~ ' -- see commit-results/' ~ h ~ '-validate-failed.cfg') -%}
+      {%-   else -%}
+      {%-     set n = (hv.acm_preview_diff.stdout[0] | default('')).splitlines()
+                      | reject('equalto', 'end') | reject('search', '^Configuration Net-Diff:')
+                      | select('match', '^\S') | list | length -%}
+      {%-     set _ = out.append('%-14s' | format(h) ~ n ~ ' stanza(s) would change'
+                                 ~ ' -- commit-results/' ~ h ~ '-proposed-diff.cfg') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  run_once: true
+  delegate_to: localhost

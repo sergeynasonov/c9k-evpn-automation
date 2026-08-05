@@ -12,13 +12,18 @@ fabric, driven by NetBox, and applies it with `acm replace`.
 Scope a run with `deploy_target`, **never `--limit`**:
 
 ```bash
-ansible-playbook generate_evpn.yml                          # render only, no device changes
+ansible-playbook generate_evpn.yml                          # render + preview, no config changes
 ansible-playbook deploy_evpn.yml                            # whole fabric
 ansible-playbook deploy_evpn.yml -e deploy_target=access1-1 # one leaf switch
 ```
 
-`--limit` is refused by task 0. It can drop spine switches out of the play, leaving their
-EVPN peer lists stale on the device; the playbooks union `tags_fabric_spine` into
+`generate_evpn.yml` renders each candidate, then asks the switch what it would
+change via `acm replace … diff`, writing the answer to
+`commit-results/<host>-proposed-diff.cfg`. Nothing is applied.
+
+`--limit` is refused by task 0. It can drop spine switches out of the play,
+leaving their EVPN peer lists stale on the device; the playbooks union
+`tags_fabric_spine` into
 the host pattern so that cannot happen. Peer *addresses* come from inventory
 (`fabric_peers.py`), so a narrowly scoped run still renders correct peer lists.
 
