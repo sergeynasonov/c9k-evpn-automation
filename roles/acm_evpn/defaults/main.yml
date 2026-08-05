@@ -102,6 +102,22 @@ evpn_preflight_readiness: true
 # power cycle to be the undo button for something you are still evaluating.
 acm_save_startup: true
 
+# Write a device-local ACM checkpoint after each successful deploy, so a switch
+# can be rolled back to its last automation-verified state with 'acm rollback'
+# -- without the control node, NetBox, or this repository.
+#
+# Files land in a directory of their own rather than the flash root, which on a
+# working switch already holds images and crash dumps. ACM keeps roughly 50
+# checkpoints and rotates the oldest out; it does NOT delete the files it
+# evicts, so the directory is worth a look occasionally.
+#
+# The filename is <MMDD-HHMMSS>.cfg. It carries no fabric or role name because
+# the DIRECTORY already says what wrote it, and the rollback table already shows
+# the date, time and username -- repeating either in the filename only makes the
+# table harder to read, since a long path wraps onto a second line.
+acm_checkpoint: true
+acm_checkpoint_dir: "flash:acm-evpn"
+
 # The multicast carve lives in NetBox IPAM, not here: these name the prefix
 # ROLES that define it, so re-carving is a data change rather than a code edit.
 #

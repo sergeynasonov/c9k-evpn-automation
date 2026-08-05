@@ -106,7 +106,79 @@
     - not (acm_no_diff | bool)
     - acm_save_startup | bool
 
-- name: 12l. Download Net-Diff File to Ansible Control Node
+# A device-local restore point, taken AFTER the change is applied, confirmed and
+# saved. It captures the state the automation just verified, which is what you
+# roll back to when a later hand-edit goes wrong.
+#
+# UNIQUE FILENAME PER DEPLOY, and that is not a preference. 'acm save' REFUSES
+# to overwrite ("Save failed: ... already exists"), and working around that by
+# deleting first leaves a LIE in the rollback table: the old entry survives,
+# still naming a path whose contents have since been replaced, so rolling back
+# to it silently restores the newer config. A stale checkpoint that quietly
+# restores the wrong thing is worse than no checkpoint.
+#
+# The stamp is computed ONCE for the whole run, so every switch in one deploy
+# shares a filename. That makes "roll the fabric back to the 11:16 deploy" one
+# identifiable set rather than 500 names differing by seconds.
+- name: 12l. Name this deploy's checkpoint
+  ansible.builtin.set_fact:
+    acm_checkpoint_stamp: "{{ now(utc=true, fmt='%m%d-%H%M%S') }}"
+  run_once: true
+  when: acm_checkpoint | bool
+
+# 'acm save' will not create the directory: without it the save fails with
+# '%Error opening ... (No such file or directory)'. mkdir prompts for
+# confirmation, and re-creating an existing directory is an error we ignore --
+# hence failed_when: false rather than a prior existence check, which would cost
+# the same round trip and tell us nothing more.
+# 'acm save' will not create the directory: without it the save fails with
+# '%Error opening ... (No such file or directory)'. mkdir prompts for
+# confirmation, and creating a directory that already exists is an error.
+#
+# SEPARATE TASK, deliberately. Putting both commands in one ios_command means a
+# mkdir error on the already-exists path can abort the module before the save
+# runs -- so the steady-state case, where the directory is always there, would
+# be the one that silently stopped checkpointing.
+- name: 12m. Ensure the checkpoint directory exists
+  cisco.ios.ios_command:
+    commands:
+      - command: "mkdir {{ acm_checkpoint_dir }}"
+        prompt: 'Create directory filename'
+        answer: "\r"
+  failed_when: false
+  changed_when: false
+  when:
+    - not (acm_no_diff | bool)
+    - acm_checkpoint | bool
+
+- name: 12n. Save the ACM checkpoint
+  cisco.ios.ios_command:
+    commands: "acm save {{ acm_checkpoint_dir }}/{{ acm_checkpoint_stamp }}.cfg"
+  register: acm_checkpoint_out
+  vars:
+    ansible_command_timeout: 120
+  # NEVER fatal. The change is already applied, confirmed and written to
+  # startup-config by this point. Failing the play because a restore point could
+  # not be written would report a successful deploy as a failure, and leave the
+  # operator unsure which of the two actually went wrong.
+  failed_when: false
+  changed_when: false
+  when:
+    - not (acm_no_diff | bool)
+    - acm_checkpoint | bool
+
+- name: 12o. Report any switch whose checkpoint could not be written
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: deploy succeeded, but the ACM checkpoint
+      {{ acm_checkpoint_dir }}/{{ acm_checkpoint_stamp }}.cfg was NOT created --
+      this switch has no automation restore point from this run.
+      Device said: {{ (acm_checkpoint_out.stdout[0] | default('(no output)')) | trim }}
+  when:
+    - acm_checkpoint_out is not skipped
+    - "'Successfully created checkpoint' not in (acm_checkpoint_out.stdout[0] | default(''))"
+
+- name: 12p. Download Net-Diff File to Ansible Control Node
   ansible.netcommon.net_get:
     src: "{{ acm_diff_file }}"
     dest: "{{ playbook_dir }}/commit-results/{{ inventory_hostname }}-success-diff.cfg"
