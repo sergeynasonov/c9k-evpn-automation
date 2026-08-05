@@ -347,6 +347,21 @@ for that VRF:
 so `l3vni 20003` owns `239.3.0.0/16`. One number therefore identifies a VRF
 everywhere — RD and route-targets `:20003`, multicast block `239.3.x`.
 
+**The carve is shared by every fabric and needs no per-fabric run.** It is one
+address plan inside `239.0.0.0/8`, and the index is derived from the L3VNI — so
+two fabrics carrying the same VRF at the same `l3vni` land on the same prefixes,
+which is the intent rather than a clash. Separate underlays never exchange these
+groups, so there is nothing to keep apart, and re-running
+`netbox_multicast_carve.py` for a second fabric is idempotent. Where two fabrics
+reuse an L3VNI for *different* VRFs, give the index both names
+(`--vrf CORP=3 --vrf GUEST=3`); the description then lists both, and the
+machine-readable link remains the index itself.
+
+Group **collisions** are policed per fabric, not per switch: two segments in
+different buildings of one campus that replicate to the same group would flood
+BUM traffic into each other's tree, and no single switch sees both. Across
+fabrics the same group is fine.
+
 Valid indexes are 1–254, which is what bounds `l3vni` to 20001–20254. Do not
 derive the index from NetBox's VRF `id`: it is a surrogate key that changes on
 delete-and-recreate and climbs past 254 as objects churn.
