@@ -148,16 +148,18 @@ router bgp {{ evpn_bgp_asn }}
 {% for ip in border_mesh %}
   neighbor {{ ip }} activate
 {% endfor %}
-{% if underlay.bgp.af_ipv4 %}
-{% for line in underlay.bgp.af_ipv4 %}
+{#- The global-table half of 'router bgp', preserved verbatim: network
+    statements, the loopback aggregate, maximum-paths. The device owns it.
+
+    There was a fallback here that INVENTED these lines when a border had no
+    underlay BGP -- the one case where the template would have written underlay
+    config itself, contradicting the rule the rest of the project is built on.
+    It was also unreachable: readiness requires a border to peer upstream in the
+    fabric ASN, so a border with no af_ipv4 never reaches a deploy. Preserving
+    nothing is the correct answer when the device has nothing. -#}
+{% for line in underlay.bgp.af_ipv4 | default([]) %}
 {{ line }}
 {% endfor %}
-{% else %}
-{# Greenfield fallback only: no underlay BGP found on the device. #}
-  network {{ loopback0_ip }} mask 255.255.255.255
-  aggregate-address {{ fabric_loopbacks_range | ansible.utils.ipaddr('network') }} {{ fabric_loopbacks_range | ansible.utils.ipaddr('netmask') }} summary-only
-  maximum-paths ibgp 2
-{% endif %}
  exit-address-family
  !
  address-family l2vpn evpn
