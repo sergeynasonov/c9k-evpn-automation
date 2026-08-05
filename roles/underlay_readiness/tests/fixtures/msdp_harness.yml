@@ -1,0 +1,53 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# Evaluates the REAL spine check from 02_check.yml against a hand-written
+# running config. Driven by tests/unit/test_msdp_scope.py, which lifts the
+# '_spine' expression out of the shipped file and writes spine_check.yml next
+# to this one -- so the expression under test is the one that ships.
+#
+# Only the spine block is exercised. The other checks in that task need OSPF and
+# SNMP operational state from the device, and none of them is fabric-scoped.
+
+- name: MSDP mesh scoping
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  vars:
+    vtep_source_intf: Loopback0
+    underlay_rp_address: 192.0.2.1
+  tasks:
+    - name: Resolve fabric membership
+      ansible.builtin.import_role:
+        name: underlay_readiness
+        tasks_from: fabric_resolve.yml
+
+    # What 01_gather.yml's stanza indexer would have produced from the device.
+    # Written as data rather than parsed here: the indexer has its own coverage,
+    # and re-running it would test that instead of the mesh.
+    - name: Stand in for the indexed running configuration
+      ansible.builtin.set_fact:
+        _stanzas: "{{ spine_stanzas.get(inventory_hostname, {}) }}"
+
+    - name: Spine check
+      ansible.builtin.import_tasks: spine_check.yml
+
+    - name: Write the findings for the test to read
+      ansible.builtin.copy:
+        content: "{{ _out | to_nice_json }}"
+        dest: "{{ result_file }}"
+        mode: "0644"
+      vars:
+        _findings: >-
+          {%- set out = {} -%}
+          {%- for host in ansible_play_hosts | sort -%}
+          {%-   set _ = out.update({host: {
+                  'fabric_id': hostvars[host].fabric_id | default(''),
+                  'msgs': (hostvars[host].spine_findings | default([]))
+                          | map(attribute='msg') | list}}) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+        _out: "{{ _findings | from_json }}"
+      run_once: true
+      delegate_to: localhost

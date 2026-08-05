@@ -48,7 +48,7 @@ looks provisioned and is not.
 
 | What | NetBox object | Slug | Effect |
 |---|---|---|---|
-| Border | Device role | `fabric_border` | Renders the handoff SVIs, eBGP handoff and border-to-border mesh. Allocated first by `trm_allocate.yml`. |
+| Border | Device role | `fabric_border` | Renders the handoff SVIs, eBGP handoff and the border-to-border iBGP mesh within its own fabric. Allocated first by `trm_allocate.yml`. |
 | Leaf | Device role | `fabric_leaf` | Renders tenant SVIs, EVPN instances and the NVE interface. |
 | Spine | **Tag** | `fabric_spine` | Route reflector: EVPN and MVPN clients, anycast RP. |
 
@@ -82,11 +82,15 @@ The fabric's own convention, and the part with no substitute in code:
 
 **A fabric is a site group — or a site, where that site has no site group.**
 This is the boundary of one underlay, one iBGP ASN and one set of EVPN route
-reflectors, and it is what scopes peer selection: a spine reflects only for the
-clients in its own fabric, and a client peers only with its own fabric's spines.
-One resolver decides it for every device
+reflectors. One resolver decides it for every device
 (`roles/underlay_readiness/tasks/fabric_resolve.yml`), so no two lookups can
-disagree about where a fabric ends.
+disagree about where a fabric ends. Three things are scoped to it:
+
+| Scoped to the fabric | What an unscoped version would do |
+|---|---|
+| **EVPN overlay peers** — a spine reflects only for clients in its own fabric, a client peers only with its own fabric's spines | Too short a peer list renders a valid `router bgp` that `acm replace` applies as a session teardown |
+| **The border-to-border iBGP mesh** (`border_config.j2`) | Render a neighbour in another fabric: a device in an ASN it is not in, reachable over an underlay this switch has no route into |
+| **The MSDP mesh check** (`underlay_readiness`) | Demand a session across two underlays, reporting every correctly-built spine as unready |
 
 **Site groups must not be nested.** A parent group spans buildings that do not
 share an underlay, and there is no safe way to guess which level was meant to be

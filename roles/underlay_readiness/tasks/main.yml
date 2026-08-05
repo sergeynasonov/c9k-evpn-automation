@@ -9,6 +9,12 @@
 #
 # acm_evpn imports assert_only.yml instead, which gathers and checks only.
 
+# First, because the MSDP mesh check is scoped to the fabric and a device that
+# belongs to none drops out of the play here rather than being checked against
+# somebody else's spines.
+- name: Resolve fabric membership
+  ansible.builtin.import_tasks: fabric_resolve.yml
+
 - name: Gather underlay state
   ansible.builtin.import_tasks: 01_gather.yml
 

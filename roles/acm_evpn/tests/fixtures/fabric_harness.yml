@@ -27,6 +27,16 @@
         name: underlay_readiness
         tasks_from: fabric_resolve.yml
 
+    # acm_evpn resolves in 01_gather_data.yml and then imports underlay_readiness
+    # as a pre-flight, which enters the resolver again. Driven by the test with
+    # -e reentry=true, so the guard inside fabric_resolve.yml is exercised by the
+    # same path the role actually takes.
+    - name: Resolve fabric membership again (pre-flight re-entry)
+      ansible.builtin.import_role:
+        name: underlay_readiness
+        tasks_from: fabric_resolve.yml
+      when: reentry | default(false) | bool
+
     - name: Peer selection
       ansible.builtin.import_tasks: peer_tasks.yml
 

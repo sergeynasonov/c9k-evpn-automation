@@ -33,8 +33,14 @@ sys.path.insert(0, os.path.join(_ROLE, "filter_plugins"))
 from ios_underlay import render_vlan_spec  # noqa: E402
 
 
-def _render(template, edge_vlans, l2_only=None, hostname="access1-1"):
-    """Render a real shipped template with the given VLANs."""
+def _render(template, edge_vlans, l2_only=None, hostname="access1-1",
+            fabric_members=None, groups=None):
+    """Render a real shipped template with the given VLANs.
+
+    ``fabric_members`` is the campus fabric by default. border_config.j2 scopes
+    its border-to-border mesh to it, so leaving it out would render no mesh at
+    all and quietly weaken every assertion about that block.
+    """
     env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(os.path.join(_ROLE, "templates")),
         undefined=jinja2.ChainableUndefined,
@@ -54,9 +60,12 @@ def _render(template, edge_vlans, l2_only=None, hostname="access1-1"):
         fabric_edge_subnets={},
         underlay={"bgp": {"direct": [], "af_ipv4": []}},
         peer_ips=[], border_mesh=[],
-        groups={"device_roles_fabric_border": ["core1", "core2"]},
+        fabric_members=(["core1", "core2"] if fabric_members is None
+                        else fabric_members),
+        groups=(groups or {"device_roles_fabric_border": ["core1", "core2"]}),
         hostvars={"core1": {"ansible_host": "10.0.0.64"},
-                  "core2": {"ansible_host": "10.0.0.65"}},
+                  "core2": {"ansible_host": "10.0.0.65"},
+                  "rcore1": {"ansible_host": "10.1.0.1"}},
     )
 
 
@@ -181,6 +190,57 @@ class TestL2OnlyOverlay(unittest.TestCase):
     def test_border_nve_member_carries_the_group(self):
         out = render_border(l2_only_vlan(900, tags=["core1"]), "core1")
         self.assertIn(" member vni 10900 mcast-group 239.0.1.1", out)
+
+
+class TestBorderMeshIsFabricScoped(unittest.TestCase):
+    """Borders full-mesh iBGP with each other over Loopback0.
+
+    The mesh used to be built from every device in
+    ``groups['device_roles_fabric_border']``, fabric or not. Its remote-as is
+    the fabric ASN, so a second fabric's border would have been rendered as an
+    iBGP neighbour in an ASN it is not in, over an underlay this switch has no
+    route into. Unlike the peer list this is a session that would be ADDED, so
+    the blast-radius guard -- which watches removals -- would not have caught it.
+    """
+
+    # Two fabrics: core1/core2 are the campus borders, rcore1 is another
+    # fabric's border. All three carry the fabric_border role.
+    GROUPS = {"device_roles_fabric_border": ["core1", "core2", "rcore1"]}
+    CAMPUS = ["core1", "core2"]
+
+    def render(self, hostname, fabric_members):
+        return _render("border_config.j2", {}, None, hostname,
+                       fabric_members=fabric_members, groups=self.GROUPS)
+
+    def mesh_neighbours(self, rendered):
+        """Just the mesh: a dotted quad with an explicit remote-as.
+
+        The peer-group lines name EVPN-PEERS rather than an address, and the
+        overlay peers render 'peer-group' rather than 'remote-as', so this
+        matches the border mesh and nothing else.
+        """
+        return re.findall(r"^ neighbor (\d+\.\d+\.\d+\.\d+) remote-as", rendered, re.M)
+
+    def test_mesh_reaches_the_other_border_in_the_same_fabric(self):
+        self.assertEqual(self.mesh_neighbours(self.render("core1", self.CAMPUS)),
+                         ["10.0.0.65"])
+
+    def test_mesh_does_not_reach_another_fabrics_border(self):
+        self.assertNotIn("10.1.0.1", self.render("core1", self.CAMPUS))
+
+    def test_a_border_never_meshes_with_itself(self):
+        self.assertNotIn("10.0.0.64", self.mesh_neighbours(self.render("core1", self.CAMPUS)))
+
+    def test_the_other_fabric_sees_no_campus_border(self):
+        out = self.render("rcore1", ["rcore1"])
+        for addr in ("10.0.0.64", "10.0.0.65"):
+            self.assertNotIn(addr, out)
+
+    def test_a_lone_border_renders_no_mesh_neighbours(self):
+        """A single-border fabric is legitimate and must not render a mesh to
+        borders it does not have."""
+        self.assertEqual(self.mesh_neighbours(self.render("rcore1", ["rcore1"])), [])
+
 
 if __name__ == "__main__":
     unittest.main()

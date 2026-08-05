@@ -63,8 +63,12 @@ def _peer_tasks():
     return wanted
 
 
-def run_fabric(inventory):
+def run_fabric(inventory, reentry=False):
     """Run the harness against a fixture inventory.
+
+    ``reentry`` imports the resolver a second time, the way acm_evpn does when
+    it resolves in 01_gather_data.yml and then runs underlay_readiness as a
+    pre-flight.
 
     Returns (returncode, output, result) where result is the parsed facts, or
     None when the play failed before writing them.
@@ -87,7 +91,8 @@ def run_fabric(inventory):
         )
         proc = subprocess.run(
             [ANSIBLE, "-i", os.path.join(FIXTURES, inventory), "harness.yml",
-             "-e", "result_file=" + result_file],
+             "-e", "result_file=" + result_file,
+             "-e", "reentry=" + ("true" if reentry else "false")],
             cwd=workdir, env=env, capture_output=True, text=True,
         )
         output = proc.stdout + proc.stderr
@@ -189,6 +194,38 @@ class TestDeviceWithNoSite(unittest.TestCase):
         self.assertEqual(
             self.result["survivors"],
             ["access1-1", "access2-1", "core1", "core2", "dist1", "raccess1", "rcore1"])
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestResolvingTwiceIsFree(unittest.TestCase):
+    """acm_evpn resolves, then imports underlay_readiness, which resolves again.
+
+    The second pass must change nothing and say nothing. It is guarded on
+    ``fabric_id``, which the resolver sets LAST -- guarding on ``fabric_map``,
+    which it sets first, would have skipped the orphan report on the FIRST pass
+    instead of the second.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini", reentry=True)
+        cls.once_rc, cls.once_out, cls.once = run_fabric("fabric_multi.ini")
+
+    def test_run_succeeds(self):
+        self.assertEqual(self.rc, 0, self.out)
+
+    def test_the_orphan_is_reported_exactly_once(self):
+        self.assertEqual(self.out.count("belong to no fabric and are skipped"), 1)
+
+    def test_resolution_is_identical_to_a_single_pass(self):
+        self.assertEqual(self.result["fabric_map"], self.once["fabric_map"])
+        self.assertEqual(self.result["hosts"], self.once["hosts"])
+
+    def test_the_orphan_still_drops_out_on_re_entry(self):
+        """The failure mode a whole-file guard would have introduced: by the
+        second pass fabric_id is set, so a file-level condition would have
+        skipped the end_host and let the orphan through."""
+        self.assertNotIn("orphan1", self.result["survivors"])
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
