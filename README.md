@@ -593,8 +593,8 @@ front-loads its checks. All of these run **before a switch is touched**:
 | Guard | Blocks on |
 |---|---|
 | Underlay readiness | A hand-built underlay that cannot carry the overlay — see [Phase 1](#checking-day-0-the-underlay_readiness-role) |
-| VNI validation | Out-of-range, duplicate or L2/L3-colliding VNIs — fabric-wide |
-| Multicast validation | A missing, malformed, duplicated or out-of-carve replication group |
+| VNI validation | Out-of-range, duplicate or L2/L3-colliding VNIs — across the whole of one fabric, not just the switch being rendered |
+| Multicast validation | A missing, malformed or out-of-carve replication group; two segments of one fabric claiming the same group |
 | Anycast RP assertions | RP loopback disagreeing with the fabric's anycast RP, a spine switch missing it, or two spine switches in one fabric carrying **different** addresses |
 | Peer addressing assertion | `Loopback0` disagreeing with the device's NetBox primary IP |
 | Blast-radius guard | Removing >50% of any tracked object class, or **any** underlay object (zero tolerance) |

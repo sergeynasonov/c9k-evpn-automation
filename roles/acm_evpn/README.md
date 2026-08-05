@@ -46,9 +46,87 @@ Everything below is read from NetBox. Objects that do not carry the required
 marker are **not part of the fabric** and are silently ignored — enrolment is
 opt-in throughout.
 
-`scripts/netbox_provision_schema.py` creates every custom field, tag and role
-named in this section. Run it once against a new NetBox rather than clicking
+`scripts/netbox_provision_schema.py` creates every custom field, tag and VLAN /
+prefix role named below. Run it once against a new NetBox rather than clicking
 twenty objects into the UI and hoping the slugs match.
+
+It creates **schema, not data**. Two things a fabric needs are neither: the ASN
+object assigned to its sites, and the anycast-RP IPAddresses assigned to its
+spines, are per-fabric data you model yourself. NetBox's **Anycast** IP role is
+built in and needs no creating either.
+
+### Fabrics
+
+The fabric's own convention, and the part with no substitute in code:
+
+- **Site = building.** Each switch belongs to one.
+- **Site group = campus.** Sites are grouped into it.
+
+**A fabric is a site group — or a site, where that site has no site group.**
+This is the boundary of one underlay, one iBGP ASN and one set of EVPN route
+reflectors. One resolver decides it for every device
+(`roles/underlay_readiness/tasks/fabric_resolve.yml`), so no two lookups can
+disagree about where a fabric ends. No extra NetBox data expresses membership:
+the inventory plugin already builds `site_group_<slug>` and `sites_<slug>`
+groups, so a device's own groups carry its fabric.
+
+**Site groups must not be nested.** A parent group spans buildings that do not
+share an underlay, and there is no safe way to guess which level was meant to be
+the fabric, so a nested tree is refused outright rather than resolved to one end
+of it. Model anything above a fabric as a **region** instead — regions are not
+used for scoping.
+
+A device with a fabric role but **no site** belongs to no fabric: it is reported
+and skipped, never rendered.
+
+#### What a fabric owns in NetBox
+
+| Value | Where it lives | If NetBox does not carry it |
+|---|---|---|
+| **iBGP ASN** | One NetBox **ASN object on every site** in the fabric — the same one on all of them. Exactly one per site is definitional, not policy: every EVPN session in the fabric is iBGP inside it, so a site carrying two, or two sites disagreeing, is refused rather than resolved by picking a winner. Needs no GraphQL query — the inventory plugin fetches sites with the full serializer, so it already rides along in each device's `sites` hostvar. | Falls back to `evpn_bgp_asn` in `fabric.yml`, reported on every run. **Deprecated.** |
+| **Underlay anycast RP** | One **IPAddress per spine**, all the same address, each with NetBox's built-in **Anycast** role — which is what permits the duplicate — each tagged `underlay_anycast_rp`, and each assigned to that spine's RP loopback. The tag selects; the role permits. Scoping is free: IPAddress → Interface → Device → its fabric. | Falls back to `underlay_rp_address` and `anycast_rp_interface` in `fabric.yml`, reported on every run. **Deprecated.** |
+| **Upstream ASN** | `upstream_asn` on each `vrf_l3_handoff_vlan` — per handoff, since a border can face a different upstream per tenant. | Falls back to `evpn_ext_bgp_asn` in `fabric.yml`, reported on every run. **Deprecated.** |
+
+Because the RP interface comes from the same object as the address, the two can
+no longer drift apart — which is what two independent `fabric.yml` values
+allowed. Within a fabric every spine's RP address must be **identical**;
+differing addresses configure cleanly on every switch and then silently fail to
+forward.
+
+#### What is scoped to the fabric
+
+| Scoped to the fabric | What an unscoped version would do |
+|---|---|
+| **EVPN overlay peers** — a spine reflects only for clients in its own fabric, a client peers only with its own fabric's spines | Too short a peer list renders a valid `router bgp` that `acm replace` applies as a session teardown |
+| **The border-to-border iBGP mesh** (`border_config.j2`) | Render a neighbour in another fabric: a device in an ASN it is not in, reachable over an underlay this switch has no route into |
+| **The MSDP mesh check** (`underlay_readiness`) | Demand a session across two underlays, reporting every correctly-built spine as unready |
+| **The border's edge-subnet `network` statements** | Advertise another fabric's prefixes. Inert while they are unreachable — `network` needs a matching route in the RIB — so the visible cost is dead configuration that grows with every fabric. It becomes a real advertisement, competing with that fabric's own border, the moment a shared upstream or a DCI makes them resolvable |
+| **VNI uniqueness** and **multicast group collisions** | See below |
+
+Note what is scoped to the fabric but **not** to the site: a border is the exit
+for its *whole* fabric, so it advertises the edge subnets of every building in
+it, not only its own. That is why `fabric_edge_subnets` ignores the per-host
+site filter that `all_edge_vlans` obeys.
+
+#### Uniqueness, and what two fabrics may share
+
+Two fabrics are fully independent: they may reuse the same VRFs, the same
+L3VNIs, the same VLAN IDs and the same multicast groups, because they never
+exchange them. **VNI uniqueness and multicast group ownership are therefore
+scoped to one fabric**, and both halves of that matter:
+
+- *Within* a fabric nothing is relaxed. Validation runs against every VRF and
+  VLAN in the NetBox dataset rather than only those in scope for the rendering
+  host, so a clash between two buildings of one campus fails **every** host in
+  it — including hosts that see only half of it. Two segments in different
+  buildings replicating to the same underlay group is exactly that case: no
+  single switch sees both, while on the wire each receives the other's flooded
+  traffic.
+- *Across* fabrics, reuse is the design. Carrying the same VRF at the same
+  `l3vni` everywhere is what keeps the RD, the route-targets and the multicast
+  index consistent between them. And since a run is always scoped to one
+  fabric, a clash modelled in another building must not block this one's
+  deploy — it fails the run that actually concerns it.
 
 ### Devices
 
@@ -90,61 +168,6 @@ Every managed device additionally needs:
 
 ### Sites, site groups and VLAN scope
 
-The fabric's own convention, and the part with no substitute in code:
-
-- **Site = building.** Each switch belongs to one.
-- **Site group = campus.** Sites are grouped into it.
-
-**A fabric is a site group — or a site, where that site has no site group.**
-This is the boundary of one underlay, one iBGP ASN and one set of EVPN route
-reflectors. One resolver decides it for every device
-(`roles/underlay_readiness/tasks/fabric_resolve.yml`), so no two lookups can
-disagree about where a fabric ends. Three things are scoped to it:
-
-| Scoped to the fabric | What an unscoped version would do |
-|---|---|
-| **EVPN overlay peers** — a spine reflects only for clients in its own fabric, a client peers only with its own fabric's spines | Too short a peer list renders a valid `router bgp` that `acm replace` applies as a session teardown |
-| **The border-to-border iBGP mesh** (`border_config.j2`) | Render a neighbour in another fabric: a device in an ASN it is not in, reachable over an underlay this switch has no route into |
-| **The MSDP mesh check** (`underlay_readiness`) | Demand a session across two underlays, reporting every correctly-built spine as unready |
-| **The border's edge-subnet `network` statements** | Advertise another fabric's prefixes. Inert while they are unreachable — `network` needs a matching route in the RIB — so the visible cost is dead configuration that grows with every fabric. It becomes a real advertisement, competing with that fabric's own border, the moment a shared upstream or a DCI makes them resolvable |
-
-**The fabric's iBGP ASN comes from its sites.** Assign one NetBox ASN object to
-every site in the fabric — the same one to all of them. Exactly one is
-definitional rather than a policy: every EVPN session in the fabric is iBGP
-inside it, so a site carrying two, or two sites in one fabric disagreeing, is
-refused outright rather than resolved by picking a winner. The ASN needs no
-GraphQL query: `nb_inventory` fetches sites with the full serializer, so it
-already rides along in each device's `sites` hostvar.
-
-A fabric with no ASN in NetBox falls back to `evpn_bgp_asn` from `fabric.yml`
-and says so on every run. **That fallback is deprecated and will be removed.**
-
-**Site groups must not be nested.** A parent group spans buildings that do not
-share an underlay, and there is no safe way to guess which level was meant to be
-the fabric, so a nested tree is refused outright rather than resolved to one end
-of it. Model anything above a fabric as a **region** instead — regions are not
-used for scoping. Two fabrics are otherwise fully independent: they may reuse
-the same VRFs, the same L3VNIs and the same multicast groups, because they never
-exchange them.
-
-Note what is scoped to the fabric but **not** to the site: a border is the exit
-for its *whole* fabric, so it advertises the edge subnets of every building in
-it, not only its own. That is why `fabric_edge_subnets` ignores the per-host
-site filter that `all_edge_vlans` obeys.
-
-**VNI uniqueness is therefore scoped to one fabric**, and both halves of that
-matter:
-
-- *Within* a fabric nothing is relaxed. Validation still runs against every VRF
-  and VLAN in the NetBox dataset rather than only those in scope for the
-  rendering host, so a clash between two buildings of one campus fails **every**
-  host in it — including hosts that see only half of it.
-- *Across* fabrics, reuse is the design. Carrying the same VRF at the same
-  `l3vni` in every fabric is what keeps the RD, the route-targets and the
-  multicast index consistent between them. And since a run is always scoped to
-  one fabric, a clash modelled in another building must not be able to block
-  this one's deploy — it fails the run that actually concerns it.
-
 **Scope is required.** A VLAN with no site and no VLAN group scope is enrolled
 **nowhere** — enrolment is opt-in throughout this project, and scope is how a
 VLAN says where it belongs. One that has not said is not a decision to honour.
@@ -171,9 +194,10 @@ Leaf switches, not all switches: `leaf_config.j2` is the only template that rend
 edge VLANs. Border and spine switches never carry them, except an L2-only
 overlay explicitly tagged for that border switch.
 
-Scope decides **where** a VLAN is rendered. Its **role**, below, decides
-**what** is rendered. A VLAN in scope with no recognised role produces nothing
-and is reported in the run output rather than dropped silently.
+Scope decides **where** a VLAN is rendered — and, through the site it lands in,
+which [fabric](#fabrics) it belongs to. Its **role**, below, decides **what** is
+rendered. A VLAN in scope with no recognised role produces nothing and is
+reported in the run output rather than dropped silently.
 
 ### VLAN names
 
@@ -238,8 +262,9 @@ simply never set.
 | `mcast_group` set | There is no VRF base group to inherit. Absent, the segment would silently fall back to head-end replication — a different forwarding design arrived at by omission, so it is an error instead. |
 | **No prefix** | It is bridged and renders no SVI, so an address would be silently ignored while an operator looked for a gateway that does not exist. Assigning one **fails** the render. |
 
-Scope works exactly as it does for any other VLAN — site, site group, or
-unscoped for fabric-wide.
+Scope works exactly as it does for any other VLAN — site or site group. There
+is no unscoped option: an unscoped VLAN is enrolled **nowhere**, here as
+everywhere else.
 
 **Border switches are opt-in.** A border switch has no local edge ports, so an
 L2 segment belongs there only when it must be bridged out of the fabric. Tag the
@@ -586,12 +611,21 @@ venv/bin/python -m unittest discover -s roles/acm_evpn/tests/unit
 
 Stdlib `unittest` only — no pytest and no live NetBox.
 
-Most of it is plain Python against the filter plugins. The exception is
-`test_fabric_resolve.py`, which runs the real fabric resolver and the real
-peer-selection tasks under `ansible-playbook` against the static inventories in
-`tests/fixtures/`. That logic lives in Jinja, where `--syntax-check` evaluates
-nothing, and it is testable offline only because fabric membership is decided
-entirely from inventory groups — no NetBox and no device in the path. The tasks
-under test are lifted out of `01_gather_data.yml` at run time rather than
-copied, so the fixtures cannot drift from the code that ships. The test skips
-itself if `ansible-playbook` is not on `PATH`.
+Most of it is plain Python against the filter plugins, and
+`test_leaf_templates.py` renders the shipped `.j2` files with plain Jinja2.
+
+The rest of the logic lives in **Jinja inside task files**, where
+`--syntax-check` evaluates nothing at all. Those tests run the real task files
+under `ansible-playbook` against static inventories in `tests/fixtures/`:
+
+| Test | Covers |
+|---|---|
+| `test_fabric_resolve.py` | Fabric resolution, per-fabric peer selection, the ASN, and which devices a scoped run may touch |
+| `test_inventory_config.py` | `netbox_inv.yml`'s reserved-name renames, driven through the inventory plugin's own code |
+| `../../underlay_readiness/tests/unit/test_msdp_scope.py` | The MSDP mesh check and its fabric scoping |
+| `../../underlay_readiness/tests/unit/test_anycast_rp.py` | Per-fabric anycast RP resolution |
+
+In every case the tasks under test are lifted out of the shipped file at run
+time rather than copied, so a fixture cannot drift from the code. They skip
+themselves if `ansible-playbook` is not on `PATH`. See CONTRIBUTING.md for the
+recipe.

@@ -64,23 +64,63 @@ covered by the offline render described next.
 
 ## Testing task-layer logic offline
 
-The unit tests only reach `filter_plugins/*.py`. For task and template logic,
-run the **real task files** under real Ansible with the device calls removed:
+Most of the suite is plain Python against `filter_plugins/*.py`. The rest of the
+logic lives in Jinja — in task files and templates — where `--syntax-check`
+evaluates nothing at all. That is covered by running the **real task files under
+real Ansible** with only the device calls removed.
 
-1. `switch-configuration/*.cfg` are full post-render candidates, so they read
-   like a device's `show running-config` — use them as fixtures. The directory
-   is gitignored (it describes live devices), so a fresh clone has none: produce
-   them with `generate_evpn.yml`, or drop in a saved `show running-config` from
-   any switch. Sanitise before committing anything derived from one.
-2. Load the task file with `yaml.safe_load`, filter out the `cisco.ios.*` tasks,
-   dump the rest to a scratch file. Keeping the remaining tasks byte-identical to
-   what ships means the test cannot drift from the role.
-3. Drive it from a scratch playbook with `connection: local`, a static
-   `hosts.ini` supplying `ansible_host` and the group memberships the logic reads
-   (`tags_fabric_spine`, `device_roles_fabric_border`), and `vars_files:` pointing
-   at the role's own `defaults/main.yml`.
-4. **Mutate a known-good config to prove each check fires.** A check that never
-   fails is not a check.
+This is no longer a manual exercise: four committed tests already do it, and CI
+runs them. Copy whichever is closest rather than starting from scratch.
+
+| Test | What it drives | How the device is removed |
+|---|---|---|
+| `acm_evpn/tests/unit/test_fabric_resolve.py` | The real fabric resolver, peer selection and target scoping | Nothing to remove — fabric membership is decided entirely from inventory groups |
+| `underlay_readiness/tests/unit/test_msdp_scope.py` | The real spine check from `02_check.yml` | The `_spine` expression is lifted out and fed a hand-written running config |
+| `underlay_readiness/tests/unit/test_anycast_rp.py` | The real anycast-RP resolution | The one `uri` task is stripped; a fixture stands in for the GraphQL result |
+| `acm_evpn/tests/unit/test_inventory_config.py` | `netbox_inv.yml`'s variable renames | Drives the inventory plugin's own methods with a stub inventory |
+
+The mechanics worth reusing:
+
+1. **Extract the tasks under test from the shipped file at run time** —
+   `yaml.safe_load`, select by name prefix or pull one `vars:` key, write them
+   into a `tempfile.mkdtemp()` beside a copy of the harness playbook. Nothing is
+   copied by hand, so a fixture cannot drift from the role. **Assert the
+   extraction found what it expected**: a rename should fail loudly, not quietly
+   test less than it claims.
+2. **Run from the temp directory** so the repo's `ansible.cfg` is not picked up
+   — it would force `netbox_inv.yml` and `strategy = free`. Pass
+   `ANSIBLE_ROLES_PATH` / `ANSIBLE_FILTER_PLUGINS` explicitly, and set
+   `strategy: linear` in the harness, which `run_once` depends on.
+3. **Get results out as JSON** — a final `run_once` + `delegate_to: localhost`
+   `copy:` task writing `hostvars` to a file named by `-e result_file=…`.
+   Collect from `hostvars`, not per host, so hosts that ended the play still
+   appear.
+4. **Fixtures are static inventories** in `tests/fixtures/`, shaped like what
+   `nb_inventory` builds (`sites_<slug>` holding devices, `site_group_<slug>`
+   holding sites as children). Use YAML rather than ini when a host var is a
+   nested structure. Add the fixtures directory to `.ansible-lint`'s
+   `exclude_paths` — a harness importing a file generated at test time cannot
+   lint standalone.
+5. **Guard on `shutil.which("ansible-playbook")`** with `@unittest.skipIf`, so a
+   contributor without Ansible still gets the plugin tests.
+6. **Mutate the code and confirm the tests fail.** A check that never fails is
+   not a check. Every fabric-scoping change in this repo was reverted in place
+   to prove its tests caught it, and that is what found a guard keyed on the
+   wrong variable.
+
+Where a real running config is wanted as a fixture, `switch-configuration/*.cfg`
+are full post-render candidates and read like `show running-config`. That
+directory is gitignored (it describes live devices), so a fresh clone has none:
+produce them with `generate_evpn.yml`, or drop in a saved config from any
+switch. Sanitise before committing anything derived from one.
+
+Note also that a plain-Jinja harness is a trap: Ansible registers `match` and
+`search` as tests, `regex_search` / `to_json` / `regex_escape` as filters, and
+`lookup()` as a global — none of which exist in bare Jinja2. Running under real
+Ansible avoids all of it and has higher fidelity. The one exception is
+`test_leaf_templates.py`, which renders `.j2` files with plain Jinja2 on
+purpose; prefer a plain expression over an Ansible-only filter in a template so
+it stays renderable there.
 
 ## Things that have caused real outages or near-misses
 
