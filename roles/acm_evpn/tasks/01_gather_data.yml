@@ -54,9 +54,15 @@
   ansible.builtin.set_fact:
     ios_version: "{{ ns.ver }}"
     loopback0_ip: "{{ ns.ip if ns.ip else ansible_host }}"
+    # fabric_asn, NOT the global evpn_bgp_asn. This is the BGP OWNERSHIP rule --
+    # a neighbour in this ASN is automation-managed and is stripped from the
+    # preserved config on the assumption a template re-renders it. Ownership and
+    # the render must therefore read the SAME number: were they to differ, every
+    # overlay neighbour would be stripped as owned and then not rendered, and
+    # 'acm replace' would delete every EVPN session on the switch.
     underlay: >-
       {{ current_run_config.stdout[0]
-         | ios_underlay_config(evpn_peer_group_name, evpn_bgp_asn) }}
+         | ios_underlay_config(evpn_peer_group_name, fabric_asn) }}
   vars:
     ns: >-
       {%- set ns = namespace(ip='', in_lo=false, ver='17.3') -%}

@@ -130,20 +130,20 @@ route-map WAN-INBOUND-FILTER permit 10
 {%     set _ = border_mesh.append(hostvars[host]['ansible_host']) %}
 {%   endif %}
 {% endfor %}
-router bgp {{ evpn_bgp_asn }}
+router bgp {{ fabric_asn }}
  bgp router-id interface {{ vtep_source_intf }}
  bgp log-neighbor-changes
  bgp graceful-restart
  no bgp default ipv4-unicast
  neighbor {{ evpn_peer_group_name }} peer-group
- neighbor {{ evpn_peer_group_name }} remote-as {{ evpn_bgp_asn }}
+ neighbor {{ evpn_peer_group_name }} remote-as {{ fabric_asn }}
  neighbor {{ evpn_peer_group_name }} update-source {{ vtep_source_intf }}
  neighbor {{ evpn_peer_group_name }} fall-over host-route
 {% for ip in peer_ips %}
  neighbor {{ ip }} peer-group {{ evpn_peer_group_name }}
 {% endfor %}
 {% for ip in border_mesh %}
- neighbor {{ ip }} remote-as {{ evpn_bgp_asn }}
+ neighbor {{ ip }} remote-as {{ fabric_asn }}
  neighbor {{ ip }} update-source {{ vtep_source_intf }}
 {% endfor %}
 {% for line in underlay.bgp.direct %}

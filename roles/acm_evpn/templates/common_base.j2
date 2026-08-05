@@ -16,10 +16,10 @@ vrf definition {{ vrf_name }}
  rd {{ loopback0_ip }}:{{ vrf_data.l3vni }}
  !
  address-family ipv4
-  route-target export {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }}
-  route-target export {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }} stitching
-  route-target import {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }}
-  route-target import {{ evpn_bgp_asn }}:{{ vrf_data.l3vni }} stitching
+  route-target export {{ fabric_asn }}:{{ vrf_data.l3vni }}
+  route-target export {{ fabric_asn }}:{{ vrf_data.l3vni }} stitching
+  route-target import {{ fabric_asn }}:{{ vrf_data.l3vni }}
+  route-target import {{ fabric_asn }}:{{ vrf_data.l3vni }} stitching
 {% if vrf_data.trm is defined and vrf_data.trm.enabled %}
 {# TRM. Enabled by DATA, not a flag: an ACTIVE 'default_mdt' prefix inside
     this VRF's own 239.<index>.0.0/16. See filter_plugins/netbox_evpn_data.py.

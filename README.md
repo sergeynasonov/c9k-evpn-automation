@@ -281,7 +281,10 @@ router ospf 1
  default-information originate
 ```
 
-`64513` is the fabric ASN (`evpn_bgp_asn`); `64512` is upstream's. **Ownership
+`64513` is the fabric ASN — read from the ASN object on the fabric's NetBox
+sites, falling back to `evpn_bgp_asn` in `fabric.yml`. `64512` is upstream's,
+from the handoff VLAN's `upstream_asn`, falling back to `evpn_ext_bgp_asn`.
+Both fallbacks are deprecated and report themselves on every run. **Ownership
 of this stanza is by ASN**: the automation regenerates neighbours in the fabric
 ASN — the EVPN peer group and the border-to-border session — and preserves
 everything in any other ASN verbatim. So this eBGP session survives every

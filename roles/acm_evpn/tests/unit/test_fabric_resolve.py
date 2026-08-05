@@ -63,12 +63,18 @@ def _peer_tasks():
     return wanted
 
 
-def run_fabric(inventory, reentry=False):
+def run_fabric(inventory, reentry=False, mutate=None):
     """Run the harness against a fixture inventory.
 
     ``reentry`` imports the resolver a second time, the way acm_evpn does when
     it resolves in 01_gather_data.yml and then runs underlay_readiness as a
     pre-flight.
+
+    ``mutate`` is called with the parsed YAML inventory and may edit it in
+    place; the edited copy is written into the temp dir and used instead. The
+    broken-ASN cases are one small edit away from the working fixture, so
+    expressing them as edits keeps the difference visible in the test rather
+    than buried in a near-identical second file.
 
     Returns (returncode, output, result) where result is the parsed facts, or
     None when the play failed before writing them.
@@ -76,6 +82,14 @@ def run_fabric(inventory, reentry=False):
     workdir = tempfile.mkdtemp(prefix="fabric-resolve-")
     try:
         shutil.copy(HARNESS, os.path.join(workdir, "harness.yml"))
+        inv_path = os.path.join(FIXTURES, inventory)
+        if mutate is not None:
+            with open(inv_path) as fh:
+                data = yaml.safe_load(fh)
+            mutate(data)
+            inv_path = os.path.join(workdir, "inventory.yml")
+            with open(inv_path, "w") as fh:
+                yaml.safe_dump(data, fh, default_flow_style=False, sort_keys=False)
         with open(os.path.join(workdir, "peer_tasks.yml"), "w") as fh:
             yaml.safe_dump(_peer_tasks(), fh, default_flow_style=False, sort_keys=False)
 
@@ -90,7 +104,7 @@ def run_fabric(inventory, reentry=False):
             ANSIBLE_NOCOLOR="1",
         )
         proc = subprocess.run(
-            [ANSIBLE, "-i", os.path.join(FIXTURES, inventory), "harness.yml",
+            [ANSIBLE, "-i", inv_path, "harness.yml",
              "-e", "result_file=" + result_file,
              "-e", "reentry=" + ("true" if reentry else "false")],
             cwd=workdir, env=env, capture_output=True, text=True,
@@ -310,6 +324,141 @@ class TestSingleFabricUnchanged(unittest.TestCase):
         list, or a reflector becomes its own client."""
         self.assertNotIn("10.67.118.65", self.result["hosts"]["core1"]["peer_ips"])
         self.assertNotIn("10.67.118.64", self.result["hosts"]["core2"]["peer_ips"])
+
+
+def _sites(data, *hosts):
+    """The 'sites' hostvar of each named host in a parsed YAML inventory.
+
+    Starts at data['all'], not at data: the top level is keyed by group name, so
+    walking from there finds neither 'hosts' nor 'children' and would silently
+    return nothing -- a mutation that changes no ASN and a test that passes
+    against a fixture it never edited.
+    """
+    out = []
+    stack = [data["all"]]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        for host, hv in (node.get("hosts") or {}).items():
+            if host in hosts and isinstance(hv, dict):
+                out.append(hv["sites"][0])
+        stack.extend((node.get("children") or {}).values())
+    if not out:
+        raise AssertionError("no 'sites' hostvar found for {}".format(hosts))
+    return out
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestFabricAsn(unittest.TestCase):
+    """The fabric's iBGP ASN, from the ASN objects on its NetBox sites.
+
+    It comes from INVENTORY, not a GraphQL query: nb_inventory fetches sites
+    with the full serializer, so 'asns' already rides along in the hostvar for
+    every device in or out of the play.
+
+    One ASN per fabric is definitional -- every EVPN session in the fabric is
+    iBGP inside it -- so the interesting cases are the ones with no single
+    answer, and all of them are refused rather than resolved.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rc, cls.out, cls.result = run_fabric("fabric_asns.yml")
+        if cls.result is None:  # pragma: no cover - only on a broken harness
+            raise AssertionError("harness produced no result:\n" + cls.out)
+
+    def test_run_succeeds(self):
+        self.assertEqual(self.rc, 0, self.out)
+
+    def test_each_fabric_resolves_its_own_asn(self):
+        self.assertEqual(self.result["fabric_asn_map"],
+                         {"site_group_evpn_campus": 64513, "sites_evpn_remote": 65001})
+
+    def test_two_buildings_of_one_campus_share_it(self):
+        """Both sites carry 64513, and agreeing is not a conflict."""
+        for host in ("core1", "access1-1", "access2-1"):
+            self.assertEqual(self.result["hosts"][host]["fabric_asn"], 64513, host)
+
+    def test_the_other_fabric_gets_its_own(self):
+        self.assertEqual(self.result["hosts"]["rcore1"]["fabric_asn"], 65001)
+
+    def test_netbox_wins_over_fabric_yml(self):
+        """The fixture sets evpn_bgp_asn to 64999. Seeing it anywhere would mean
+        the NetBox value was not picked up."""
+        for host, data in self.result["hosts"].items():
+            self.assertNotEqual(data["fabric_asn"], 64999, host)
+
+    def test_nothing_is_reported_as_missing(self):
+        self.assertEqual(self.result["fabric_asn_missing"], [])
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestFabricAsnIsRefusedWhenAmbiguous(unittest.TestCase):
+    def test_sites_of_one_fabric_disagreeing_is_fatal(self):
+        """The dangerous case: building_b on a different ASN would render half
+        the campus into an ASN the other half does not peer in."""
+        def mutate(data):
+            for site in _sites(data, "access2-1"):
+                site["asns"] = [{"id": 9, "asn": 64514}]
+        rc, out, _ = run_fabric("fabric_asns.yml", mutate=mutate)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("its sites disagree", out)
+        self.assertIn("building_b", out)
+
+    def test_one_site_carrying_two_asns_is_fatal(self):
+        def mutate(data):
+            for site in _sites(data, "core1", "access1-1"):
+                site["asns"] = [{"id": 1, "asn": 64513}, {"id": 9, "asn": 64514}]
+        rc, out, _ = run_fabric("fabric_asns.yml", mutate=mutate)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("exactly one ASN", out)
+        self.assertIn("building_a", out)
+
+    def test_the_failure_says_what_to_do_about_it(self):
+        def mutate(data):
+            for site in _sites(data, "access2-1"):
+                site["asns"] = [{"id": 9, "asn": 64514}]
+        _, out, _ = run_fabric("fabric_asns.yml", mutate=mutate)
+        self.assertIn("assign ONE ASN object to every site", out)
+
+    def test_one_broken_fabric_does_not_silently_render_the_others(self):
+        """Fatal for the run, not per device. A site tree that does not give one
+        ASN per fabric is not trustworthy for the fabrics that happen to work."""
+        def mutate(data):
+            for site in _sites(data, "access2-1"):
+                site["asns"] = [{"id": 9, "asn": 64514}]
+        _, _, result = run_fabric("fabric_asns.yml", mutate=mutate)
+        self.assertIsNone(result)
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestFabricAsnFallsBackWhileMigrating(unittest.TestCase):
+    """NetBox is populated fabric by fabric, so an un-migrated one must still
+    render exactly as before -- loudly, but not fatally."""
+
+    @classmethod
+    def setUpClass(cls):
+        def mutate(data):
+            for site in _sites(data, "rcore1", "raccess1"):
+                site["asns"] = []
+        cls.rc, cls.out, cls.result = run_fabric("fabric_asns.yml", mutate=mutate)
+
+    def test_run_succeeds(self):
+        self.assertEqual(self.rc, 0, self.out)
+
+    def test_the_unmigrated_fabric_uses_fabric_yml(self):
+        self.assertEqual(self.result["hosts"]["rcore1"]["fabric_asn"], 64999)
+
+    def test_the_migrated_fabric_is_unaffected(self):
+        self.assertEqual(self.result["hosts"]["core1"]["fabric_asn"], 64513)
+
+    def test_it_is_reported_as_a_deprecation(self):
+        self.assertIn("sites_evpn_remote", self.result["fabric_asn_missing"])
+        self.assertIn("the fallback is deprecated", self.out)
+
+    def test_the_migrated_fabric_is_not_reported(self):
+        self.assertNotIn("site_group_evpn_campus", self.result["fabric_asn_missing"])
 
 
 if __name__ == "__main__":

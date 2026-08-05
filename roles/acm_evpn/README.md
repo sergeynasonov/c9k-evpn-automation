@@ -92,6 +92,17 @@ disagree about where a fabric ends. Three things are scoped to it:
 | **The border-to-border iBGP mesh** (`border_config.j2`) | Render a neighbour in another fabric: a device in an ASN it is not in, reachable over an underlay this switch has no route into |
 | **The MSDP mesh check** (`underlay_readiness`) | Demand a session across two underlays, reporting every correctly-built spine as unready |
 
+**The fabric's iBGP ASN comes from its sites.** Assign one NetBox ASN object to
+every site in the fabric — the same one to all of them. Exactly one is
+definitional rather than a policy: every EVPN session in the fabric is iBGP
+inside it, so a site carrying two, or two sites in one fabric disagreeing, is
+refused outright rather than resolved by picking a winner. The ASN needs no
+GraphQL query: `nb_inventory` fetches sites with the full serializer, so it
+already rides along in each device's `sites` hostvar.
+
+A fabric with no ASN in NetBox falls back to `evpn_bgp_asn` from `fabric.yml`
+and says so on every run. **That fallback is deprecated and will be removed.**
+
 **Site groups must not be nested.** A parent group spans buildings that do not
 share an underlay, and there is no safe way to guess which level was meant to be
 the fabric, so a nested tree is refused outright rather than resolved to one end
