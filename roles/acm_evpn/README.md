@@ -429,6 +429,59 @@ Un-marking a VRF prunes its RP loopback, `ip multicast-routing vrf X` and every
 for ever and disabling TRM would be a one-way door.
 
 
+## Rolling back
+
+Two independent undo mechanisms, at different timescales.
+
+### During a deploy — automatic, and the reason for the IOS-XE floor
+
+`acm replace … timeout <n>` applies the candidate under a rollback timer. If the
+change breaks the path the automation arrives on, `acm confirm-commit` never
+reaches the switch and it restores itself when the timer expires. Nothing has to
+be reachable for that to work, which is the whole point.
+
+### Afterwards — manual, from the switch itself
+
+Every successful deploy leaves a checkpoint on the device, so a switch can be
+returned to its last automation-verified state with **no control node, no
+NetBox, and no access to this repository**:
+
+```
+switch# acm rollback ?
+  <1-2>
+Sno  Event   Result   Username   Time(M/D H:M:S)   Target-config
+1    SAVE    Success  admin      08/05 11:39:30    flash:acm-evpn/0805-113928.cfg
+2    SAVE    Success  admin      08/05 10:14:49    flash:acm2.cfg
+
+switch# acm rollback 1
+```
+
+Pick the entry by its `Sno`, not by filename. Checkpoints written by this role
+live in `flash:acm-evpn/` and are named `<MMDD-HHMMSS>.cfg` in the fabric's local
+time, so the filename agrees with the `Time` column beside it. Anything in the
+flash root — `acm1.cfg` above — was made by hand and is not the automation's.
+
+**Every switch in one deploy shares the same filename**, so rolling a group back
+to the same point is a matter of matching that name rather than reconciling 500
+timestamps.
+
+Three things worth knowing before relying on it:
+
+- The checkpoint is taken **after** the change is applied, confirmed and saved,
+  so it captures what the automation just verified — the state you want back
+  after a later hand-edit goes wrong, not the state before this deploy.
+- **Filenames are never reused.** `acm save` refuses to overwrite, and deleting
+  the file first leaves the old rollback entry naming a path whose contents have
+  changed — it would silently restore the newer configuration.
+- ACM keeps roughly 50 checkpoints and rotates the oldest out, **without
+  deleting the evicted files**. The directory is worth an occasional look.
+
+A rollback puts the switch back to a configuration NetBox no longer describes.
+The next `deploy_evpn.yml` will move it forward again, so treat a rollback as
+buying time to fix the data, not as a durable state.
+
+Set `acm_checkpoint: false` to disable, or point `acm_checkpoint_dir` elsewhere.
+
 ## Safety guards
 
 Because `acm replace` deletes anything absent from the candidate config, several
