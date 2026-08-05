@@ -31,7 +31,6 @@
       - vtep_source_intf
       - underlay_rp_address
       - anycast_rp_interface
-      - fabric_loopbacks_range
     _missing: >-
       {%- set bad = [] -%}
       {%- for k in _required if k not in hostvars[inventory_hostname] -%}

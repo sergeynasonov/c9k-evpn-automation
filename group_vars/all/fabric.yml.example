@@ -32,8 +32,6 @@ underlay_rp_address: "192.0.2.1"
 # The interface spines are expected to carry it on. Used only to validate that
 # the generated 'ip pim rp-address' points at an address the fabric owns.
 anycast_rp_interface: "Loopback60000"
-# Range the VTEP loopbacks are allocated from. Documentation only.
-fabric_loopbacks_range: "192.0.2.0/26"
 
 # --- Platform baseline (roles/underlay_readiness) -------------------------
 ntp_server_1: "198.51.100.10"
