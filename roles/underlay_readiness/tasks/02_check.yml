@@ -184,13 +184,13 @@
       {%- if 'tags_fabric_spine' in group_names -%}
       {%-   set carried = [] -%}
       {%-   for name, body in _stanzas.items() if name.startswith('interface ') -%}
-      {%-     for line in body if line.startswith('ip address ' ~ underlay_rp_address ~ ' ') -%}
+      {%-     for line in body if line.startswith('ip address ' ~ fabric_rp_address ~ ' ') -%}
       {%-       set _ = carried.append(name) -%}
       {%-     endfor -%}
       {%-   endfor -%}
       {%-   if carried | length == 0 -%}
       {%-     set _ = bad.append({
-                'msg': 'spine: no interface carries the anycast RP address ' ~ underlay_rp_address
+                'msg': 'spine: no interface carries the anycast RP address ' ~ fabric_rp_address
                        ~ ' -- the RP loopback is day-0 topology, create it deliberately',
                 'parents': [], 'lines': []}) -%}
       {%-   endif -%}

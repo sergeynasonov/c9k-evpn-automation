@@ -35,6 +35,13 @@ evpn_ext_bgp_asn: 65000
 # match the device's NetBox primary IP -- the role asserts this on every run.
 vtep_source_intf: "Loopback0"
 
+# DEPRECATED FALLBACKS, like the ASNs above. The anycast RP is per fabric, and
+# both values now come from NetBox: one IPAddress per spine, all with the SAME
+# address, role Anycast (which is what permits the duplicate), tagged
+# 'underlay_anycast_rp', each assigned to that spine's RP loopback. The
+# interface name then comes from the same object as the address, so the two can
+# no longer drift apart. Every run that falls back here says so.
+#
 # The fabric's anycast RP for UNDERLAY multicast (L2VNI BUM replication). Every
 # spine carries this address on a dedicated loopback.
 # NOTE: unrelated to TRM's per-VRF RPs, which are tenant addresses from NetBox.

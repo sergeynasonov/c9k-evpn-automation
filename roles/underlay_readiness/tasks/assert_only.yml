@@ -15,6 +15,9 @@
 - name: Resolve fabric membership
   ansible.builtin.import_tasks: fabric_resolve.yml
 
+- name: Resolve the fabric's anycast RP
+  ansible.builtin.import_tasks: fabric_anycast_rp.yml
+
 - name: Gather underlay state
   ansible.builtin.import_tasks: 01_gather.yml
 

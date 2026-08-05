@@ -1,0 +1,64 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# Drives the REAL anycast-RP resolution from fabric_anycast_rp.yml with the
+# NetBox query replaced by a fixture. Driven by tests/unit/test_anycast_rp.py,
+# which strips the one 'uri' task and writes the rest to rp_tasks.yml, so the
+# logic under test is the logic that ships.
+#
+# Splitting the query from the transform is how the rest of this project is
+# tested: the query is a round trip nothing offline can make, and the transform
+# is where every decision actually lives.
+
+- name: Anycast RP resolution
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  vars:
+    # The deprecated fabric.yml fallbacks, set here so the tests can tell a
+    # resolved value from a fallback by its value alone.
+    underlay_rp_address: 192.0.2.254
+    anycast_rp_interface: Loopback99999
+  tasks:
+    - name: Resolve fabric membership
+      ansible.builtin.import_role:
+        name: underlay_readiness
+        tasks_from: fabric_resolve.yml
+
+    # Stands in for task 1, the GraphQL round trip. Shaped exactly as the
+    # 'uri' module registers it, so the transform below cannot tell the
+    # difference.
+    - name: Stand in for the NetBox query
+      ansible.builtin.set_fact:
+        graphql_anycast_rp:
+          json:
+            data:
+              ip_address_list: "{{ rp_rows }}"
+
+    - name: Resolve the anycast RP
+      ansible.builtin.import_tasks: rp_tasks.yml
+
+    - name: Write the result for the test to read
+      ansible.builtin.copy:
+        content: "{{ _result | to_nice_json }}"
+        dest: "{{ result_file }}"
+        mode: "0644"
+      vars:
+        _hosts: >-
+          {%- set out = {} -%}
+          {%- for host in ansible_play_hosts_all | sort -%}
+          {%-   set hv = hostvars[host] -%}
+          {%-   set _ = out.update({host: {
+                  'fabric_id': hv.fabric_id | default(''),
+                  'rp_address': hv.fabric_rp_address | default(''),
+                  'rp_interface': hv.fabric_rp_interface | default('')}}) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+        _result:
+          rp_map: "{{ fabric_rp_map }}"
+          rp_missing: "{{ fabric_rp_missing }}"
+          rp_devices: "{{ fabric_rp_devices }}"
+          hosts: "{{ _hosts | from_json }}"
+      run_once: true
+      delegate_to: localhost

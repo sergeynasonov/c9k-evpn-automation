@@ -523,7 +523,7 @@ checks run before a switch is touched:
 |---|---|
 | VNI validation | Fails on out-of-range, duplicate, or L2/L3-colliding VNIs. Fabric-wide. |
 | Multicast validation | Fails on a missing, malformed, or duplicated group, one outside the carve, or one outside the owning VRF's own `/16`. |
-| Anycast RP assertions | The RP loopback must match `underlay_rp_address`, and every spine switch must carry it. |
+| Anycast RP assertions | The RP loopback must match the fabric's anycast RP, every spine switch must carry it, and every spine switch in a fabric must carry the **same** address — differing addresses configure cleanly and then silently fail to forward. |
 | Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |
 | Fabric partition | Refuses the whole run if the NetBox site tree does not partition into fabrics — today, if any device sits under nested site groups. Fabric-wide: an ambiguous tree makes every peer list suspect, not just the ambiguous device's. |
 | Route reflector assertion | Fails a device whose fabric contains no `fabric_spine`. It would otherwise render a `router bgp` with no overlay neighbours, which `acm replace` applies as a teardown of every EVPN session on the switch. Per device, so one mis-sited leaf does not stop a healthy fabric. |
