@@ -14,10 +14,10 @@ Scope a run with `deploy_target`, **never `--limit`**:
 ```bash
 ansible-playbook generate_evpn.yml                          # render only, no device changes
 ansible-playbook deploy_evpn.yml                            # whole fabric
-ansible-playbook deploy_evpn.yml -e deploy_target=access1-1 # one leaf (spines included automatically)
+ansible-playbook deploy_evpn.yml -e deploy_target=access1-1 # one leaf switch
 ```
 
-`--limit` is refused by task 0. It can drop spines out of the play, leaving their
+`--limit` is refused by task 0. It can drop spine switches out of the play, leaving their
 EVPN peer lists stale on the device; the playbooks union `tags_fabric_spine` into
 the host pattern so that cannot happen. Peer *addresses* come from inventory
 (`fabric_peers.py`), so a narrowly scoped run still renders correct peer lists.
@@ -53,11 +53,12 @@ defaults to `never`, so the inventory plugin does not rewrite a hyphen: a slug
 playbooks look for `device_roles_fabric_border`. The two never meet, and the
 symptom is silence. Every slug in this contract uses underscores.
 
-Note the asymmetry: borders and leaves are **device roles**, spines are a
-**tag**. A spine is a role a device plays in the control plane rather than a
-distinct hardware class — often the same platform as a distribution switch —
-and a tag composes with whatever device role the site's own conventions already
-use. It is deliberate, and it is not guessable, hence this table.
+Note the asymmetry: border and leaf switches are identified by **device roles**,
+spine switches by a **tag**. A spine switch is a role a device plays in the
+control plane rather than a distinct hardware class — often the same platform
+as a distribution switch — and a tag composes with whatever device role the
+site's own conventions already use. It is deliberate, and it is not guessable,
+hence this table.
 
 Every managed device additionally needs:
 
@@ -88,17 +89,17 @@ visible.
 | VLAN in NetBox | Renders on |
 |---|---|
 | **No site and no group scope** | **Nowhere** — reported as unscoped |
-| `site` set | Leaves in that site (building) |
-| Group whose scope is a **site group** | Leaves whose site is in that campus |
-| Group whose scope is a **site** | Leaves in that site |
+| `site` set | Leaf switches in that site (building) |
+| Group whose scope is a **site group** | Leaf switches whose site is in that campus |
+| Group whose scope is a **site** | Leaf switches in that site |
 
 So a tenant VLAN that exists in one building gets a site; one stretched across
 the campus gets a group scoped to the site group. There is no way to say
 "everywhere" by omission — scope the group at the widest site group you mean.
 
-"Leaves", not "switches": `leaf_config.j2` is the only template that renders
-edge VLANs. Borders and spines never carry them, except an L2-only overlay
-explicitly tagged for that border.
+Leaf switches, not all switches: `leaf_config.j2` is the only template that renders
+edge VLANs. Border and spine switches never carry them, except an L2-only
+overlay explicitly tagged for that border switch.
 
 Scope decides **where** a VLAN is rendered. Its **role**, below, decides
 **what** is rendered. A VLAN in scope with no recognised role produces nothing
@@ -151,7 +152,7 @@ these. A VLAN with no role produces nothing and is listed in the run output.
 | Tag | Effect |
 |---|---|
 | `dag_routed` | **Routed-only** distributed anycast gateway: `flooding-suppression address-resolution disable` on the EVI, `ip proxy-arp` + `ip local-proxy-arp` on the SVI, and **ingress replication** (no multicast group needed). Untagged ⇒ **bridged** DAG using multicast replication. |
-| `<hostname>` | On a `vrf_l3_handoff_vlan`, selects which border renders it. On an **L2-only overlay**, opts that border in — see below. |
+| `<hostname>` | On a `vrf_l3_handoff_vlan`, selects which border switch renders it. On an **L2-only overlay**, opts that border switch in — see below. |
 
 ### L2-only overlays
 
@@ -169,10 +170,11 @@ simply never set.
 Scope works exactly as it does for any other VLAN — site, site group, or
 unscoped for fabric-wide.
 
-**Borders are opt-in.** A border has no local edge ports, so an L2 segment
-belongs there only when it must be bridged out of the fabric. Tag the VLAN with
-that border's hostname — the same convention a `vrf_l3_handoff_vlan` uses.
-Untagged, borders ignore it entirely while every in-scope leaf still carries it.
+**Border switches are opt-in.** A border switch has no local edge ports, so an
+L2 segment belongs there only when it must be bridged out of the fabric. Tag the
+VLAN with that border switch's hostname — the same convention a
+`vrf_l3_handoff_vlan` uses. Untagged, border switches ignore it entirely while
+every in-scope leaf switch still carries it.
 
 Renders as:
 
@@ -219,7 +221,8 @@ a VRF and are rendered from NetBox instead.
 Also preserved: the `vlan <id>` definition backing any underlay SVI (without it
 the VLAN does not exist in the VLAN database and the SVI never comes up);
 `router ospf` / `router ospfv3`; global statements (`ip msdp …`, `ip route …`);
-the global-routing-table half of `router bgp` on borders; and the definitions of
+the global-routing-table half of `router bgp` on border switches; and the
+definitions of
 any route-map, prefix-list or ACL that preserved config references, resolved
 transitively so nothing is left dangling.
 
@@ -355,7 +358,8 @@ external RP mode rather than bridging anycast RPs with MSDP.
 ### Register sources are allocated, not hand-entered
 
 External RP mode needs a **unique** address per VTEP. Those are allocated by
-`trm_allocate.yml` from the pool — borders first, then leaves — and written back
+`trm_allocate.yml` from the pool — border switches first, then leaf switches —
+and written back
 to NetBox, so the allocation is durable rather than re-derived.
 
 Ownership is the **interface the address is assigned to**: the allocator creates
@@ -380,7 +384,7 @@ be receivers, and its L3 multicast rides the MDT rather than the L2VNI's ingress
 replication, so the two do not interact.
 
 Handoff SVIs (`vrf_l3_handoff_vlan`) get PIM automatically when their VRF has
-any `multicast_enabled` edge VLAN **anywhere in the fabric** — a border has no
+any `multicast_enabled` edge VLAN **anywhere in the fabric** — a border switch has no
 local edge VLANs, so a per-device test would never fire.
 
 ### What renders
@@ -396,7 +400,7 @@ vrf definition CORP
 ip multicast-routing vrf CORP             # note the trailing space IOS-XE keeps
 ip pim vrf CORP ssm default
 !
-interface Loopback20003                   # Loopback<l3vni>, leaves and borders
+interface Loopback20003                   # Loopback<l3vni>, leaf and border switches
  description Fabric Anycast RP for VRF CORP
  vrf forwarding CORP
  ip address 10.67.118.31 255.255.255.255
@@ -410,7 +414,7 @@ switch's own allocated address, `ip pim vrf X register-source Loopback<l3vni>`
 and one `rp-address` per external RP.
 
 BGP gains `address-family ipv4 mvpn`, mirroring `l2vpn evpn` including
-`route-reflector-client` on spines, **only** on devices carrying at least one
+`route-reflector-client` on spine switches, **only** on devices carrying at least one
 multicast-enabled VRF.
 
 ### Turning it off
@@ -429,7 +433,7 @@ checks run before a switch is touched:
 |---|---|
 | VNI validation | Fails on out-of-range, duplicate, or L2/L3-colliding VNIs. Fabric-wide. |
 | Multicast validation | Fails on a missing, malformed, or duplicated group, one outside the carve, or one outside the owning VRF's own `/16`. |
-| Anycast RP assertions | The RP loopback must match `underlay_rp_address`, and every spine must carry it. |
+| Anycast RP assertions | The RP loopback must match `underlay_rp_address`, and every spine switch must carry it. |
 | Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |
 | Blast-radius guard | Blocks a deploy removing >`acm_safety_max_removal_pct` of any tracked object class, and **any** underlay removal (zero tolerance). Override with `-e acm_safety_force=true`. Generate runs warn instead of failing. |
 
