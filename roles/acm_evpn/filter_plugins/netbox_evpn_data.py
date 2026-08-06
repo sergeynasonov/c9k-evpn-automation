@@ -187,7 +187,7 @@ def _scope_fabric(
 _EDGE_ROLES = ("edge",)
 
 # Every role that produces configuration. A VLAN whose role is outside this set
-# is reported in the 'skipped_vlans' result rather than silently ignored.
+# has not opted in and is ignored -- see the enrolment note above.
 _KNOWN_ROLES = _EDGE_ROLES + (_CORE_ROLE, _HANDOFF_ROLE)
 
 # A VRF's multicast index is derived as l3vni - DEFAULT_L3VNI_BASE, and selects
@@ -1153,12 +1153,6 @@ def build_evpn_data(
                                             # overlays (explicit l2vni, a
                                             # mcast_group, and no prefix)
           "all_edge_vlans": {vid: v_data},  # edge VLANs, VRF or not, in scope for this host
-          "skipped_vlans": {vid: {"vid", "name", "role", "vrf_name"}},
-                                             # in scope for this host but
-                                             # carrying no recognised role, so
-                                             # producing no configuration at
-                                             # all. Reported rather than
-                                             # silently dropped.
           "fabric_edge_subnets": {vrf_name: {vid: {"network", "mask"}}},
                                              # Every edge subnet in THIS HOST'S
                                              # FABRIC, ignoring per-host site
@@ -1199,7 +1193,6 @@ def build_evpn_data(
     all_edge_vlans: Dict[str, Any] = {}
     # Keyed by FABRIC first, like the VNI registries below.
     fabric_edge_subnets: Dict[str, Dict[str, Any]] = {}
-    skipped_vlans: Dict[str, Any] = {}
 
     # VNI registries, keyed by FABRIC first and populated before the per-host
     # scope filter -- so validation sees the whole of one fabric on every
@@ -1288,33 +1281,18 @@ def build_evpn_data(
         # it belongs -- an unscoped VLAN has not said, so it is not a decision
         # to honour. It used to be treated as fabric-wide, which inverted the
         # rule: forgetting to scope a VLAN pushed it to every leaf rather than
-        # to none. Reported rather than dropped, since it is a NetBox data
-        # problem the operator needs to see.
+        # to none. Dropped in silence, like any other VLAN that has not opted in.
         if no_scope:
-            skipped_vlans[vid_str] = {
-                "vid": vlan["vid"],
-                "name": v_data["name"],
-                "role": role,
-                "vrf_name": v_data["vrf_name"],
-                "reason": "unscoped",
-            }
             continue
 
         if not (match_site or match_sg or match_sg_site):
             continue
 
-        # A VLAN with no recognised role produces no configuration. Surfaced in
-        # skipped_vlans so this is a visible, actionable list rather than a
-        # silent omission — the usual cause is a NetBox VLAN that never had a
-        # role assigned.
+        # A VLAN with no recognised role produces no configuration, and that is
+        # the end of it. Enrolment is opt-in: a NetBox holds VLANs belonging to
+        # other platforms, other teams and decommissioned ranges, and one that
+        # has not opted in is not this automation's business to comment on.
         if role not in _KNOWN_ROLES:
-            skipped_vlans[vid_str] = {
-                "vid": vlan["vid"],
-                "name": v_data["name"],
-                "role": role,
-                "vrf_name": v_data["vrf_name"],
-                "reason": "no_role",
-            }
             continue
 
         named_vlans.append({"vid": vlan["vid"], "name": v_data["name"]})
@@ -1405,7 +1383,6 @@ def build_evpn_data(
         # border starts advertising the other fabric's prefixes in competition
         # with that fabric's own border, with no config change to point at.
         "fabric_edge_subnets": fabric_edge_subnets.get(_host_fabric, {}),
-        "skipped_vlans": skipped_vlans,
     }
 
 

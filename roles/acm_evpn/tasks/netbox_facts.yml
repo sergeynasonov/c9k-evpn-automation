@@ -199,7 +199,6 @@
                           'l2_only_vlans': _processed_data.l2_only_vlans} }}"
     all_edge_vlans: "{{ _processed_data.all_edge_vlans }}"
     fabric_edge_subnets: "{{ _processed_data.fabric_edge_subnets }}"
-    skipped_vlans: "{{ _processed_data.skipped_vlans }}"
   vars:
     _processed_data: >-
       {{ vlan_list | netbox_evpn_data(ip_list, my_site, my_sg, evpn_l2vni_base,

@@ -408,13 +408,11 @@ class TestPureL2Vlan(unittest.TestCase):
                                   prefixes=[prefix("172.16.50.0/24")])], [], SITE, SG)
         self.assertIn("172.16.50.0/24", str(cm.exception))
 
-    def test_vlan_with_unrecognised_role_produces_nothing_and_is_reported(self):
+    def test_vlan_with_unrecognised_role_produces_nothing(self):
         vlan_list = [vlan(51, "SOMETHING", role="voice", prefixes=[prefix("172.16.51.0/24")])]
         result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertNotIn("51", result["all_edge_vlans"])
         self.assertNotIn("51", result["l2_vlans"])
-        self.assertIn("51", result["skipped_vlans"])
-        self.assertEqual(result["skipped_vlans"]["51"]["role"], "voice")
 
 
 class TestUnscopedVlanIsNotEligible(unittest.TestCase):
@@ -436,12 +434,13 @@ class TestUnscopedVlanIsNotEligible(unittest.TestCase):
                 self.assertEqual(result["all_edge_vlans"], {})
                 self.assertEqual(result["l2_only_vlans"], {})
 
-    def test_reported_rather_than_silently_dropped(self):
-        """A NetBox data problem the operator has to be able to see. Silence
-        here would look identical to 'the VLAN is scoped elsewhere'."""
+    def test_dropped_in_silence(self):
+        """Enrolment is opt-in, and an unscoped VLAN has not opted in. A NetBox
+        holds hundreds of those and none of them is this automation's business,
+        so it renders nothing and says nothing."""
         result = build_evpn_data(self._unscoped(), [], my_site=SITE, my_sg=SG)
-        self.assertIn("60", result["skipped_vlans"])
-        self.assertEqual(result["skipped_vlans"]["60"]["reason"], "unscoped")
+        self.assertNotIn("60", result["all_edge_vlans"])
+        self.assertEqual(result["vrfs"], {})
 
     def test_a_scoped_vlan_is_still_enrolled(self):
         """Guard against over-correcting: scope still works."""
@@ -1070,18 +1069,19 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         self.assertEqual(result["all_edge_vlans"], {})
         self.assertNotIn("98", result["l2_vlans"])
 
-    def test_unrolled_vlans_are_reported_not_silently_dropped(self):
+    def test_unrolled_vlans_produce_nothing_anywhere(self):
+        """Not merely absent from the edge VLANs -- absent from every output, so
+        they burn no VNI and reach no template."""
         result = build_evpn_data(self._underlay_vlans(), [], my_site=SITE, my_sg=SG)
-        self.assertEqual(set(result["skipped_vlans"]), {"98", "99"})
-        self.assertEqual(result["skipped_vlans"]["98"]["name"], "Core-1-Underlay")
-        self.assertEqual(result["skipped_vlans"]["98"]["role"], "")
+        for key in ("all_edge_vlans", "l2_vlans", "l2_only_vlans",
+                    "vrfs", "fabric_edge_subnets"):
+            self.assertEqual(result[key], {}, key)
 
     def test_explicit_edge_role_is_deployed(self):
         vlan_list = [vlan(101, "CORP_DATA", role="edge",
                           prefixes=[prefix("10.67.118.160/27", vrf=CORP_VRF)])]
         result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("101", result["all_edge_vlans"])
-        self.assertEqual(result["skipped_vlans"], {})
 
     def test_pure_l2_vlan_still_supported_when_explicitly_marked(self):
         """A genuine L2-only tenant segment (no VRF) is still valid — it just
@@ -1102,16 +1102,15 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertIn("199", result["vrfs"]["CORP"]["core_vlans"])
         self.assertIn("197", result["vrfs"]["CORP"]["handoff_vlans"])
-        self.assertEqual(result["skipped_vlans"], {})
 
     def test_unrolled_vlan_in_a_fabric_vrf_is_also_skipped(self):
-        """The rule is about the VLAN's role, not its VRF's enrolment."""
+        """The rule is about the VLAN's role, not its VRF's enrolment: being in
+        an enrolled VRF does not enrol the VLAN."""
         vlan_list = [vlan(102, "NO_ROLE", role="",
                           prefixes=[prefix("10.0.2.0/24", vrf=CORP_VRF)])]
         result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
-        self.assertIn("102", result["skipped_vlans"])
-        self.assertEqual(result["skipped_vlans"]["102"]["vrf_name"], "CORP")
         self.assertNotIn("102", result["all_edge_vlans"])
+        self.assertEqual(result["fabric_edge_subnets"], {})
 
     def test_unrolled_vlan_excluded_from_border_redistribution(self):
         """fabric_edge_subnets feeds 'network' statements on the borders; an
@@ -1121,12 +1120,11 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)
         self.assertEqual(result["fabric_edge_subnets"], {})
 
-    def test_out_of_scope_vlans_are_not_reported_as_skipped(self):
-        """The report is about this host's scope, so it stays actionable."""
+    def test_a_vlan_scoped_to_another_site_produces_nothing_here(self):
         vlan_list = [vlan(700, "ELSEWHERE", role="", site_id="99",
                           prefixes=[prefix("10.0.7.0/24")])]
         result = build_evpn_data(vlan_list, [], my_site="51", my_sg="3")
-        self.assertEqual(result["skipped_vlans"], {})
+        self.assertEqual(result["all_edge_vlans"], {})
 
 
 # ---------------------------------------------------------------------------

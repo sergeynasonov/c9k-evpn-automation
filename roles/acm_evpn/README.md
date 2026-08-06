@@ -186,16 +186,15 @@ Every managed device additionally needs:
 **nowhere** — enrolment is opt-in throughout this project, and scope is how a
 VLAN says where it belongs. One that has not said is not a decision to honour.
 
-This is **reported, never fatal**. A NetBox legitimately holds VLANs that are
-not fabric segments, and failing the render because one exists would make the
-fabric hostage to unrelated data. Both `generate_evpn.yml` and `deploy_evpn.yml`
-print the finding, which matters because a VLAN that produces no configuration
-appears in no candidate file — the console line is the only place it is
-visible.
+This is **silent, never fatal**. A NetBox legitimately holds hundreds of VLANs
+that are not fabric segments — other platforms, other teams, decommissioned
+ranges, documentation-only IPAM entries — and neither failing the render nor
+listing them on every run is useful. A VLAN that has not opted in is not this
+automation's business.
 
 | VLAN in NetBox | Renders on |
 |---|---|
-| **No site and no group scope** | **Nowhere** — reported as unscoped |
+| **No site and no group scope** | **Nowhere** — silently ignored |
 | `site` set | Leaf switches in that site (building) |
 | Group whose scope is a **site group** | Leaf switches whose site is in that campus |
 | Group whose scope is a **site** | Leaf switches in that site |
@@ -210,8 +209,9 @@ overlay explicitly tagged for that border switch.
 
 Scope decides **where** a VLAN is rendered — and, through the site it lands in,
 which [fabric](#fabrics) it belongs to. Its **role**, below, decides **what** is
-rendered. A VLAN in scope with no recognised role produces nothing and is
-reported in the run output rather than dropped silently.
+rendered. A VLAN in scope with no recognised role produces nothing, and nothing
+is said about it — enrolment is opt-in, so not opting in is the normal case, not
+a finding.
 
 ### VLAN names
 

@@ -1,56 +1,29 @@
 ---
-# NetBox data problems, reported on BOTH the generate and deploy paths.
+# Deprecation notices about NetBox data, reported on BOTH the generate and
+# deploy paths.
 #
-# Split out of 03b_predeploy_summary.yml, which is deploy-only because its
-# object-change summary duplicates the candidate config an operator diffs
-# anyway. These findings are the opposite case: a VLAN that produces no
-# configuration appears NOWHERE in the artifact, so a console line is the only
-# signal it exists. Reporting them only at deploy time meant 'generate_evpn.yml'
-# silently ignored a VLAN the operator had just added and was waiting to see.
+# Only about objects that HAVE opted into the fabric. Enrolment is opt-in
+# throughout this project -- a VLAN with no scope, or with no recognised role,
+# has not opted in, and a NetBox legitimately holds hundreds of those: other
+# platforms, other teams, decommissioned ranges, documentation-only IPAM
+# entries. They used to be listed here on every run, which is noise about
+# objects that are none of this automation's business. They are ignored in
+# silence now.
 #
-# Reported, never fatal. A NetBox legitimately holds VLANs that are not fabric
-# segments -- other platforms, other teams, decommissioned ranges -- and failing
-# the render because one exists would make the fabric hostage to unrelated data.
+# What remains is the opposite case: an object that IS a fabric segment but is
+# still relying on a deprecated fallback, which the operator has to act on
+# before that fallback is removed.
 #
-# Stated once, fabric-wide: these are properties of NetBox, not of any device,
-# so only findings common to EVERY host in the play are reported here. A finding
-# on some hosts but not others is a scope question, not a data-hygiene one.
+# Stated once, fabric-wide, since these are properties of NetBox rather than of
+# any device.
 
-- name: Report NetBox VLANs that produce no configuration
+- name: Report NetBox objects still relying on a deprecated fallback
   ansible.builtin.debug:
     msg: "{{ _lines | from_json }}"
   vars:
     _hosts: "{{ ansible_play_hosts }}"
     _lines: >-
       {%- set out = [] -%}
-      {%- set skipped = hostvars[_hosts[0]].skipped_vlans | default({}) -%}
-      {%- set no_role = [] -%}
-      {%- set unscoped = [] -%}
-      {%- for vid, v in skipped | dictsort(by='key') -%}
-      {%-   set seen = [] -%}
-      {%-   for h in _hosts if vid in (hostvars[h].skipped_vlans | default({})) -%}
-      {%-     set _ = seen.append(h) -%}
-      {%-   endfor -%}
-      {%-   if seen | length == _hosts | length -%}
-      {%-     if v.reason | default('no_role') == 'unscoped' -%}
-      {%-       set _ = unscoped.append(vid ~ ' (' ~ v.name ~ ')') -%}
-      {%-     else -%}
-      {%-       set _ = no_role.append(vid ~ ' (' ~ v.name ~ ')') -%}
-      {%-     endif -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {%- if no_role -%}
-      {%-   set _ = out.append('NetBox: VLAN(s) ' ~ (no_role | join(', '))
-                               ~ ' are in scope with no role and configure nothing'
-                               ~ ' -- set role "edge" if they should be overlay segments') -%}
-      {%- endif -%}
-      {%- if unscoped -%}
-      {%-   set _ = out.append('NetBox: VLAN(s) ' ~ (unscoped | join(', '))
-                               ~ ' have no site and no VLAN group scope, so they are'
-                               ~ ' enrolled nowhere -- assign a scope if they should be'
-                               ~ ' fabric segments') -%}
-      {%- endif -%}
-
       {#- Handoffs still riding the global evpn_ext_bgp_asn. Reported per VLAN
           rather than per host: it is a property of NetBox, and the same handoff
           appears on both borders of a dual-homed pair. -#}
