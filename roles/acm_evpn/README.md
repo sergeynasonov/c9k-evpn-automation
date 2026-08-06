@@ -86,7 +86,7 @@ separate, and the answers differ:
 | Question | Answer |
 |---|---|
 | Which devices does this role **render** for? | Fabric nodes only. |
-| Which devices does `underlay_readiness` **check**? | Everything in the fabric's transit path, distribution switches included. A distribution switch between a leaf and a border carries fabric traffic, so a wrong MTU or a missing PIM on it breaks the overlay exactly as it would on a leaf — it simply has no overlay configuration of its own. |
+| Which devices does `underlay_readiness` **check**? | Everything in the fabric's transit path, distribution switches included. A distribution switch between a leaf and a border carries fabric traffic, so a wrong MTU or a missing PIM on it breaks the overlay exactly as it would on a leaf — it simply has no overlay configuration of its own. The `Loopback0`, `ip pim register-source` and `ip pim rp-address` checks all apply to it: the loopback is its OSPF router-id and management address, and PIM transits it. See the root README. |
  A NetBox holds plenty of
 ordinary sites (WAN kit, servers, campuses this automation does not manage);
 they are not candidate fabrics waiting to be configured, so they are passed over
