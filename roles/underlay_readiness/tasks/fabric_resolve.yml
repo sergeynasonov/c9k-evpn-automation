@@ -29,7 +29,11 @@
 # filter_plugins/fabric_peers.py depends on, and for the same reason.
 #
 # Sets, for every host in the play:
-#   fabric_map     {device: fabric group name} for the whole inventory
+#   fabric_map     {device: its site group or site} for the whole inventory
+#   fabric_ids     the subset of those that are FABRICS -- i.e. hold a fabric
+#                  node. An ordinary NetBox site holding WAN kit or servers is
+#                  in fabric_map but not in fabric_ids, and is asked for
+#                  nothing.
 #   fabric_id      this device's fabric, as an inventory group name ('' if none)
 #   fabric_members every device in this device's fabric, sorted
 #   fabric_asn     this fabric's iBGP ASN, from its sites in NetBox
@@ -58,6 +62,7 @@
 - name: 1. Resolve every device's fabric from inventory
   ansible.builtin.set_fact:
     fabric_map: "{{ (_resolved | from_json).map }}"
+    fabric_ids: "{{ (_resolved | from_json).fabrics }}"
     fabric_ambiguous: "{{ (_resolved | from_json).ambiguous }}"
     fabric_orphans: "{{ (_resolved | from_json).orphans }}"
   vars:
@@ -113,7 +118,19 @@
       {%-     set _ = orphans.append(host) -%}
       {%-   endif -%}
       {%- endfor -%}
-      {{ {'map': out, 'ambiguous': ambiguous, 'orphans': orphans} | to_json }}
+
+      {#- A site or site group is a FABRIC only if it holds a fabric node. A
+          NetBox holds plenty of ordinary sites -- WAN kit, servers, campuses
+          this automation does not manage -- and they are not candidate fabrics
+          waiting to be configured. Without this they are asked for an ASN and
+          an anycast RP and reported for having neither. -#}
+      {%- set fabrics = [] -%}
+      {%- for host in fabric_nodes | unique | sort
+            if out.get(host) and out[host] not in fabrics -%}
+      {%-   set _ = fabrics.append(out[host]) -%}
+      {%- endfor -%}
+      {{ {'map': out, 'fabrics': fabrics | sort,
+          'ambiguous': ambiguous, 'orphans': orphans} | to_json }}
   when: fabric_id is not defined
   run_once: true
   delegate_to: localhost
@@ -231,7 +248,7 @@
       {%- set out = {} -%}
       {%- set problems = [] -%}
       {%- set missing = [] -%}
-      {%- for fabric in fabric_map.values() | unique | sort -%}
+      {%- for fabric in fabric_ids -%}
       {#-   Collect (site, asn) across every device in the fabric, so a
             disagreement can name the sites rather than just the fabric. -#}
       {%-   set seen = {} -%}

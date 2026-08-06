@@ -114,7 +114,7 @@
       {%-   endif -%}
       {%- endfor -%}
 
-      {%- for fabric in fabric_map.values() | unique | sort -%}
+      {%- for fabric in fabric_ids -%}
       {%-   set addrs = by_fabric.get(fabric, []) | unique | sort | list -%}
       {%-   if addrs | length > 1 -%}
       {#-     The validation the NetBox model exists to make possible. Spines on

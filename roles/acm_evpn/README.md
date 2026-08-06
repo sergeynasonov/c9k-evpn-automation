@@ -79,6 +79,13 @@ used for scoping.
 A device with a fabric role but **no site** belongs to no fabric: it is reported
 and skipped, never rendered.
 
+**A site is a fabric because it holds a fabric node** — a `fabric_border`,
+`fabric_leaf`, or a device tagged `fabric_spine`. A NetBox holds plenty of
+ordinary sites (WAN kit, servers, campuses this automation does not manage);
+they are not candidate fabrics waiting to be configured, so they are passed over
+in silence rather than asked for an ASN and an anycast RP they will never
+have.
+
 #### What a fabric owns in NetBox
 
 | Value | Where it lives | If NetBox does not carry it |

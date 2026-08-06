@@ -64,7 +64,7 @@
     _fabrics: >-
       {%- set out = [] -%}
       {%- for host in _target_hosts
-            if fabric_map.get(host) and fabric_map[host] not in out -%}
+            if fabric_map.get(host) in fabric_ids and fabric_map[host] not in out -%}
       {%-   set _ = out.append(fabric_map[host]) -%}
       {%- endfor -%}
       {{ out | sort | to_json }}
@@ -78,12 +78,15 @@
   ansible.builtin.assert:
     that:
       - targeted_fabrics | length > 0
-    fail_msg: >-
-      deploy_target={{ deploy_target | default('') }} matches no device that
-      belongs to a fabric. Check the pattern: a group name from the NetBox
-      inventory (sites_<slug>, site_group_<slug>) or a hostname. Refusing
-      rather than continuing, because the spines are unioned into the host
-      pattern and this run would otherwise deploy to all of them.
+    fail_msg: |-
+      deploy_target={{ deploy_target | default('') }} matches no device in a fabric.
+
+      Fabrics in this inventory: {{ fabric_ids | join(', ') or 'none' }}
+
+      Give a fabric above, a sites_<slug> within one, or a hostname. Ansible
+      only WARNS on a pattern matching nothing, so without this the run would
+      have continued with just the spines the host pattern unions in — and
+      deployed to all of them.
     quiet: true
   when: deploy_target is defined
   run_once: true

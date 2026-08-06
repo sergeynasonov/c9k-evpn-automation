@@ -229,6 +229,41 @@ class TestDeviceWithNoSite(unittest.TestCase):
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestASiteWithNoFabricNodeIsNotAFabric(unittest.TestCase):
+    """A NetBox holds plenty of ordinary sites — WAN kit, servers, campuses this
+    automation does not manage. They are not candidate fabrics waiting to be
+    configured, and asking them for an ASN and an anycast RP produced a
+    deprecation notice on every run for a site that will never have either.
+
+    A site is a fabric because it holds a fabric node, full stop. The fixture's
+    sites_wan_edge holds a WAN router and a file server and nothing else.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini")
+
+    def test_run_succeeds(self):
+        self.assertEqual(self.rc, 0, self.out)
+
+    def test_its_devices_still_resolve_to_their_site(self):
+        """Guards the fixture: they ARE in the site, which is why the site shows
+        up as a candidate at all."""
+        self.assertEqual(self.result["fabric_map"]["wan-rtr-1"], "sites_wan_edge")
+
+    def test_but_the_site_is_not_a_fabric(self):
+        self.assertNotIn("sites_wan_edge", self.result["fabric_ids"])
+
+    def test_the_real_fabrics_still_are(self):
+        self.assertEqual(self.result["fabric_ids"],
+                         ["site_group_evpn_campus", "sites_evpn_remote"])
+
+    def test_it_is_never_reported_for_missing_an_asn(self):
+        """The regression, straight from a real run."""
+        self.assertNotIn("sites_wan_edge", self.out)
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
 class TestNonFabricNodesAreDropped(unittest.TestCase):
     """A host pattern can select devices this role renders nothing for.
 
@@ -575,7 +610,7 @@ class TestSpineUnionIsScopedToTheTargetedFabric(unittest.TestCase):
         since the union would be all that is left in the play."""
         rc, out, _ = run_fabric("fabric_multi.ini", deploy_target="no_such_group")
         self.assertNotEqual(rc, 0)
-        self.assertIn("matches no device that belongs to a fabric", out)
+        self.assertIn("matches no device in a fabric", out)
 
 
 if __name__ == "__main__":
