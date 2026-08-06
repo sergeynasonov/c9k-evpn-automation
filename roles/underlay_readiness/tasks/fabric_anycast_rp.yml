@@ -27,7 +27,7 @@
 # at all. Asking for the tag and judging the role locally reports it instead.
 #
 # Sets, for every host in the play:
-#   fabric_rp_map        {fabric: address} for every fabric that has one
+#   fabric_rp_map        {fabric: address} for every fabric
 #   fabric_rp_address    this device's fabric's RP address
 #   fabric_rp_interface  the interface THIS device is expected to carry it on
 #
@@ -75,7 +75,6 @@
     fabric_rp_map: "{{ (_rp | from_json).map }}"
     fabric_rp_devices: "{{ (_rp | from_json).devices }}"
     fabric_rp_problems: "{{ (_rp | from_json).problems }}"
-    fabric_rp_missing: "{{ (_rp | from_json).missing }}"
   vars:
     _rows: >-
       {{ graphql_anycast_rp.json.data.ip_address_list
@@ -85,7 +84,6 @@
       {%- set map = {} -%}
       {%- set devices = {} -%}
       {%- set problems = [] -%}
-      {%- set missing = [] -%}
 
       {#- Bucket every tagged address by the fabric of the device it is bound
           to. An address with no interface cannot be placed and is reported; an
@@ -127,16 +125,23 @@
       {%-   elif addrs | length == 1 -%}
       {%-     set _ = map.update({fabric: addrs[0]}) -%}
       {%-   else -%}
-      {%-     set _ = missing.append(fabric) -%}
+      {%-     set _ = problems.append(fabric ~ ': no anycast RP is modelled for it') -%}
       {%-   endif -%}
       {%- endfor -%}
-      {{ {'map': map, 'devices': devices,
-          'problems': problems, 'missing': missing} | to_json }}
+
+      {#- Every spine needs its OWN object: the interface name comes from it, and
+          that is what stops the address and the interface drifting apart. -#}
+      {%- for host in groups.get('tags_fabric_spine', []) | sort
+            if fabric_map.get(host) in fabric_ids and host not in devices -%}
+      {%-   set _ = problems.append(host ~ ': tagged fabric_spine but carries no'
+                                    ~ ' anycast RP IPAddress of its own') -%}
+      {%- endfor -%}
+      {{ {'map': map, 'devices': devices, 'problems': problems} | to_json }}
   when: fabric_rp_address is not defined
   run_once: true
   delegate_to: localhost
 
-- name: 3. Refuse a fabric whose anycast RP is ambiguous
+- name: 3. Refuse a fabric without exactly one anycast RP
   ansible.builtin.assert:
     that:
       - fabric_rp_problems | length == 0
@@ -149,48 +154,12 @@
       role Anycast (which is what lets NetBox hold the duplicates), each tagged
       {{ underlay_anycast_rp_tags | join(' or ') }}, and each assigned to that
       spine's RP loopback interface.
+
+      There is no global underlay_rp_address to stand in any more: NetBox is
+      the only source for this.
     success_msg: "every fabric has one anycast RP"
     quiet: true
   when: fabric_rp_address is not defined
-  run_once: true
-  delegate_to: localhost
-
-# Reported per spine rather than per fabric: the address is already known from
-# the spines that do have an object, so this is a NetBox gap rather than
-# something that stops the run. It is worth saying because the interface name
-# comes from the same object, and a spine without one falls back to the global.
-- name: 4. Report fabrics and spines still using fabric.yml for the anycast RP
-  ansible.builtin.debug:
-    msg: "{{ _lines | from_json }}"
-  vars:
-    _gaps: >-
-      {%- set out = [] -%}
-      {%- for host in groups.get('tags_fabric_spine', []) | sort
-            if host in fabric_map and host not in fabric_rp_devices -%}
-      {%-   set _ = out.append(host) -%}
-      {%- endfor -%}
-      {{ out | to_json }}
-    _lines: >-
-      {%- set out = [] -%}
-      {%- if fabric_rp_missing -%}
-      {%-   set _ = out.append('NetBox: fabric(s) ' ~ (fabric_rp_missing | join(', '))
-                               ~ ' have no anycast RP modelled, so it falls back to'
-                               ~ ' underlay_rp_address (' ~ underlay_rp_address | default('unset')
-                               ~ ') from fabric.yml — the fallback is deprecated and'
-                               ~ ' will be removed') -%}
-      {%- endif -%}
-      {%- set gaps = _gaps | from_json -%}
-      {%- if gaps and not fabric_rp_missing -%}
-      {%-   set _ = out.append('NetBox: spine(s) ' ~ (gaps | join(', '))
-                               ~ ' carry no anycast RP IPAddress of their own, so their'
-                               ~ ' RP interface falls back to anycast_rp_interface ('
-                               ~ anycast_rp_interface | default('unset') ~ ')'
-                               ~ ' — model one per spine') -%}
-      {%- endif -%}
-      {{ out | to_json }}
-  when:
-    - fabric_rp_address is not defined
-    - _lines | from_json | length > 0
   run_once: true
   delegate_to: localhost
 
@@ -198,10 +167,11 @@
 # interface THIS switch should carry the address on, and two spines are free to
 # have built it on differently named loopbacks. Taking it from the same object
 # as the address is what stops the two drifting apart.
-- name: 5. Determine this device's anycast RP address and interface
+- name: 4. Determine this device's anycast RP address and interface
   ansible.builtin.set_fact:
-    fabric_rp_address: >-
-      {{ fabric_rp_map.get(fabric_id) or underlay_rp_address | default('') }}
+    # No fallbacks: task 3 has already refused any fabric without exactly one
+    # RP, and any spine without its own object. An empty result can therefore
+    # only be a device in a site that is not a fabric, which renders nothing.
+    fabric_rp_address: "{{ fabric_rp_map.get(fabric_id, '') }}"
     fabric_rp_interface: >-
-      {{ fabric_rp_devices.get(inventory_hostname, {}).get('interface')
-         or anycast_rp_interface | default('') }}
+      {{ fabric_rp_devices.get(inventory_hostname, {}).get('interface', '') }}

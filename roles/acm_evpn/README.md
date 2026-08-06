@@ -12,16 +12,24 @@ fabric, driven by NetBox, and applies it with `acm replace`.
 Scope a run with `deploy_target`, **never `--limit`**:
 
 ```bash
-ansible-playbook generate_evpn.yml                          # render + preview, no config changes
-ansible-playbook deploy_evpn.yml                            # whole fabric
-ansible-playbook deploy_evpn.yml -e deploy_target=access1-1 # one leaf switch
+ansible-playbook generate_evpn.yml -e deploy_target=site_group_evpn_campus # render + preview, no changes
+ansible-playbook deploy_evpn.yml   -e deploy_target=site_group_evpn_campus # one fabric
+ansible-playbook deploy_evpn.yml   -e deploy_target=access1-1              # one leaf switch
+ansible-playbook deploy_evpn.yml   -e deploy_target=all                    # every fabric, deliberately
 ```
 
 `generate_evpn.yml` renders each candidate, then asks the switch what it would
 change via `acm replace … diff`, writing the answer to
 `commit-results/<host>-proposed-diff.cfg`. Nothing is applied.
 
-`--limit` is refused by task 0. It can drop spine switches out of the play,
+**`deploy_target` is required.** An unscoped run is refused before anything is
+contacted, and the refusal lists the fabrics in the inventory. The host pattern
+without it means *every fabric node in the estate*, and nobody intends that by
+omitting a flag — `-e deploy_target=all` says it deliberately. A run that names
+one leaf still re-renders that leaf's own fabric's spines, so their peer lists
+cannot go stale; see below.
+
+`--limit` is refused too, by task 0, and for a different reason. It can drop spine switches out of the play,
 leaving their EVPN peer lists stale on the device; the playbooks union
 `tags_fabric_spine` into
 the host pattern so that cannot happen. Peer *addresses* come from inventory
@@ -95,15 +103,18 @@ have.
 
 #### What a fabric owns in NetBox
 
+**NetBox is the only source for all three. There is no global fallback** —
+a single global value cannot describe more than one fabric, which is the whole
+point. A fabric missing any of them fails the run and names what is missing.
+
 | Value | Where it lives | If NetBox does not carry it |
 |---|---|---|
-| **iBGP ASN** | One NetBox **ASN object on every site** in the fabric — the same one on all of them. Exactly one per site is definitional, not policy: every EVPN session in the fabric is iBGP inside it, so a site carrying two, or two sites disagreeing, is refused rather than resolved by picking a winner. Needs no GraphQL query — the inventory plugin fetches sites with the full serializer, so it already rides along in each device's `sites` hostvar. | Falls back to `evpn_bgp_asn` in `fabric.yml`, reported on every run. **Deprecated.** |
-| **Underlay anycast RP** | One **IPAddress per spine**, all the same address, each with NetBox's built-in **Anycast** role — which is what permits the duplicate — each tagged `underlay_anycast_rp`, and each assigned to that spine's RP loopback. The tag selects; the role permits. Scoping is free: IPAddress → Interface → Device → its fabric. | Falls back to `underlay_rp_address` and `anycast_rp_interface` in `fabric.yml`, reported on every run. **Deprecated.** |
-| **Upstream ASN** | `upstream_asn` on each `vrf_l3_handoff_vlan` — per handoff, since a border can face a different upstream per tenant. | Falls back to `evpn_ext_bgp_asn` in `fabric.yml`, reported on every run. **Deprecated.** |
+| **iBGP ASN** | One NetBox **ASN object on every site** in the fabric — the same one on all of them. Exactly one per site is definitional, not policy: every EVPN session in the fabric is iBGP inside it, so a site carrying two, or two sites disagreeing, is refused rather than resolved by picking a winner. Needs no GraphQL query — the inventory plugin fetches sites with the full serializer, so it already rides along in each device's `sites` hostvar. | The run is refused, naming the fabric. |
+| **Underlay anycast RP** | One **IPAddress per spine**, all the same address, each with NetBox's built-in **Anycast** role — which is what permits the duplicate — each tagged `underlay_anycast_rp`, and each assigned to that spine's RP loopback. The tag selects; the role permits. Scoping is free: IPAddress → Interface → Device → its fabric. | The run is refused — for a fabric with none at all, and for any single spine missing its own object, since the interface name comes from it. |
+| **Upstream ASN** | `upstream_asn` on each `vrf_l3_handoff_vlan` — per handoff, since a border can face a different upstream per tenant. | The render is refused, naming every offending VLAN. Rendering `remote-as` with nothing after it is a parser error on the switch, after the candidate has reached every border. |
 
 Because the RP interface comes from the same object as the address, the two can
-no longer drift apart — which is what two independent `fabric.yml` values
-allowed. Within a fabric every spine's RP address must be **identical**;
+no longer drift apart — which is what two independent global values allowed. Within a fabric every spine's RP address must be **identical**;
 differing addresses configure cleanly on every switch and then silently fail to
 forward.
 
@@ -186,16 +197,15 @@ Every managed device additionally needs:
 **nowhere** — enrolment is opt-in throughout this project, and scope is how a
 VLAN says where it belongs. One that has not said is not a decision to honour.
 
-This is **reported, never fatal**. A NetBox legitimately holds VLANs that are
-not fabric segments, and failing the render because one exists would make the
-fabric hostage to unrelated data. Both `generate_evpn.yml` and `deploy_evpn.yml`
-print the finding, which matters because a VLAN that produces no configuration
-appears in no candidate file — the console line is the only place it is
-visible.
+This is **silent, never fatal**. A NetBox legitimately holds hundreds of VLANs
+that are not fabric segments — other platforms, other teams, decommissioned
+ranges, documentation-only IPAM entries — and neither failing the render nor
+listing them on every run is useful. A VLAN that has not opted in is not this
+automation's business.
 
 | VLAN in NetBox | Renders on |
 |---|---|
-| **No site and no group scope** | **Nowhere** — reported as unscoped |
+| **No site and no group scope** | **Nowhere** — silently ignored |
 | `site` set | Leaf switches in that site (building) |
 | Group whose scope is a **site group** | Leaf switches whose site is in that campus |
 | Group whose scope is a **site** | Leaf switches in that site |
@@ -210,8 +220,9 @@ overlay explicitly tagged for that border switch.
 
 Scope decides **where** a VLAN is rendered — and, through the site it lands in,
 which [fabric](#fabrics) it belongs to. Its **role**, below, decides **what** is
-rendered. A VLAN in scope with no recognised role produces nothing and is
-reported in the run output rather than dropped silently.
+rendered. A VLAN in scope with no recognised role produces nothing, and nothing
+is said about it — enrolment is opt-in, so not opting in is the normal case, not
+a finding.
 
 ### VLAN names
 
@@ -243,7 +254,7 @@ a guessing game.
 |---|---|---|---|
 | `l2vni` | Integer | **conditional** | Two meanings, decided by whether the VLAN has a VRF. **In a VRF:** an override for the derived L2VNI (`evpn_l2vni_base + vid`, 10001–14094) — leave blank unless pinning a brownfield VNI. **With no VRF:** the marker that **enrols the VLAN as an L2-only overlay**; see below. |
 | `mcast_group` | Text (IPv4) | **conditional** | Overrides the VRF's `mcast_base_group` for this VLAN alone — an escape hatch, most VLANs in a VRF inherit. **Required on an L2-only overlay**, which has no VRF to inherit from. |
-| `upstream_asn` | Integer | no *(deprecating to yes)* | The eBGP peer ASN for a **`vrf_l3_handoff_vlan`**, rendered as its `remote-as`. Set it per handoff: a border can face a different upstream per tenant, and two fabrics almost certainly do. Blank falls back to the global `evpn_ext_bgp_asn` from `fabric.yml` and is reported on every run — **that fallback is deprecated and will be removed.** A value that is present but not a valid ASN (1–4294967295) fails the render rather than falling back, because substituting the global for a number someone set deliberately renders a session to the wrong ASN, which simply never comes up. Ignored on any other VLAN role. |
+| `upstream_asn` | Integer | **yes, on a `vrf_l3_handoff_vlan`** | The eBGP peer ASN for that handoff, rendered as its `remote-as`. Set it per handoff: a border can face a different upstream per tenant, and two fabrics almost certainly do. There is no global to fall back on, so a handoff without one **fails the render**, naming the VLAN — otherwise it renders `remote-as` with nothing after it, which is a parser error on the switch after the candidate has reached every border. A value that is present but not a valid ASN (1–4294967295) fails the same way. Ignored on any other VLAN role. |
 
 ### VLAN roles
 

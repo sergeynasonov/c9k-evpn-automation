@@ -132,17 +132,24 @@ venv/bin/pip install -r requirements.txt
 # Install required Ansible collections
 venv/bin/ansible-galaxy collection install -r requirements.yml
 
-# Create this fabric's site configuration from the documented template
-cp group_vars/all/fabric.yml.example group_vars/all/fabric.yml
+# Create this deployment's management identity from the documented template.
+# Only readiness.yml needs it -- generate/deploy run without any configuration.
+cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
 ```
 
-Then edit `group_vars/all/fabric.yml`: ASNs, underlay addressing, and NTP / SNMP
-/ VTP identity. Every key is documented in the `.example` file, which ships with
-RFC 5737 placeholder addresses.
+Then edit `group_vars/all/deployment.yml`: your NTP servers, SNMPv3 identity and
+VTP domain. Every key is documented in the `.example` file, which ships with RFC
+5737 placeholder addresses.
 
-**`fabric.yml` is gitignored.** Site values live there and nowhere else, so this
-fabric's addressing is never committed and a `git pull` never overwrites it.
-Passwords do not go in this file — they come from the environment, as above.
+**`deployment.yml` is gitignored**, so your real addresses are never committed
+and a `git pull` never overwrites them. Passwords do not go in this file — they
+come from the environment, as above.
+
+Nothing about the **fabric** is configured here. The fabric ASN, the underlay
+anycast RP and each handoff's upstream ASN all come from NetBox, per fabric —
+see [the data contract](roles/acm_evpn/README.md). `generate_evpn.yml` and
+`deploy_evpn.yml` therefore need no file at all; only `readiness.yml`, which
+applies the platform baseline, reads `deployment.yml`.
 
 ---
 
@@ -240,7 +247,7 @@ rename anything merely beginning with those names.*
 path in the plugin, so `group_by: tags` still produces `tags_<slug>` groups —
 `tags_fabric_spine`, which selects every spine switch, is unaffected.*
 
-### 3. `group_vars/all/vars.yml`
+### 3. `group_vars/all/main.yml`
 Map the Infisical secrets to standard Ansible connection variables using the `env` lookup plugin:
 ```yaml
 # IOS Connection Variables

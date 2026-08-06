@@ -15,9 +15,6 @@
 - name: Render Local Configurations
   ansible.builtin.import_tasks: 02_render_configs.yml
 
-- name: Report NetBox data problems
-  ansible.builtin.import_tasks: 02b_netbox_hygiene.yml
-
 # Same guard as the deploy path, but reporting instead of failing: a generate
 # run exists so the operator can inspect the candidate config, and aborting
 # here would withhold exactly the output they need in order to judge whether

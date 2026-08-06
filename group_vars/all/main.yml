@@ -1,0 +1,32 @@
+---
+# Applies to every host, every fabric, every run. Tracked in the repo: nothing
+# here describes anyone's network, only how this project connects and what it
+# assumes by convention.
+#
+# What is NOT here: this deployment's own NTP/SNMP/VTP identity, which lives in
+# the gitignored deployment.yml (see deployment.yml.example). And nothing
+# fabric-specific at all -- the fabric ASN, the anycast RP and each handoff's
+# upstream ASN come from NetBox, per fabric, because one global value cannot
+# describe more than one fabric.
+
+# --- Connection ------------------------------------------------------------
+# Credentials come from the environment, never from a file. See SETUP.md.
+ansible_user: "{{ lookup('env', 'ios_username') }}"
+ansible_password: "{{ lookup('env', 'ios_password') }}"
+ansible_connection: network_cli
+ansible_network_os: cisco.ios.ios
+
+# --- Conventions -----------------------------------------------------------
+# The interface every VTEP sources VXLAN, BGP and PIM from, and which every
+# switch -- VTEP or not -- uses as its OSPF router-id and management address.
+# A convention rather than site data, so it is defaulted rather than demanded:
+# a fresh clone works without setting anything. Override it only if this fabric
+# genuinely sources from another loopback; the address itself is never
+# configured here, it is read from the device and asserted against NetBox.
+vtep_source_intf: "Loopback0"
+
+# Verify the NetBox TLS certificate on the GraphQL calls the roles make. (The
+# inventory plugin has its own setting, in netbox_inv.yml.) Leave true unless
+# your NetBox uses a self-signed certificate, in which case you are accepting a
+# MITM on the channel that carries your fabric's intent.
+netbox_validate_certs: true

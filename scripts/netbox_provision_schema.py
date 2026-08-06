@@ -144,7 +144,7 @@ CUSTOM_FIELDS = [
      "eBGP peer ASN for a vrf_l3_handoff_vlan, rendered as its remote-as. Per "
      "handoff, since a border can face a different upstream per tenant and two "
      "fabrics almost certainly do. Blank falls back to evpn_ext_bgp_asn in "
-     "fabric.yml, which is deprecated."),
+     "a global, which no longer exists."),
     # On the PREFIX, not the VLAN: _apply_prefix() reads these from the
     # prefix's custom_field_data. A VLAN can carry an IPv4 and an IPv6 prefix
     # with different relay destinations, which a VLAN-level field could not

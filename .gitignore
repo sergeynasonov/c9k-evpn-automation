@@ -35,11 +35,17 @@ switch-configuration.before/
 #     into it describe live device state and are never committed.
 #     See readiness-results/.gitignore.
 
-# --- YOUR fabric's configuration --------------------------------------------
-#     Site-specific addressing, ASNs and naming. Never committed: the repo
-#     ships fabric.yml.example with documentation-range placeholders instead,
-#     so publishing can never leak a real network and you never have to
-#     re-add your own values after a push.
+# --- THIS deployment's management identity ----------------------------------
+#     NTP servers, SNMPv3 identity and ACL, VTP domain. Never committed: the
+#     repo ships deployment.yml.example with documentation-range placeholders
+#     instead, so publishing can never leak a real network and you never have
+#     to re-add your own values after a push.
+#
+#     The old name for this was fabric.yml, back when it also held the fabric
+#     ASN and the anycast RP. Those live in NetBox now, per fabric, and nothing
+#     fabric-specific is left here -- hence the rename. The old rule is kept
+#     below so an existing clone does not suddenly start offering to commit it.
+group_vars/all/deployment.yml
 group_vars/all/fabric.yml
 
 # --- Local environment -------------------------------------------------------

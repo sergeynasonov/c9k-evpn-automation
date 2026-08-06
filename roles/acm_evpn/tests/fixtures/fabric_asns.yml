@@ -72,5 +72,3 @@ all:
         raccess1:
   vars:
     ansible_connection: local
-    # The fallback the deprecation path lands on when NetBox carries no ASN.
-    evpn_bgp_asn: 64999

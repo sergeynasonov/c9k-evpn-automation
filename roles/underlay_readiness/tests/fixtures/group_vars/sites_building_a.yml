@@ -1,0 +1,20 @@
+---
+# The 'sites' host variable as nb_inventory builds it with site_data: true --
+# a one-element list holding the site as /api/dcim/sites/ returns it, 'asns'
+# included, since the plugin fetches the full serializer rather than the brief
+# one.
+#
+# Supplied as a group_var because an ini inventory cannot express a nested
+# structure. Every device in the site shares its site, so the effect is the
+# same as the per-host variable the real inventory produces.
+#
+# The ASN is REQUIRED: a fabric without exactly one is refused, with no
+# global fallback to stand in.
+sites:
+  - id: 51
+    slug: building_a
+    group:
+      id: 3
+      slug: evpn_campus
+    asns:
+      - {id: 513, asn: 64513}

@@ -1,7 +1,7 @@
 ---
 # Site-specific values -- ASNs, addresses, NTP/SNMP/VTP identity -- are NOT here.
-# They live in group_vars/all/fabric.yml, which is gitignored, with a documented
-# template in fabric.yml.example. A default pointing at somebody else's network
+# They live in group_vars/all/deployment.yml, which is gitignored, with a
+# documented template beside it. A default pointing at somebody else's network
 # is worse than no default, so the role asserts they are set instead.
 #
 # Expected underlay state. These are ASSERTIONS, not configuration: the underlay

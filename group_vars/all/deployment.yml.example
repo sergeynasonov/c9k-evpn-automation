@@ -1,0 +1,35 @@
+---
+# THIS deployment's management identity: NTP, SNMPv3 and VTP.
+#
+#   cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
+#   $EDITOR group_vars/all/deployment.yml
+#
+# Deployment-wide, not per fabric -- one estate has one NTP source and one SNMP
+# identity however many fabrics it runs. Gitignored, because these are real
+# addresses and names on a real network.
+#
+# Read only by roles/underlay_readiness, which asserts them and applies the
+# platform baseline. generate_evpn.yml and deploy_evpn.yml need nothing from
+# this file: run either on a fresh clone with no configuration at all.
+#
+# No defaults are offered for any of it. An NTP server pointing at somebody
+# else's network is worse than a clean failure, so the role fails with a pointer
+# to this file instead.
+
+# Addresses use RFC 5737 documentation ranges. Replace all of them.
+
+ntp_server_1: "198.51.100.10"
+ntp_server_2: "198.51.100.11"
+
+# SNMPv3. The passwords come from the environment, never from here --
+# see SETUP.md. Only the identity lives in this file.
+snmp_v3_user: "example-snmpv3"
+snmp_v3_group: "AuthPrivGroup"
+snmp_acl_name: "SNMP-ACL"
+snmp_acl:
+  - "198.51.100.20"
+
+# VTP domain. Every switch runs transparent mode, so this is cosmetic; the
+# password and version are deliberately not managed at all (see the role
+# README -- IOS-XE never reports them back, so they could never converge).
+vtp_domain: "EXAMPLE"

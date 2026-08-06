@@ -97,13 +97,19 @@ def _render_gate_tasks():
     return wanted
 
 
-def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None,
+UNSCOPED = object()
+
+
+def run_fabric(inventory, reentry=False, mutate=None, deploy_target="all",
                render_gate=False):
     """Run the harness against a fixture inventory.
 
     ``reentry`` imports the resolver a second time, the way acm_evpn does when
     it resolves in 01_gather_data.yml and then runs underlay_readiness as a
     pre-flight.
+
+    ``deploy_target`` defaults to "all" because every run must now be scoped;
+    pass ``UNSCOPED`` to exercise the refusal.
 
     ``mutate`` is called with the parsed YAML inventory and may edit it in
     place; the edited copy is written into the temp dir and used instead. The
@@ -148,7 +154,8 @@ def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None,
              "-e", "result_file=" + result_file,
              "-e", "reentry=" + ("true" if reentry else "false"),
              "-e", "render_gate=" + ("true" if render_gate else "false")]
-            + (["-e", "deploy_target=" + deploy_target] if deploy_target else []),
+            + ([] if deploy_target is UNSCOPED
+               else ["-e", "deploy_target=" + deploy_target]),
             cwd=workdir, env=env, capture_output=True, text=True,
         )
         output = proc.stdout + proc.stderr
@@ -513,14 +520,10 @@ class TestFabricAsn(unittest.TestCase):
     def test_the_other_fabric_gets_its_own(self):
         self.assertEqual(self.result["hosts"]["rcore1"]["fabric_asn"], 65001)
 
-    def test_netbox_wins_over_fabric_yml(self):
-        """The fixture sets evpn_bgp_asn to 64999. Seeing it anywhere would mean
-        the NetBox value was not picked up."""
+    def test_every_device_gets_its_own_fabrics_asn(self):
+        """No global to fall back to, so every value here came from NetBox."""
         for host, data in self.result["hosts"].items():
-            self.assertNotEqual(data["fabric_asn"], 64999, host)
-
-    def test_nothing_is_reported_as_missing(self):
-        self.assertEqual(self.result["fabric_asn_missing"], [])
+            self.assertIn(data["fabric_asn"], (64513, 65001), host)
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
@@ -550,7 +553,7 @@ class TestFabricAsnIsRefusedWhenAmbiguous(unittest.TestCase):
             for site in _sites(data, "access2-1"):
                 site["asns"] = [{"id": 9, "asn": 64514}]
         _, out, _ = run_fabric("fabric_asns.yml", mutate=mutate)
-        self.assertIn("assign ONE ASN object to every site", out)
+        self.assertIn("nothing to fall back to", out)
 
     def test_one_broken_fabric_does_not_silently_render_the_others(self):
         """Fatal for the run, not per device. A site tree that does not give one
@@ -563,9 +566,13 @@ class TestFabricAsnIsRefusedWhenAmbiguous(unittest.TestCase):
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
-class TestFabricAsnFallsBackWhileMigrating(unittest.TestCase):
-    """NetBox is populated fabric by fabric, so an un-migrated one must still
-    render exactly as before -- loudly, but not fatally."""
+class TestAFabricWithNoAsnIsRefused(unittest.TestCase):
+    """There is no global evpn_bgp_asn to fall back to any more.
+
+    Falling back was the migration path; NetBox is now the only source, so a
+    fabric whose sites carry no ASN fails rather than quietly rendering every
+    BGP session in somebody else's number.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -574,77 +581,68 @@ class TestFabricAsnFallsBackWhileMigrating(unittest.TestCase):
                 site["asns"] = []
         cls.rc, cls.out, cls.result = run_fabric("fabric_asns.yml", mutate=mutate)
 
-    def test_run_succeeds(self):
-        self.assertEqual(self.rc, 0, self.out)
+    def test_the_run_is_refused(self):
+        self.assertNotEqual(self.rc, 0)
 
-    def test_the_unmigrated_fabric_uses_fabric_yml(self):
-        self.assertEqual(self.result["hosts"]["rcore1"]["fabric_asn"], 64999)
+    def test_it_names_the_fabric(self):
+        self.assertIn("sites_evpn_remote", self.out)
+        self.assertIn("no site in it carries an ASN object", self.out)
 
-    def test_the_migrated_fabric_is_unaffected(self):
-        self.assertEqual(self.result["hosts"]["core1"]["fabric_asn"], 64513)
+    def test_it_says_there_is_no_fallback(self):
+        self.assertIn("no global evpn_bgp_asn to stand in", self.out)
 
-    def test_it_is_reported_as_a_deprecation(self):
-        self.assertIn("sites_evpn_remote", self.result["fabric_asn_missing"])
-        self.assertIn("the fallback is deprecated", self.out)
-
-    def test_the_migrated_fabric_is_not_reported(self):
-        self.assertNotIn("site_group_evpn_campus", self.result["fabric_asn_missing"])
+    def test_nothing_renders(self):
+        """Fatal for the run, not a per-fabric skip: a site tree that cannot
+        answer this is not trustworthy for the fabrics that happen to work."""
+        self.assertIsNone(self.result)
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
-class TestSpineUnionIsScopedToTheTargetedFabric(unittest.TestCase):
-    """The playbooks union tags_fabric_spine into the host pattern so that a
-    scoped run always re-renders its spines' peer lists. That union is
-    unscoped, so it also drags in every OTHER fabric's spines.
+class TestAnUnscopedRunIsRefused(unittest.TestCase):
+    """Every run must say which fabric it is for.
 
-    The rule is deliberately conservative: a host is dropped only when its
-    fabric contains none of the devices deploy_target actually matched. The
-    targeted fabric's own spines therefore always stay, which is what keeps the
-    peer-list protection the union exists for.
+    Unscoped, the host pattern defaults to every fabric node in the inventory --
+    with more than one fabric that is the whole estate, opening a session to
+    every switch in every building and, on a deploy, applying a candidate to all
+    of them. Nobody means that by omission.
+
+    Enforced in the shared resolver, so readiness.yml, generate_evpn.yml,
+    deploy_evpn.yml and trm_allocate.yml all get it from one place.
     """
 
-    def test_a_scoped_run_targets_only_that_fabric(self):
-        _, _, result = run_fabric("fabric_multi.ini", deploy_target="sites_building_a")
-        self.assertEqual(result["targeted_fabrics"], ["site_group_evpn_campus"])
+    @classmethod
+    def setUpClass(cls):
+        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini",
+                                                 deploy_target=UNSCOPED)
 
-    def test_the_targeted_fabrics_own_spines_stay(self):
-        """The load-bearing half. Dropping these is the stale-peer-list bug."""
-        _, _, result = run_fabric("fabric_multi.ini", deploy_target="sites_building_a")
-        for spine in ("core1", "core2"):
-            self.assertIn(spine, result["survivors"], spine)
+    def test_the_run_is_refused(self):
+        self.assertNotEqual(self.rc, 0)
 
-    def test_another_fabrics_spine_is_dropped(self):
-        _, _, result = run_fabric("fabric_multi.ini", deploy_target="sites_building_a")
-        self.assertNotIn("rcore1", result["survivors"])
+    def test_nothing_is_rendered(self):
+        self.assertIsNone(self.result)
 
-    def test_scoping_to_a_single_leaf_keeps_its_fabrics_spines(self):
-        """The case the union exists for: deploy one leaf, and its spines must
-        still be re-rendered so their peer lists include it."""
-        _, _, result = run_fabric("fabric_multi.ini", deploy_target="access1-1")
-        for spine in ("core1", "core2"):
-            self.assertIn(spine, result["survivors"], spine)
-        self.assertNotIn("rcore1", result["survivors"])
+    def test_it_says_what_is_wrong(self):
+        self.assertIn("This run is not scoped", self.out)
 
-    def test_targeting_the_other_fabric_inverts_it(self):
-        _, _, result = run_fabric("fabric_multi.ini", deploy_target="raccess1")
-        self.assertEqual(result["targeted_fabrics"], ["sites_evpn_remote"])
-        self.assertIn("rcore1", result["survivors"])
-        for spine in ("core1", "core2"):
-            self.assertNotIn(spine, result["survivors"], spine)
+    def test_it_lists_the_fabrics_to_choose_from(self):
+        self.assertIn("site_group_evpn_campus", self.out)
+        self.assertIn("sites_evpn_remote", self.out)
 
-    def test_an_unscoped_run_targets_every_fabric(self):
-        _, _, result = run_fabric("fabric_multi.ini")
-        self.assertEqual(result["targeted_fabrics"],
-                         ["site_group_evpn_campus", "sites_evpn_remote"])
-        for host in ("core1", "core2", "rcore1"):
-            self.assertIn(host, result["survivors"], host)
+    def test_it_shows_how_to_scope(self):
+        self.assertIn("-e deploy_target=", self.out)
 
-    def test_a_deploy_target_matching_nothing_is_refused(self):
-        """Without this a typo becomes 'deploy to every spine in the estate',
-        since the union would be all that is left in the play."""
-        rc, out, _ = run_fabric("fabric_multi.ini", deploy_target="no_such_group")
+    def test_an_empty_deploy_target_is_refused_too(self):
+        """'-e deploy_target=' defines the variable as an empty string, which
+        would otherwise pass an is-defined check and match nothing."""
+        rc, out, _ = run_fabric("fabric_multi.ini", deploy_target="")
         self.assertNotEqual(rc, 0)
-        self.assertIn("matches no device in a fabric", out)
+        self.assertIn("This run is not scoped", out)
+
+    def test_targeting_everything_deliberately_is_allowed(self):
+        """The point is that the estate cannot be reached by ACCIDENT."""
+        rc, out, result = run_fabric("fabric_multi.ini", deploy_target="all")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":

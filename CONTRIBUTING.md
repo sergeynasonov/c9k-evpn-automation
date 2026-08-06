@@ -195,10 +195,14 @@ them together rather than stopping at the first.
 
 - **Secrets.** Everything comes from the environment. Nothing in this repo
   contains credentials, and it should stay that way.
-- **Site-specific values.** ASNs, addressing, NTP/SNMP/VTP identity live in
-  `group_vars/all/fabric.yml`, which is gitignored, with placeholders in
-  `fabric.yml.example`. **Role defaults carry none of it** — a plausible default
-  pointing at somebody else's network is worse than no default, so the roles
-  assert instead.
+- **This deployment's management identity.** NTP, SNMPv3 and VTP live in
+  `group_vars/all/deployment.yml`, which is gitignored, with placeholders in
+  `deployment.yml.example`. **Role defaults carry none of it** — a plausible
+  default pointing at somebody else's network is worse than no default, so the
+  role asserts instead.
+- **Anything describing a fabric.** It does not belong in a file at all: the
+  ASN, the anycast RP and each handoff's upstream ASN come from NetBox, per
+  fabric. A global value cannot describe more than one fabric, which is why
+  none of them survived.
 - Rendered candidates, ACM results, readiness output. All gitignored; they
   describe live devices.

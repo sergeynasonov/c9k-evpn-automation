@@ -3,7 +3,7 @@
 """Each fabric's underlay anycast RP, resolved from NetBox.
 
 The address every spine carries on a dedicated loopback, and that every switch
-points 'ip pim rp-address' at. It used to be one global in fabric.yml, which a
+points 'ip pim rp-address' at. It used to be one global value, which a
 multi-fabric estate does not have: each fabric runs its own underlay with its
 own RP.
 
@@ -44,11 +44,6 @@ HARNESS = os.path.join(FIXTURES, "anycast_rp_harness.yml")
 INVENTORY = os.path.join(FIXTURES, "msdp_two_fabrics.ini")
 
 ANSIBLE = shutil.which("ansible-playbook")
-
-# The fabric.yml fallbacks the harness sets, so a fallback is recognisable.
-FALLBACK_ADDR = "192.0.2.254"
-FALLBACK_INTF = "Loopback99999"
-
 
 def rp_tasks():
     """fabric_anycast_rp.yml with the NetBox query removed, verbatim otherwise."""
@@ -132,10 +127,6 @@ class TestPerFabricAnycastRp(unittest.TestCase):
     def test_the_other_fabric_is_not_pulled_in(self):
         self.assertEqual(self.result["hosts"]["rcore1"]["rp_address"], "10.1.0.100")
 
-    def test_netbox_wins_over_fabric_yml(self):
-        for host, data in self.result["hosts"].items():
-            self.assertNotEqual(data["rp_address"], FALLBACK_ADDR, host)
-
     def test_the_interface_comes_from_the_same_object_as_the_address(self):
         """Which is what stops the two drifting apart -- the failure the old
         pair of hand-maintained variables allowed."""
@@ -200,53 +191,34 @@ class TestAnycastRpIsRefusedWhenBroken(unittest.TestCase):
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
-class TestAnycastRpFallsBackWhileMigrating(unittest.TestCase):
-    """NetBox is populated fabric by fabric, so an un-migrated one keeps
-    rendering exactly as before -- loudly, not fatally."""
+class TestAFabricWithNoAnycastRpIsRefused(unittest.TestCase):
+    """There is no global underlay_rp_address to fall back to any more.
 
-    @classmethod
-    def setUpClass(cls):
-        cls.rc, cls.out, cls.result = run_rp(
-            [row("10.0.0.100/32", "core1"), row("10.0.0.100/32", "core2")])
+    Falling back used to be the migration path; now NetBox is the only source,
+    so a fabric with nothing modelled is a hard failure rather than a silent
+    substitution of somebody else's address.
+    """
 
-    def test_run_succeeds(self):
-        self.assertEqual(self.rc, 0, self.out)
+    def test_a_fabric_with_no_rp_is_refused(self):
+        rc, out, _ = run_rp([row("10.0.0.100/32", "core1"),
+                             row("10.0.0.100/32", "core2")])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("sites_evpn_remote", out)
+        self.assertIn("no anycast RP is modelled", out)
 
-    def test_the_unmigrated_fabric_uses_fabric_yml(self):
-        self.assertEqual(self.result["hosts"]["rcore1"]["rp_address"], FALLBACK_ADDR)
-        self.assertEqual(self.result["hosts"]["rcore1"]["rp_interface"], FALLBACK_INTF)
+    def test_a_spine_without_its_own_object_is_refused(self):
+        """Every spine needs one: the interface name comes from it, which is
+        what stops the address and the interface drifting apart."""
+        rc, out, _ = run_rp([row("10.0.0.100/32", "core1"),
+                             row("10.1.0.100/32", "rcore1")])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("core2", out)
+        self.assertIn("carries no anycast RP IPAddress of its own", out)
 
-    def test_the_migrated_fabric_is_unaffected(self):
-        self.assertEqual(self.result["hosts"]["core1"]["rp_address"], "10.0.0.100")
-
-    def test_it_is_reported_as_a_deprecation(self):
-        self.assertEqual(self.result["rp_missing"], ["sites_evpn_remote"])
-        self.assertIn("the fallback is deprecated", self.out)
-
-
-@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
-class TestOneSpineMissingItsObject(unittest.TestCase):
-    """A gap in NetBox, not a broken fabric: the address is already known from
-    the spines that do have one, so only the interface falls back."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.rc, cls.out, cls.result = run_rp(
-            [row("10.0.0.100/32", "core1"), row("10.1.0.100/32", "rcore1")])
-
-    def test_run_succeeds(self):
-        self.assertEqual(self.rc, 0, self.out)
-
-    def test_the_address_still_resolves_for_the_whole_fabric(self):
-        self.assertEqual(self.result["hosts"]["core2"]["rp_address"], "10.0.0.100")
-
-    def test_only_that_spines_interface_falls_back(self):
-        self.assertEqual(self.result["hosts"]["core2"]["rp_interface"], FALLBACK_INTF)
-        self.assertEqual(self.result["hosts"]["core1"]["rp_interface"], "Loopback60000")
-
-    def test_the_gap_is_reported(self):
-        self.assertIn("core2", self.out)
-        self.assertIn("carry no anycast RP IPAddress of their own", self.out)
+    def test_the_failure_says_there_is_no_fallback(self):
+        rc, out, _ = run_rp([row("10.0.0.100/32", "core1"),
+                             row("10.0.0.100/32", "core2")])
+        self.assertIn("no global underlay_rp_address to stand in", out)
 
 
 if __name__ == "__main__":
