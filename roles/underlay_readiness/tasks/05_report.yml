@@ -54,17 +54,35 @@
     readiness_unreachable: "{{ _unreachable | from_json }}"
     readiness_oversized_area: "{{ _oversized | from_json }}"
   vars:
-    # The switches this run was SUPPOSED to evaluate. A host pattern can select
-    # devices this automation renders nothing for -- ':' is a union, so
-    # 'deploy_target=<site>' picks up that site's distribution switches -- and
-    # fabric_resolve.yml drops them before any device is touched. They never had
-    # a readiness result and never should have, so counting them as UNREACHABLE
-    # sent an operator looking for a connectivity problem that did not exist.
-    # They are already named once, by fabric_resolve.yml, which is enough.
+    # The switches this run INTENDED to evaluate.
+    #
+    # Not "every targeted host": a host pattern selects more than that, and the
+    # ones this run deliberately dropped never had a readiness result and never
+    # should have -- counting those as UNREACHABLE sent an operator looking for
+    # a connectivity problem that did not exist. Each is already named once,
+    # where it was dropped, which is enough.
+    #
+    # Not "fabric nodes" either, which was the first attempt at this and was
+    # worse: a distribution switch between a leaf and a border IS evaluated --
+    # it carries fabric traffic -- so filtering it out reported four genuinely
+    # unready switches as "0 NOT ready" while writing remediation files for
+    # them.
+    #
+    # The rule is the two ways a host is deliberately dropped BEFORE this role
+    # runs, and nothing else. A host that is left after those is one we meant to
+    # check, so no result means it really was unreachable.
     _candidates: >-
       {%- set out = [] -%}
-      {%- for h in ansible_play_hosts_all if h in fabric_nodes -%}
-      {%-   set _ = out.append(h) -%}
+      {%- for h in ansible_play_hosts_all -%}
+      {#-   Dropped for having no site at all (fabric_resolve.yml). -#}
+      {%-   set fabric = hostvars[h].fabric_id | default('') -%}
+      {#-   Dropped as a spine unioned in from a fabric this run does not
+            target (acm_evpn 01_gather_data.yml). targeted_fabrics exists only
+            on that path; readiness.yml standalone unions nothing. -#}
+      {%-   set targeted = targeted_fabrics | default([]) -%}
+      {%-   if fabric and (not targeted or fabric in targeted) -%}
+      {%-     set _ = out.append(h) -%}
+      {%-   endif -%}
       {%- endfor -%}
       {{ out | to_json }}
     # Explicit loops rather than select/extract chains: a READY switch has an
