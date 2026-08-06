@@ -318,6 +318,20 @@ that fails it is never deployed to. `generate_evpn.yml` reports the same
 findings without failing, so you can still inspect a candidate for an unready
 switch.
 
+**It checks every switch in the fabric's transit path, not only the VTEPs.** A
+distribution switch between a fabric leaf and a fabric border carries fabric
+traffic, so its underlay has to be right even though `acm_evpn` renders nothing
+for it. The three checks that look VTEP-specific all still apply to one:
+
+| Check | Why it applies to a non-VTEP |
+|---|---|
+| `Loopback0` present, /32, in OSPF | It is the OSPF router-id and the management address, whether or not it sources VXLAN |
+| `ip pim register-source Loopback0` | PIM transits the switch, so it still registers |
+| `ip pim rp-address <anycast RP>` | Same reason — it needs to know the fabric's RP to forward multicast |
+
+Only the spine-specific block is skipped for them: carrying the anycast RP
+*address* on a loopback, and the MSDP mesh, belong to route reflectors.
+
 Everything below is a hard failure, because each one produces a fabric that
 configures cleanly and then silently fails to forward:
 

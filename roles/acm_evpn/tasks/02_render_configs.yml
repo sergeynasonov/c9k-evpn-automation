@@ -15,6 +15,41 @@
 #     rather than preserved forever;
 #   * candidate_omit_regex / candidate_prefix_managed in defaults.
 
+# A host pattern can select devices this role renders nothing for: ':' is a
+# UNION, so '-e deploy_target=<site>' selects every device in that site,
+# distribution switches included. Ansible applies ':&' intersections AFTER every
+# union regardless of position, so this cannot be a host pattern without also
+# intersecting away the spines the pattern deliberately unions in.
+#
+# Dropped HERE rather than in the resolver, and the placement is the point: the
+# underlay_readiness pre-flight runs before this, and it MUST see these devices.
+# A distribution switch sitting between a fabric leaf and a fabric border
+# carries fabric traffic, so a wrong MTU or a missing PIM on it breaks the
+# overlay exactly as a leaf would -- it just has no overlay config of its own.
+# Check everything in the path; render only for fabric nodes.
+- name: R1. Report targeted devices this role renders nothing for
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['Rendering nothing for ' ~ (_not_ours | from_json | length) ~ ' targeted'
+          ~ ' device(s) that are not fabric nodes: ' ~ (_not_ours | from_json | join(', '))
+          ~ ' — they carry no fabric role and no fabric_spine tag. Their underlay'
+          ~ ' was still checked; only the overlay render is skipped'] }}
+  vars:
+    _not_ours: >-
+      {%- set out = [] -%}
+      {%- for host in ansible_play_hosts | sort
+            if groups['all'] and host not in fabric_nodes -%}
+      {%-   set _ = out.append(host) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  when: _not_ours | from_json | length > 0
+  run_once: true
+  delegate_to: localhost
+
+- name: R2. Skip a device this role renders nothing for
+  ansible.builtin.meta: end_host
+  when: group_names | intersect(fabric_node_groups) | length == 0
+
 - name: Remove previously rendered candidate configs
   ansible.builtin.file:
     path: "{{ playbook_dir }}/switch-configuration"
@@ -65,7 +100,7 @@
 # deploy_target would be handed a full EVPN leaf configuration and have it
 # applied by 'acm replace'.
 #
-# fabric_resolve.yml drops non-fabric devices from the play before this runs, so
+# The end_host at the top of this file drops such devices before this runs, so
 # this assertion should never fire. It is here because "should never" is exactly
 # what was true of the union bug until it was looked at, and the cost of being
 # wrong is a wrong full-config replacement on a switch nobody meant to touch.

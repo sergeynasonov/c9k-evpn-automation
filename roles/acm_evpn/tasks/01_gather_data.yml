@@ -64,7 +64,7 @@
     _fabrics: >-
       {%- set out = [] -%}
       {%- for host in _target_hosts
-            if fabric_map.get(host) and fabric_map[host] not in out -%}
+            if fabric_map.get(host) in fabric_ids and fabric_map[host] not in out -%}
       {%-   set _ = out.append(fabric_map[host]) -%}
       {%- endfor -%}
       {{ out | sort | to_json }}
@@ -78,12 +78,15 @@
   ansible.builtin.assert:
     that:
       - targeted_fabrics | length > 0
-    fail_msg: >-
-      deploy_target={{ deploy_target | default('') }} matches no device that
-      belongs to a fabric. Check the pattern: a group name from the NetBox
-      inventory (sites_<slug>, site_group_<slug>) or a hostname. Refusing
-      rather than continuing, because the spines are unioned into the host
-      pattern and this run would otherwise deploy to all of them.
+    fail_msg: |-
+      deploy_target={{ deploy_target | default('') }} matches no device in a fabric.
+
+      Fabrics in this inventory: {{ fabric_ids | join(', ') or 'none' }}
+
+      Give a fabric above, a sites_<slug> within one, or a hostname. Ansible
+      only WARNS on a pattern matching nothing, so without this the run would
+      have continued with just the spines the host pattern unions in — and
+      deployed to all of them.
     quiet: true
   when: deploy_target is defined
   run_once: true
@@ -184,7 +187,13 @@
       {#- EVPN peers are addressed from NetBox, so a device managed on anything
           other than its VTEP loopback would have peers built from the wrong
           addresses -- sessions rendered to unreachable neighbours. -#}
-      {%- if (fabric_verify_peer_addressing | bool) and loopback0_ip != ansible_host -%}
+      {#- Fabric nodes only: this is about the addresses EVPN peers are built
+          from, and a device with no overlay has none. A distribution switch is
+          in the play so its underlay can be checked, and its Loopback0 is not
+          this role's business. -#}
+      {%- if (fabric_verify_peer_addressing | bool)
+             and group_names | intersect(fabric_node_groups) | length > 0
+             and loopback0_ip != ansible_host -%}
       {%-   set _ = bad.append(vtep_source_intf ~ ' is ' ~ loopback0_ip
                                ~ ' but the NetBox primary IP is ' ~ ansible_host
                                ~ ' -- these must agree, or set'

@@ -29,7 +29,16 @@
 # filter_plugins/fabric_peers.py depends on, and for the same reason.
 #
 # Sets, for every host in the play:
-#   fabric_map     {device: fabric group name} for the whole inventory
+#   fabric_map     {device: its site group or site} for the whole inventory
+#   fabric_nodes   every device acm_evpn RENDERS for, inventory-wide. NOT the
+#                  set this role checks: a distribution switch between a leaf
+#                  and a border carries fabric traffic, so its underlay has to
+#                  be fit even though nothing is rendered for it. Dropping
+#                  non-fabric devices is acm_evpn's business and happens there.
+#   fabric_ids     the subset of the sites/site groups that are FABRICS -- i.e. hold a fabric
+#                  node. An ordinary NetBox site holding WAN kit or servers is
+#                  in fabric_map but not in fabric_ids, and is asked for
+#                  nothing.
 #   fabric_id      this device's fabric, as an inventory group name ('' if none)
 #   fabric_members every device in this device's fabric, sorted
 #   fabric_asn     this fabric's iBGP ASN, from its sites in NetBox
@@ -58,6 +67,8 @@
 - name: 1. Resolve every device's fabric from inventory
   ansible.builtin.set_fact:
     fabric_map: "{{ (_resolved | from_json).map }}"
+    fabric_ids: "{{ (_resolved | from_json).fabrics }}"
+    fabric_nodes: "{{ (_resolved | from_json).nodes }}"
     fabric_ambiguous: "{{ (_resolved | from_json).ambiguous }}"
     fabric_orphans: "{{ (_resolved | from_json).orphans }}"
   vars:
@@ -113,7 +124,20 @@
       {%-     set _ = orphans.append(host) -%}
       {%-   endif -%}
       {%- endfor -%}
-      {{ {'map': out, 'ambiguous': ambiguous, 'orphans': orphans} | to_json }}
+
+      {#- A site or site group is a FABRIC only if it holds a fabric node. A
+          NetBox holds plenty of ordinary sites -- WAN kit, servers, campuses
+          this automation does not manage -- and they are not candidate fabrics
+          waiting to be configured. Without this they are asked for an ASN and
+          an anycast RP and reported for having neither. -#}
+      {%- set fabrics = [] -%}
+      {%- for host in fabric_nodes | unique | sort
+            if out.get(host) and out[host] not in fabrics -%}
+      {%-   set _ = fabrics.append(out[host]) -%}
+      {%- endfor -%}
+      {{ {'map': out, 'fabrics': fabrics | sort,
+          'nodes': fabric_nodes | unique | sort,
+          'ambiguous': ambiguous, 'orphans': orphans} | to_json }}
   when: fabric_id is not defined
   run_once: true
   delegate_to: localhost
@@ -170,46 +194,6 @@
   ansible.builtin.meta: end_host
   when: fabric_id | length == 0
 
-# A host pattern can select devices this automation renders nothing for. That is
-# not hypothetical: '-e deploy_target=<site>' selects EVERY device in the site,
-# distribution switches included, because ':' is a union and a distribution
-# switch has the site like any other device. Ansible applies ':&' intersections
-# AFTER every union regardless of where they appear in the pattern, so this
-# cannot be expressed as a host pattern without also intersecting away the
-# spines the pattern deliberately unions in -- which would leave their peer
-# lists stale, the exact bug the union exists to prevent.
-#
-# So it is enforced here instead, before anything touches a device. Reported
-# rather than silent: an operator who targeted a site deserves to know which of
-# its devices were left alone.
-- name: 6. Report devices in the play that this fabric renders nothing for
-  ansible.builtin.debug:
-    msg: >-
-      {{ ['Skipped ' ~ (_not_fabric_nodes | from_json | length) ~ ' targeted device(s) that'
-          ~ ' are not fabric nodes: ' ~ (_not_fabric_nodes | from_json | join(', '))
-          ~ ' — they carry no fabric role and no fabric_spine tag, so nothing is'
-          ~ ' rendered or deployed for them'] }}
-  vars:
-    _not_fabric_nodes: >-
-      {%- set out = [] -%}
-      {%- for host in ansible_play_hosts | sort -%}
-      {%-   set groups_of = [] -%}
-      {%-   for group in fabric_node_groups if host in groups.get(group, []) -%}
-      {%-     set _ = groups_of.append(group) -%}
-      {%-   endfor -%}
-      {%-   if groups_of | length == 0 -%}
-      {%-     set _ = out.append(host) -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {{ out | to_json }}
-  when: _not_fabric_nodes | from_json | length > 0
-  run_once: true
-  delegate_to: localhost
-
-- name: 7. Skip a device that is not a fabric node
-  ansible.builtin.meta: end_host
-  when: group_names | intersect(fabric_node_groups) | length == 0
-
 # --- the fabric's BGP ASN ---------------------------------------------------
 #
 # From NetBox, and from INVENTORY rather than a query: nb_inventory fetches
@@ -231,7 +215,7 @@
       {%- set out = {} -%}
       {%- set problems = [] -%}
       {%- set missing = [] -%}
-      {%- for fabric in fabric_map.values() | unique | sort -%}
+      {%- for fabric in fabric_ids -%}
       {#-   Collect (site, asn) across every device in the fabric, so a
             disagreement can name the sites rather than just the fabric. -#}
       {%-   set seen = {} -%}

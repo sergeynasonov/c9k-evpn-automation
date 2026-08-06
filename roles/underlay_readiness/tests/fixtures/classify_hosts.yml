@@ -1,0 +1,32 @@
+---
+# One host per case the readiness summary has to tell apart. 'readiness_failures'
+# is what 02_check.yml sets: an empty list means ready, a non-empty one means
+# not. A host that never got the fact was not evaluated.
+all:
+  hosts:
+    core1:
+      fabric_id: site_group_evpn_campus
+      readiness_failures: []
+    access1-1:
+      fabric_id: site_group_evpn_campus
+      readiness_failures: []
+    # A distribution switch: checked, and NOT ready. It carries fabric traffic
+    # between a leaf and a border, so its underlay matters even though acm_evpn
+    # renders nothing for it.
+    dist1-1:
+      fabric_id: site_group_evpn_campus
+      readiness_failures:
+        - {msg: "missing global: system mtu 9100", parents: [], lines: ["system mtu 9100"]}
+    # Meant to be checked, no result: genuinely unreachable.
+    downswitch:
+      fabric_id: site_group_evpn_campus
+    # Dropped by the resolver for having no site at all. Already reported there.
+    orphan1:
+      fabric_id: ""
+    # A spine unioned into the host pattern from a fabric this run is not
+    # targeting, and dropped for it. Already reported there.
+    rcore1:
+      fabric_id: sites_evpn_remote
+      readiness_failures: []
+  vars:
+    ansible_connection: local

@@ -19,10 +19,18 @@
 # depends on fabric-wide state, so a narrow run is exactly as correct as a wide
 # one. The MSDP mesh check reads its peers from the inventory rather than from
 # the other spines' facts, so it still works with one spine in the play.
+# Distribution switches are included deliberately. This role checks the UNDERLAY,
+# and a distribution switch between a fabric leaf and a fabric border carries
+# fabric traffic -- a wrong MTU or a missing PIM on it breaks the overlay exactly
+# as it would on a leaf. acm_evpn renders nothing for them; that is a separate
+# question, decided in that role.
 - name: Verify underlay readiness
+  vars:
+    readiness_default_target: >-
+      device_roles_fabric_border:device_roles_fabric_leaf:tags_fabric_spine:device_roles_distribution_switch
   hosts: >-
     {{ deploy_target
-       | default('device_roles_fabric_border:device_roles_fabric_leaf:tags_fabric_spine') }}
+       | default(readiness_default_target) }}
   gather_facts: false
   # LOAD-BEARING. ansible.cfg sets 'strategy = free' globally, and run_once is
   # NOT supported under it -- Ansible warns and runs the task for every host.

@@ -1,0 +1,41 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# Drives the REAL classify task from 05_report.yml. Driven by
+# tests/unit/test_readiness_summary.py, which lifts that one task out of the
+# shipped file so the test cannot drift from it.
+#
+# No device: classification is pure set arithmetic over facts 02_check.yml has
+# already produced, which the fixture inventory supplies directly.
+
+- name: Readiness summary classification
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  # The role's OWN defaults, copied in by the test rather than restated here --
+  # the classify task reads readiness_ospf_routers_warn from them, and a test
+  # that hardcoded the threshold would keep passing after someone changed it.
+  # Loaded lazily, so the site-specific entries they reference are never
+  # evaluated.
+  vars_files:
+    - defaults.yml
+  tasks:
+    - name: Classify
+      ansible.builtin.import_tasks: classify_tasks.yml
+
+    - name: Write the result for the test to read
+      ansible.builtin.copy:
+        content: "{{ _result | to_nice_json }}"
+        dest: "{{ result_file }}"
+        mode: "0644"
+      vars:
+        _result:
+          ready: "{{ readiness_ready | sort }}"
+          unready: "{{ readiness_unready | sort }}"
+          unreachable: "{{ readiness_unreachable | sort }}"
+          counted: "{{ (readiness_ready | length)
+                       + (readiness_unready | length)
+                       + (readiness_unreachable | length) }}"
+      run_once: true
+      delegate_to: localhost
