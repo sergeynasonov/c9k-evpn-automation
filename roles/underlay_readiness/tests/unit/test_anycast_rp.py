@@ -3,7 +3,7 @@
 """Each fabric's underlay anycast RP, resolved from NetBox.
 
 The address every spine carries on a dedicated loopback, and that every switch
-points 'ip pim rp-address' at. It used to be one global in fabric.yml, which a
+points 'ip pim rp-address' at. It used to be one global value, which a
 multi-fabric estate does not have: each fabric runs its own underlay with its
 own RP.
 
@@ -192,7 +192,7 @@ class TestAnycastRpIsRefusedWhenBroken(unittest.TestCase):
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
 class TestAFabricWithNoAnycastRpIsRefused(unittest.TestCase):
-    """There is no underlay_rp_address in fabric.yml to fall back to any more.
+    """There is no global underlay_rp_address to fall back to any more.
 
     Falling back used to be the migration path; now NetBox is the only source,
     so a fabric with nothing modelled is a hard failure rather than a silent
@@ -218,7 +218,7 @@ class TestAFabricWithNoAnycastRpIsRefused(unittest.TestCase):
     def test_the_failure_says_there_is_no_fallback(self):
         rc, out, _ = run_rp([row("10.0.0.100/32", "core1"),
                              row("10.0.0.100/32", "core2")])
-        self.assertIn("NetBox is the only source", out)
+        self.assertIn("no global underlay_rp_address to stand in", out)
 
 
 if __name__ == "__main__":

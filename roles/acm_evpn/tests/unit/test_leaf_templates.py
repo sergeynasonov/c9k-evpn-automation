@@ -194,7 +194,7 @@ class TestL2OnlyOverlay(unittest.TestCase):
 
 
 class TestHandoffUpstreamAsn(unittest.TestCase):
-    """The eBGP handoff's remote-as comes from the VLAN, not from fabric.yml.
+    """The eBGP handoff's remote-as comes from the VLAN, not from a global.
 
     The global ``evpn_ext_bgp_asn`` had one value for every fabric and every
     tenant, and is gone. netbox_evpn_data.py refuses a handoff that carries no

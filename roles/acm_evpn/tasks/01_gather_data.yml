@@ -22,9 +22,6 @@
 # NetBox queries and the transform live in netbox_facts.yml, which
 # trm_allocate.yml imports too. Nothing below this line is shared: it all
 # touches the device.
-- name: Verify site configuration
-  ansible.builtin.import_tasks: assert_site_config.yml
-
 # Which fabric each device is in, resolved once from inventory and read by
 # everything site-scoped below. Lives in underlay_readiness because that role
 # needs the same answer for its fabric-wide MSDP check and this role already

@@ -263,8 +263,8 @@
       to choose between two — and nothing to fall back to. In NetBox, assign ONE
       ASN object to every site in the fabric, and the same one to all of them.
 
-      There is no longer a global evpn_bgp_asn in fabric.yml to stand in: NetBox
-      is the only source for this.
+      There is no global evpn_bgp_asn to stand in any more: NetBox is the only
+      source for this.
     success_msg: "every fabric has exactly one BGP ASN"
     quiet: true
   when: fabric_asn is not defined

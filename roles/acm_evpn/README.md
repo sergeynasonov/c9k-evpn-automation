@@ -95,7 +95,7 @@ have.
 
 #### What a fabric owns in NetBox
 
-**NetBox is the only source for all three. There is no `fabric.yml` fallback** —
+**NetBox is the only source for all three. There is no global fallback** —
 a single global value cannot describe more than one fabric, which is the whole
 point. A fabric missing any of them fails the run and names what is missing.
 
@@ -106,8 +106,7 @@ point. A fabric missing any of them fails the run and names what is missing.
 | **Upstream ASN** | `upstream_asn` on each `vrf_l3_handoff_vlan` — per handoff, since a border can face a different upstream per tenant. | The render is refused, naming every offending VLAN. Rendering `remote-as` with nothing after it is a parser error on the switch, after the candidate has reached every border. |
 
 Because the RP interface comes from the same object as the address, the two can
-no longer drift apart — which is what two independent `fabric.yml` values
-allowed. Within a fabric every spine's RP address must be **identical**;
+no longer drift apart — which is what two independent global values allowed. Within a fabric every spine's RP address must be **identical**;
 differing addresses configure cleanly on every switch and then silently fail to
 forward.
 

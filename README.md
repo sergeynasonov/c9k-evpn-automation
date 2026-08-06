@@ -69,14 +69,18 @@ python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 venv/bin/ansible-galaxy collection install -r requirements.yml
 
-cp group_vars/all/fabric.yml.example group_vars/all/fabric.yml
-$EDITOR group_vars/all/fabric.yml          # your ASNs, addressing, NTP/SNMP/VTP
+cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
+$EDITOR group_vars/all/deployment.yml     # your NTP / SNMP / VTP identity
 ```
 
 Export `NETBOX_API` and `NETBOX_TOKEN`, plus the switch credentials
 (`ios_username`, `ios_password`) — see [SETUP.md](SETUP.md). Nothing in this
-repository contains secrets, and `fabric.yml` is gitignored so your fabric's
-addressing never gets committed.
+repository contains secrets, and `deployment.yml` is gitignored so your NTP,
+SNMP and VTP values never get committed.
+
+`deployment.yml` is needed only by `readiness.yml`, which applies the platform
+baseline. **`generate_evpn.yml` and `deploy_evpn.yml` need no configuration at
+all** — everything the fabric is comes from NetBox.
 
 Then, per switch, in order:
 
@@ -286,8 +290,8 @@ router ospf 1
 
 `64513` is the fabric ASN, read from the ASN object on the fabric's NetBox
 sites. `64512` is upstream's, from the handoff VLAN's `upstream_asn`. Both come
-from NetBox only — there is no `fabric.yml` fallback, because one global value
-cannot describe more than one fabric. **Ownership
+from NetBox only — there is no global fallback anywhere, because one global
+value cannot describe more than one fabric. **Ownership
 of this stanza is by ASN**: the automation regenerates neighbours in the fabric
 ASN — the EVPN peer group and the border-to-border session — and preserves
 everything in any other ASN verbatim. So this eBGP session survives every
@@ -594,7 +598,8 @@ the evicted files. Set `acm_checkpoint: false` to disable, or point
 | Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a `trm_allocate.yml` run |
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
 | Admin or SNMPv3 password | Change it in your secret store — they are read from the environment, never stored here — then `ansible-playbook readiness.yml` |
-| SNMP/NTP/VTP identity, ASNs, addressing | Edit `group_vars/all/fabric.yml`, then `ansible-playbook readiness.yml` |
+| SNMP/NTP/VTP identity | Edit `group_vars/all/deployment.yml`, then `ansible-playbook readiness.yml` |
+| Fabric ASN, anycast RP, upstream ASN | Edit NetBox — see [the data contract](roles/acm_evpn/README.md). Nothing to edit here |
 | What the baseline or the assertions contain | Edit `roles/underlay_readiness/defaults/main.yml` (behaviour, not site values), then `ansible-playbook readiness.yml` |
 
 ---

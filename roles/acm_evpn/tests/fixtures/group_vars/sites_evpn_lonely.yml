@@ -9,7 +9,7 @@
 # same as the per-host variable the real inventory produces.
 #
 # The ASN is REQUIRED: a fabric without exactly one is refused, with no
-# fabric.yml fallback to stand in.
+# global fallback to stand in.
 sites:
   - id: 61
     slug: evpn_lonely

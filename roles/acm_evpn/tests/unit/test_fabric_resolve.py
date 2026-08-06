@@ -560,7 +560,7 @@ class TestFabricAsnIsRefusedWhenAmbiguous(unittest.TestCase):
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
 class TestAFabricWithNoAsnIsRefused(unittest.TestCase):
-    """There is no evpn_bgp_asn in fabric.yml to fall back to any more.
+    """There is no global evpn_bgp_asn to fall back to any more.
 
     Falling back was the migration path; NetBox is now the only source, so a
     fabric whose sites carry no ASN fails rather than quietly rendering every
@@ -582,7 +582,7 @@ class TestAFabricWithNoAsnIsRefused(unittest.TestCase):
         self.assertIn("no site in it carries an ASN object", self.out)
 
     def test_it_says_there_is_no_fallback(self):
-        self.assertIn("no longer a global evpn_bgp_asn in fabric.yml", self.out)
+        self.assertIn("no global evpn_bgp_asn to stand in", self.out)
 
     def test_nothing_renders(self):
         """Fatal for the run, not a per-fabric skip: a site tree that cannot

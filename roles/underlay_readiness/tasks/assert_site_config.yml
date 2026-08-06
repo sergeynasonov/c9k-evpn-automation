@@ -2,31 +2,35 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
 #
-# Site configuration is deliberately absent from the role defaults, so this
-# fails loudly rather than rendering against a plausible-looking value that
-# belongs to someone else's network.
+# This deployment's management identity is deliberately absent from the role
+# defaults, so this fails loudly rather than configuring a switch to point at an
+# NTP server or an SNMP collector belonging to someone else's network.
+#
+# Only THIS role needs it -- it applies the platform baseline. acm_evpn requires
+# nothing of the kind, so generate_evpn.yml and deploy_evpn.yml run on a fresh
+# clone with no configuration at all.
 
-- name: Site configuration is present
+- name: Deployment configuration is present
   ansible.builtin.assert:
     that:
       - _missing | from_json | length == 0
     fail_msg: |-
-      Site configuration is incomplete — {{ _missing | from_json | length }} key(s) missing:
+      Deployment configuration is incomplete — {{ _missing | from_json | length }} key(s) missing:
       {% for k in _missing | from_json %}
         - {{ k }}
       {% endfor %}
-      These describe YOUR fabric (ASNs, addressing, NTP/SNMP/VTP identity), so
-      the roles ship no defaults for them. Create the file and fill it in:
+      These are THIS deployment's NTP, SNMPv3 and VTP identity — real addresses
+      and names on your network — so the role ships no defaults for them.
+      Create the file and fill it in:
 
-        cp group_vars/all/fabric.yml.example group_vars/all/fabric.yml
-        $EDITOR group_vars/all/fabric.yml
+        cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
+        $EDITOR group_vars/all/deployment.yml
 
-      fabric.yml is gitignored, so it stays yours and is never published.
-    success_msg: "site configuration present"
+      deployment.yml is gitignored, so it stays yours and is never published.
+    success_msg: "deployment configuration present"
     quiet: true
   vars:
     _required:
-      - vtep_source_intf
       - ntp_server_1
       - ntp_server_2
       - snmp_v3_user

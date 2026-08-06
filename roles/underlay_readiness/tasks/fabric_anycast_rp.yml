@@ -155,8 +155,8 @@
       {{ underlay_anycast_rp_tags | join(' or ') }}, and each assigned to that
       spine's RP loopback interface.
 
-      There is no longer an underlay_rp_address in fabric.yml to stand in:
-      NetBox is the only source for this.
+      There is no global underlay_rp_address to stand in any more: NetBox is
+      the only source for this.
     success_msg: "every fabric has one anycast RP"
     quiet: true
   when: fabric_rp_address is not defined
