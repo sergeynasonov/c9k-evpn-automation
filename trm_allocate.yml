@@ -1,8 +1,10 @@
 ---
 # Allocate PIM register-source addresses for TRM's external-RP VRFs.
 #
-#   dry run : ansible-playbook trm_allocate.yml --check --diff
-#   apply   : ansible-playbook trm_allocate.yml
+#   dry run : ansible-playbook trm_allocate.yml -e deploy_target=<fabric> --check --diff
+#   apply   : ansible-playbook trm_allocate.yml -e deploy_target=<fabric>
+#
+# deploy_target is REQUIRED; fabric_resolve.yml refuses an unscoped run.
 #   scoped  : ansible-playbook trm_allocate.yml -e deploy_target=access1-1
 #
 # This is the ONLY playbook that writes to NetBox. It touches no device.

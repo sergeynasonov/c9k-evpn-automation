@@ -4,8 +4,10 @@
 # role owns -- SNMPv3 and the platform baseline -- in merge mode, so it adds and
 # never removes.
 #
-#   ansible-playbook readiness.yml
+#   ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus
 #   ansible-playbook readiness.yml -e deploy_target=access1-1
+#
+# deploy_target is REQUIRED; fabric_resolve.yml refuses an unscoped run.
 #
 # acm_evpn imports assert_only.yml instead, which gathers and checks only.
 
