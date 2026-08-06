@@ -95,6 +95,10 @@ def ip(id_, address):
 
 CORP_VRF = vrf("CORP", "199", "239.17.10.1")
 
+# Every L3 handoff must carry the ASN of the peer it hands off to -- there is no
+# global fallback. Fixtures that are not ABOUT the ASN just use this.
+HANDOFF_ASN = {"upstream_asn": 64512}
+
 
 # ---------------------------------------------------------------------------
 # IP math helpers
@@ -278,10 +282,10 @@ class TestHandoffVlan(unittest.TestCase):
     def test_handoff_local_and_neighbor(self):
         vlan_list = [
             vlan(197, "VRF_CORP_HANDOFF197", role="vrf_l3_handoff_vlan", tags=["core1"],
-                 scope_type="SiteGroup", scope_id="3",
+                 scope_type="SiteGroup", scope_id="3", cfd=HANDOFF_ASN,
                  prefixes=[prefix("10.67.118.6/31", vrf=CORP_VRF)]),
             vlan(198, "VRF_CORP_HANDOFF198", role="vrf_l3_handoff_vlan", tags=["core2"],
-                 scope_type="SiteGroup", scope_id="3",
+                 scope_type="SiteGroup", scope_id="3", cfd=HANDOFF_ASN,
                  prefixes=[prefix("10.67.118.8/31", vrf=CORP_VRF)]),
         ]
         result = build_evpn_data(vlan_list, [], my_site=None, my_sg="3")
@@ -296,7 +300,7 @@ class TestHandoffVlan(unittest.TestCase):
 
     def test_non_slash31_handoff_uses_usable_bounds(self):
         vlan_list = [
-            vlan(250, "VRF_CORP_HANDOFF_WIDE", role="vrf_l3_handoff_vlan", scope_type="SiteGroup", scope_id="3",
+            vlan(250, "VRF_CORP_HANDOFF_WIDE", role="vrf_l3_handoff_vlan", scope_type="SiteGroup", scope_id="3", cfd=HANDOFF_ASN,
                  prefixes=[prefix("10.0.0.0/30", vrf=CORP_VRF)])
         ]
         result = build_evpn_data(vlan_list, [], my_site=None, my_sg="3")
@@ -306,7 +310,7 @@ class TestHandoffVlan(unittest.TestCase):
 
     def test_ipv6_handoff_populated(self):
         vlan_list = [
-            vlan(251, "VRF_CORP_HANDOFF_V6", role="vrf_l3_handoff_vlan", scope_type="SiteGroup", scope_id="3",
+            vlan(251, "VRF_CORP_HANDOFF_V6", role="vrf_l3_handoff_vlan", scope_type="SiteGroup", scope_id="3", cfd=HANDOFF_ASN,
                  prefixes=[prefix("2001:db8:ee::/127", vrf=CORP_VRF)])
         ]
         result = build_evpn_data(vlan_list, [], my_site=None, my_sg="3")
@@ -333,13 +337,37 @@ class TestUpstreamAsn(unittest.TestCase):
     def test_carried_through_to_the_handoff(self):
         self.assertEqual(self.handoff({"upstream_asn": 64512})["upstream_asn"], 64512)
 
-    def test_absent_is_none_so_the_template_can_fall_back(self):
-        self.assertIsNone(self.handoff()["upstream_asn"])
+    def test_absent_fails_the_render(self):
+        """There is no global fallback any more. A handoff with no ASN would
+        render 'neighbor <ip> remote-as' with nothing after it -- a parser error
+        on the switch, after the candidate has reached every border."""
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            self.handoff()
+        self.assertIn("197", str(ctx.exception))
+        self.assertIn("upstream_asn", str(ctx.exception))
 
-    def test_blank_is_none_rather_than_zero(self):
-        """A cleared custom field arrives as "" and must read as 'not set', not
-        as ASN 0 -- which would render a session that never comes up."""
-        self.assertIsNone(self.handoff({"upstream_asn": ""})["upstream_asn"])
+    def test_blank_fails_the_same_way(self):
+        """A cleared custom field arrives as "", which must read as 'not set'
+        rather than as ASN 0 -- a session that never comes up."""
+        with self.assertRaises(AnsibleFilterError):
+            self.handoff({"upstream_asn": ""})
+
+    def test_the_failure_names_every_offending_handoff(self):
+        """One deploy per missing ASN is not a workflow."""
+        vlan_list = [
+            vlan(197, "H197", role="vrf_l3_handoff_vlan", tags=["core1"],
+                 scope_type="SiteGroup", scope_id="3",
+                 prefixes=[prefix("10.67.118.6/31", vrf=CORP_VRF)]),
+            vlan(198, "H198", role="vrf_l3_handoff_vlan", tags=["core2"],
+                 scope_type="SiteGroup", scope_id="3",
+                 prefixes=[prefix("10.67.118.8/31", vrf=CORP_VRF)]),
+        ]
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            build_evpn_data(vlan_list, [], my_site=None, my_sg="3")
+        msg = str(ctx.exception)
+        self.assertIn("2 problems", msg)
+        self.assertIn("197", msg)
+        self.assertIn("198", msg)
 
     def test_a_text_typed_field_still_coerces(self):
         """The field is Integer, but the same field typed as text arrives as a
@@ -601,7 +629,7 @@ class TestFullFabricIntegration(unittest.TestCase):
             vlan(199, "VRF_CORP_CORE_VLAN", role="core_vlan", scope_type="SiteGroup", scope_id="3",
                  prefixes=[prefix("169.254.255.0/30", vrf=CORP_VRF)]),
             vlan(197, "VRF_CORP_HANDOFF197", role="vrf_l3_handoff_vlan", tags=["core1"],
-                 scope_type="SiteGroup", scope_id="3",
+                 scope_type="SiteGroup", scope_id="3", cfd=HANDOFF_ASN,
                  prefixes=[prefix("10.67.118.6/31", vrf=CORP_VRF)]),
             # L2-only overlay: enrolled by l2vni, its own BUM group, no prefix.
             vlan(500, "GLOBAL_GUEST", cfd={"l2vni": 10500, "mcast_group": "239.17.5.1"}),
@@ -691,7 +719,7 @@ class TestL2VniDerivation(unittest.TestCase):
     def test_non_edge_vlans_get_no_l2vni(self):
         vlans = [
             vlan(199, "CORE", role="core_vlan", prefixes=[prefix("169.254.1.0/30", vrf=CORP_VRF)]),
-            vlan(197, "HANDOFF", role="vrf_l3_handoff_vlan",
+            vlan(197, "HANDOFF", role="vrf_l3_handoff_vlan", cfd=HANDOFF_ASN,
                  prefixes=[prefix("10.67.118.4/31", vrf=CORP_VRF)]),
         ]
         result = self._build(vlans)
@@ -1096,7 +1124,7 @@ class TestOverlayEnrolmentIsOptIn(unittest.TestCase):
         vlan_list = [
             vlan(199, "CORE", role="core_vlan",
                  prefixes=[prefix("169.254.255.0/30", vrf=CORP_VRF)]),
-            vlan(197, "HANDOFF", role="vrf_l3_handoff_vlan", tags=["core1"],
+            vlan(197, "HANDOFF", role="vrf_l3_handoff_vlan", tags=["core1"], cfd=HANDOFF_ASN,
                  prefixes=[prefix("10.67.118.4/31", vrf=CORP_VRF)]),
         ]
         result = build_evpn_data(vlan_list, [], my_site=SITE, my_sg=SG)

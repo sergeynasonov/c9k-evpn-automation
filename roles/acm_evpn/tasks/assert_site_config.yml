@@ -25,12 +25,11 @@
     success_msg: "site configuration present"
     quiet: true
   vars:
+    # The fabric ASN, the upstream ASN and the anycast RP were all here once.
+    # They now come from NetBox with no fallback, so requiring them in fabric.yml
+    # would demand a value nothing reads.
     _required:
-      - evpn_bgp_asn
-      - evpn_ext_bgp_asn
       - vtep_source_intf
-      - underlay_rp_address
-      - anycast_rp_interface
     _missing: >-
       {%- set bad = [] -%}
       {%- for k in _required if k not in hostvars[inventory_hostname] -%}

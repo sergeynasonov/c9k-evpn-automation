@@ -80,7 +80,6 @@
           fabric_map: "{{ fabric_map }}"
           fabric_ids: "{{ fabric_ids }}"
           fabric_asn_map: "{{ fabric_asn_map }}"
-          fabric_asn_missing: "{{ fabric_asn_missing }}"
           hosts: "{{ _hosts | from_json }}"
       run_once: true
       delegate_to: localhost

@@ -657,14 +657,12 @@ def _upstream_asn(vlan: Dict[str, Any]) -> Optional[int]:
 
     Per VRF and per handoff rather than one global for the whole fabric: a
     border can hand off to a different upstream per tenant, and two fabrics
-    almost certainly do. Absent means "not modelled yet" and the render falls
-    back to ``evpn_ext_bgp_asn`` from fabric.yml, reported by
-    02b_netbox_hygiene.yml.
+    almost certainly do.
 
-    A PRESENT but unusable value fails the render instead of falling back.
-    Silently substituting the global for a value someone set deliberately
-    would render an eBGP session to the wrong ASN, which does not come up and
-    gives no clue why.
+    Returns None when absent. REQUIRED on a handoff -- see
+    _validate_handoff_asns -- but read for every VLAN, and harmless elsewhere.
+    A present but unusable value fails here rather than anywhere later, since
+    the wrong number renders an eBGP session that simply never comes up.
     """
     raw = (vlan.get("custom_field_data") or {}).get("upstream_asn")
     if raw is None or raw == "":
@@ -954,6 +952,38 @@ def _validate_mcast_ownership(fabric_vlans: Dict[str, Any]) -> None:
         )
 
 
+
+def _validate_handoff_asns(vrfs: Dict[str, Any]) -> None:
+    """Every L3 handoff must carry the ASN of the peer it is handing off to.
+
+    There is no global to fall back on any more: ``evpn_ext_bgp_asn`` was one
+    number for every fabric and every tenant, and it is gone. A handoff with no
+    ``upstream_asn`` would render ``neighbor <ip> remote-as`` with nothing after
+    it, which is a parser error on the switch at ``acm replace ... validate`` --
+    after the candidate has reached every border. Failing here names the VLAN
+    instead.
+    """
+    errors: List[str] = []
+    for vrf_name in sorted(vrfs):
+        handoffs = vrfs[vrf_name].get("handoff_vlans") or {}
+        for vid in sorted(handoffs, key=lambda v: int(v)):
+            if handoffs[vid].get("upstream_asn"):
+                continue
+            errors.append(
+                "VLAN {} '{}' is an L3 handoff in VRF '{}' with no 'upstream_asn'. "
+                "Set it on the VLAN in NetBox -- it is the remote-as of a real "
+                "eBGP session, so there is nothing to derive it from".format(
+                    vid, handoffs[vid].get("name"), vrf_name)
+            )
+
+    if errors:
+        raise AnsibleFilterError(
+            "EVPN handoff configuration is invalid ({} problem{}):\n  - {}".format(
+                len(errors), "" if len(errors) == 1 else "s", "\n  - ".join(errors)
+            )
+        )
+
+
 def _build_ip_map(ip_list: Iterable[Dict[str, Any]]) -> Dict[str, str]:
     """id (str) -> bare host address (str), stripped of any /prefixlen.
 
@@ -1001,8 +1031,8 @@ def _new_vlan_record(vlan: Dict[str, Any], role: str, scope_type: Optional[str],
         "local_ip_v4": "", "neighbor_ip_v4": "",
         "prefix_ipv6": "", "network_ipv6": "", "netmask_ipv6": "",
         "local_ip_v6": "", "neighbor_ip_v6": "",
-        # eBGP peer ASN for an L3 handoff. None means the VLAN does not carry
-        # one and border_config.j2 falls back to the global evpn_ext_bgp_asn.
+        # eBGP peer ASN for an L3 handoff. Required on one; see
+        # _validate_handoff_asns. None elsewhere and unused there.
         "upstream_asn": _upstream_asn(vlan),
         "vrf_name": "", "vrf_rd": "", "vrf_mcast_group": "",
         "vrf_l3vni": None, "vrf_l3vni_raw": None,
@@ -1344,6 +1374,7 @@ def build_evpn_data(
                           fabric_l3_bad.get(_host_fabric, {}),
                           fabric_l2.get(_host_fabric, {}), l3vni_base)
     _validate_mcast_ownership(fabric_edge_vlans.get(_host_fabric, {}))
+    _validate_handoff_asns(vrfs)
     _validate_multicast_groups(all_edge_vlans, reserved_mcast_prefixes,
                                allowed_mcast_prefixes, l3vni_base)
 

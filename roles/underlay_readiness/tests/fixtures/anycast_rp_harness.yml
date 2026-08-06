@@ -16,10 +16,6 @@
   gather_facts: false
   strategy: linear
   vars:
-    # The deprecated fabric.yml fallbacks, set here so the tests can tell a
-    # resolved value from a fallback by its value alone.
-    underlay_rp_address: 192.0.2.254
-    anycast_rp_interface: Loopback99999
   tasks:
     - name: Resolve fabric membership
       ansible.builtin.import_role:
@@ -57,7 +53,6 @@
           {{ out | to_json }}
         _result:
           rp_map: "{{ fabric_rp_map }}"
-          rp_missing: "{{ fabric_rp_missing }}"
           rp_devices: "{{ fabric_rp_devices }}"
           hosts: "{{ _hosts | from_json }}"
       run_once: true

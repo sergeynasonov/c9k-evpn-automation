@@ -197,8 +197,8 @@ class TestHandoffUpstreamAsn(unittest.TestCase):
     """The eBGP handoff's remote-as comes from the VLAN, not from fabric.yml.
 
     The global ``evpn_ext_bgp_asn`` had one value for every fabric and every
-    tenant. It survives only as a fallback while NetBox is being populated, and
-    is reported as a deprecation whenever it is used.
+    tenant, and is gone. netbox_evpn_data.py refuses a handoff that carries no
+    ``upstream_asn``, so the template can render it unconditionally.
     """
 
     def handoff(self, upstream_asn, vid="197"):
@@ -216,24 +216,18 @@ class TestHandoffUpstreamAsn(unittest.TestCase):
     def test_the_vlans_own_asn_is_used(self):
         self.assertEqual(self.remote_as_for(self.handoff(64500)), ["64500"])
 
-    def test_it_wins_over_the_global(self):
-        """The fixture's global is 64512, so a rendered 64500 can only have come
-        from the VLAN."""
+    def test_nothing_but_the_vlans_own_asn_is_rendered(self):
+        """The fixture still defines evpn_ext_bgp_asn=64512, so seeing it would
+        mean a fallback had crept back in."""
         self.assertNotIn("64512", self.remote_as_for(self.handoff(64500)))
-
-    def test_absent_falls_back_to_the_global(self):
-        self.assertEqual(self.remote_as_for(self.handoff(None)), ["64512"])
 
     def test_a_four_byte_asn_renders_whole(self):
         self.assertEqual(self.remote_as_for(self.handoff(4200000000)), ["4200000000"])
 
-    def test_only_the_remote_as_line_changes(self):
-        """The other three neighbour lines are not ASN-dependent and must be
-        rendered for the session either way."""
-        for asn in (64500, None):
-            out = self.handoff(asn)
-            for suffix in ("fall-over bfd", "activate", "route-map WAN-INBOUND-FILTER in"):
-                self.assertIn("  neighbor 10.67.118.6 " + suffix, out)
+    def test_the_whole_neighbour_block_is_rendered(self):
+        out = self.handoff(64500)
+        for suffix in ("fall-over bfd", "activate", "route-map WAN-INBOUND-FILTER in"):
+            self.assertIn("  neighbor 10.67.118.6 " + suffix, out)
 
 
 class TestBorderMeshIsFabricScoped(unittest.TestCase):

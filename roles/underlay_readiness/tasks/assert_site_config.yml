@@ -27,7 +27,6 @@
   vars:
     _required:
       - vtep_source_intf
-      - underlay_rp_address
       - ntp_server_1
       - ntp_server_2
       - snmp_v3_user

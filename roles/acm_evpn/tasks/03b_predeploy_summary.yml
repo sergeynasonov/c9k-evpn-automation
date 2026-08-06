@@ -6,9 +6,10 @@
 # the rendered candidate in switch-configuration/, which the operator diffs
 # directly. A console summary there duplicates the artifact, worse.
 #
-# NetBox data hygiene moved to 02b_netbox_hygiene.yml, which BOTH paths run --
-# a VLAN that configures nothing appears in no artifact, so the console line is
-# the only place it can be seen.
+# There was a NetBox-hygiene report beside this one, listing VLANs that produce
+# no configuration. It is gone: enrolment is opt-in, so a VLAN that has not
+# opted in is not a finding, and the deprecation notices it also carried went
+# with the fallbacks they were counting down.
 #
 # Two rules learned from the first version:
 #

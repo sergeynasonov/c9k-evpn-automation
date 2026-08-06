@@ -5,50 +5,23 @@
 #   $EDITOR group_vars/all/fabric.yml
 #
 # fabric.yml is gitignored. Everything below describes one particular fabric --
-# its addressing, its ASNs, its naming -- so it must never be committed, and the
-# roles carry no defaults for it. A wrong value here is better than a plausible
-# default pointing at somebody else's network, so the roles assert these are set
-# and fail with a pointer to this file rather than rendering something wrong.
+# its addressing, its naming, its management identity -- so it must never be
+# committed, and the roles carry no defaults for it. A wrong value here is
+# better than a plausible default pointing at somebody else's network.
+#
+# WHAT IS NOT HERE, AND WILL NOT COME BACK: the fabric ASN, the upstream ASN and
+# the underlay anycast RP. All three are per-fabric, and a file holding one
+# global value for each cannot describe more than one fabric. They come from
+# NetBox now, with no fallback -- see roles/acm_evpn/README.md, "What a fabric
+# owns in NetBox". A fabric missing any of them fails the run and says so.
 #
 # Addresses use RFC 5737 documentation ranges. Replace all of them.
-
-# --- BGP ------------------------------------------------------------------
-#
-# BOTH KEYS BELOW ARE DEPRECATED FALLBACKS. They are single global values, and
-# a multi-fabric estate has neither: each fabric has its own iBGP ASN, and each
-# tenant handoff can face its own upstream. Both now come from NetBox, and both
-# fall back to the value here only until NetBox carries them -- every run that
-# uses a fallback says so. Populate NetBox and these can be deleted.
-#
-# The fabric's iBGP ASN. Every EVPN session runs inside it, and it is also how
-# the role decides which BGP neighbours it owns: a neighbour in this ASN is
-# automation-managed, anything else belongs to the device.
-#   NetBox: assign ONE ASN object to every site in the fabric, the same one to
-#           all of them (dcim.site -> ASNs).
-evpn_bgp_asn: 65001
-# The ASN upstream of the borders, used for the eBGP handoff sessions.
-#   NetBox: 'upstream_asn' integer custom field on each vrf_l3_handoff_vlan.
-evpn_ext_bgp_asn: 65000
 
 # --- Underlay -------------------------------------------------------------
 # The interface every VTEP sources VXLAN, BGP and PIM from. Its address must
 # match the device's NetBox primary IP -- the role asserts this on every run.
 vtep_source_intf: "Loopback0"
 
-# DEPRECATED FALLBACKS, like the ASNs above. The anycast RP is per fabric, and
-# both values now come from NetBox: one IPAddress per spine, all with the SAME
-# address, role Anycast (which is what permits the duplicate), tagged
-# 'underlay_anycast_rp', each assigned to that spine's RP loopback. The
-# interface name then comes from the same object as the address, so the two can
-# no longer drift apart. Every run that falls back here says so.
-#
-# The fabric's anycast RP for UNDERLAY multicast (L2VNI BUM replication). Every
-# spine carries this address on a dedicated loopback.
-# NOTE: unrelated to TRM's per-VRF RPs, which are tenant addresses from NetBox.
-underlay_rp_address: "192.0.2.1"
-# The interface spines are expected to carry it on. Used only to validate that
-# the generated 'ip pim rp-address' points at an address the fabric owns.
-anycast_rp_interface: "Loopback60000"
 
 # --- Platform baseline (roles/underlay_readiness) -------------------------
 ntp_server_1: "198.51.100.10"
