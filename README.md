@@ -639,7 +639,7 @@ front-loads its checks. All of these run **before a switch is touched**:
 | Multicast validation | A missing, malformed or out-of-carve replication group; two segments of one fabric claiming the same group |
 | Anycast RP assertions | RP loopback disagreeing with the fabric's anycast RP, a spine switch missing it, or two spine switches in one fabric carrying **different** addresses |
 | Peer addressing assertion | `Loopback0` disagreeing with the device's NetBox primary IP |
-| Blast-radius guard | Removing >50% of any tracked object class, or **any** underlay object (zero tolerance) |
+| Blast-radius guard | Removing >50% of any tracked object class, or **any** underlay object (zero tolerance). Strictly greater: one of two members passes, the last member of a class does not |
 
 The blast-radius guard is the backstop for bad input: if NetBox returns nothing,
 the candidate config is small and valid, and without the guard `acm replace`
