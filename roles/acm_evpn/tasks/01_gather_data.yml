@@ -187,7 +187,13 @@
       {#- EVPN peers are addressed from NetBox, so a device managed on anything
           other than its VTEP loopback would have peers built from the wrong
           addresses -- sessions rendered to unreachable neighbours. -#}
-      {%- if (fabric_verify_peer_addressing | bool) and loopback0_ip != ansible_host -%}
+      {#- Fabric nodes only: this is about the addresses EVPN peers are built
+          from, and a device with no overlay has none. A distribution switch is
+          in the play so its underlay can be checked, and its Loopback0 is not
+          this role's business. -#}
+      {%- if (fabric_verify_peer_addressing | bool)
+             and group_names | intersect(fabric_node_groups) | length > 0
+             and loopback0_ip != ansible_host -%}
       {%-   set _ = bad.append(vtep_source_intf ~ ' is ' ~ loopback0_ip
                                ~ ' but the NetBox primary IP is ' ~ ansible_host
                                ~ ' -- these must agree, or set'

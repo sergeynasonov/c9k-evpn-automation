@@ -76,7 +76,29 @@ def _target_tasks():
     return wanted
 
 
-def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None):
+RENDER = os.path.join(ROLE, "tasks", "02_render_configs.yml")
+
+
+def _render_gate_tasks():
+    """The two tasks of 02_render_configs.yml that drop a non-fabric device.
+
+    They live there, not in the resolver, because underlay_readiness must have
+    checked the device first -- a distribution switch between a leaf and a
+    border carries fabric traffic even though nothing is rendered for it.
+    """
+    with open(RENDER) as fh:
+        tasks = yaml.safe_load(fh)
+    wanted = [t for t in tasks if t.get("name", "").startswith(("R1.", "R2."))]
+    if len(wanted) != 2:
+        raise AssertionError(
+            "expected the R1/R2 render-gate tasks in 02_render_configs.yml, "
+            "found {}".format([t.get("name") for t in wanted])
+        )
+    return wanted
+
+
+def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None,
+               render_gate=False):
     """Run the harness against a fixture inventory.
 
     ``reentry`` imports the resolver a second time, the way acm_evpn does when
@@ -107,6 +129,9 @@ def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None):
             yaml.safe_dump(_peer_tasks(), fh, default_flow_style=False, sort_keys=False)
         with open(os.path.join(workdir, "target_tasks.yml"), "w") as fh:
             yaml.safe_dump(_target_tasks(), fh, default_flow_style=False, sort_keys=False)
+        with open(os.path.join(workdir, "render_gate_tasks.yml"), "w") as fh:
+            yaml.safe_dump(_render_gate_tasks(), fh, default_flow_style=False,
+                           sort_keys=False)
 
         result_file = os.path.join(workdir, "result.json")
         env = dict(
@@ -121,7 +146,8 @@ def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None):
         proc = subprocess.run(
             [ANSIBLE, "-i", inv_path, "harness.yml",
              "-e", "result_file=" + result_file,
-             "-e", "reentry=" + ("true" if reentry else "false")]
+             "-e", "reentry=" + ("true" if reentry else "false"),
+             "-e", "render_gate=" + ("true" if render_gate else "false")]
             + (["-e", "deploy_target=" + deploy_target] if deploy_target else []),
             cwd=workdir, env=env, capture_output=True, text=True,
         )
@@ -221,11 +247,12 @@ class TestDeviceWithNoSite(unittest.TestCase):
         self.assertIn("orphan1", self.result["targeted"])
         self.assertNotIn("orphan1", self.result["survivors"])
 
-    def test_every_fabric_node_survives(self):
-        """dist1 is absent for a different reason -- see TestNonFabricNodes."""
+    def test_everyone_else_survives(self):
+        """dist1 included: the resolver keeps non-fabric devices so that
+        underlay_readiness can check them. See TestNonFabricNodesAreDropped."""
         self.assertEqual(
             self.result["survivors"],
-            ["access1-1", "access2-1", "core1", "core2", "raccess1", "rcore1"])
+            ["access1-1", "access2-1", "core1", "core2", "dist1", "raccess1", "rcore1"])
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
@@ -282,7 +309,8 @@ class TestNonFabricNodesAreDropped(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini")
+        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini", render_gate=True)
+        cls.no_gate = run_fabric("fabric_multi.ini")[2]
 
     def test_run_still_succeeds(self):
         """One targeted device being none of our business is not an error."""
@@ -293,12 +321,18 @@ class TestNonFabricNodesAreDropped(unittest.TestCase):
         below would pass for the wrong reason."""
         self.assertIn("dist1", self.result["targeted"])
 
-    def test_it_drops_out_before_anything_is_rendered(self):
+    def test_the_resolver_keeps_it_so_readiness_can_check_it(self):
+        """The division of responsibility. A distribution switch between a leaf
+        and a border carries fabric traffic, so its underlay must be checked --
+        it just gets no overlay config."""
+        self.assertIn("dist1", self.no_gate["survivors"])
+
+    def test_the_render_gate_drops_it(self):
         self.assertNotIn("dist1", self.result["survivors"])
 
     def test_it_is_reported_by_name(self):
         """An operator who targeted a site deserves to know which of its
-        devices were left alone."""
+        devices got no configuration."""
         self.assertIn("are not fabric nodes: dist1", self.out)
 
     def test_fabric_nodes_are_not_dropped_with_it(self):

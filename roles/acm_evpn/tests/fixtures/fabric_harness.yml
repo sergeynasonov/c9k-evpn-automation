@@ -42,6 +42,13 @@
     - name: Target scoping
       ansible.builtin.import_tasks: target_tasks.yml
 
+    # The render gate from 02_render_configs.yml: acm_evpn renders nothing for a
+    # device that is not a fabric node, but underlay_readiness must still have
+    # checked it, so the drop lives there rather than in the resolver.
+    - name: Render gate
+      ansible.builtin.import_tasks: render_gate_tasks.yml
+      when: render_gate | default(false) | bool
+
     - name: Peer selection
       ansible.builtin.import_tasks: peer_tasks.yml
 

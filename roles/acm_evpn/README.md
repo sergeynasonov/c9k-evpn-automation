@@ -35,7 +35,7 @@ enforced as tasks, before anything touches a device:
 
 | What the pattern selects | What happens |
 |---|---|
-| `deploy_target=<site>` also selects that site's **distribution switches**, which have the site like any other device | Dropped and reported. The render step picks its template as border / spine / *else leaf*, so without this they would be handed a full EVPN **leaf** configuration |
+| `deploy_target=<site>` also selects that site's **distribution switches**, which have the site like any other device | Their underlay **is** checked — see below — but nothing is rendered for them, and they are named in the output. The render step picks its template as border / spine / *else leaf*, so without this they would be handed a full EVPN **leaf** configuration |
 | The spine union is estate-wide, so it also pulls in **other fabrics' spines** | Dropped. The run works out which fabrics `deploy_target` actually names; the targeted fabric's own spines always stay, which is the whole point of the union |
 
 ---
@@ -80,7 +80,14 @@ A device with a fabric role but **no site** belongs to no fabric: it is reported
 and skipped, never rendered.
 
 **A site is a fabric because it holds a fabric node** — a `fabric_border`,
-`fabric_leaf`, or a device tagged `fabric_spine`. A NetBox holds plenty of
+`fabric_leaf`, or a device tagged `fabric_spine`. Note the two questions are
+separate, and the answers differ:
+
+| Question | Answer |
+|---|---|
+| Which devices does this role **render** for? | Fabric nodes only. |
+| Which devices does `underlay_readiness` **check**? | Everything in the fabric's transit path, distribution switches included. A distribution switch between a leaf and a border carries fabric traffic, so a wrong MTU or a missing PIM on it breaks the overlay exactly as it would on a leaf — it simply has no overlay configuration of its own. |
+ A NetBox holds plenty of
 ordinary sites (WAN kit, servers, campuses this automation does not manage);
 they are not candidate fabrics waiting to be configured, so they are passed over
 in silence rather than asked for an ASN and an anycast RP they will never
