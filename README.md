@@ -24,13 +24,20 @@ the commit.
 - **L2-only overlays** — a VLAN bridged across the fabric with no VRF and no
   gateway. Enrolled with the `l2vni` custom field, replicated via a multicast
   group, and opt-in on border switches.
+- **Multiple fabrics from one NetBox** — a fabric is a **site group**, or a
+  **site** where that site has no site group. Each has its own iBGP ASN, its own
+  underlay anycast RP and its own set of route reflectors, and they are fully
+  independent: two fabrics may reuse the same VRFs, L3VNIs, VLAN IDs and
+  multicast groups, because they never exchange them. Peers, meshes, VNI
+  uniqueness and deploy scoping are all resolved per fabric. See
+  [the data contract](roles/acm_evpn/README.md#fabrics).
 
 **Not functional today. Near-term roadmap:**
 
 - **ESI multihoming**
 - **IPv6** — no `address-family ipv6` in the overlay, and no IPv6 TRM.
 
-**The fabric it builds** is **iBGP EVPN**: one ASN across the fabric, spine
+**The fabric it builds** is **iBGP EVPN**: one ASN across each fabric, spine
 switches as route reflectors for both `l2vpn evpn` and `ipv4 mvpn`.
 Reachability between VTEPs comes from an **IGP — OSPFv2** — not from BGP.
 That IGP, and everything
@@ -88,7 +95,7 @@ Then, per switch, in order:
 |---|---|---|
 | 1 | *(by hand)* | Build the underlay — see [Phase 1](#phase-1--day-0-hand-build-the-underlay). Ansible never touches it |
 | 2 | `scripts/netbox_provision_schema.py --apply` | Create the custom fields, tags and roles NetBox must carry. Once per NetBox |
-| 3 | *(in NetBox)* | Model the device, then the tenants. **[The role README is the data contract](roles/acm_evpn/README.md)** |
+| 3 | *(in NetBox)* | Model the **fabric** (an ASN on each of its sites, an anycast-RP IPAddress per spine), then the devices, then the tenants. **[The role README is the data contract](roles/acm_evpn/README.md)** |
 | 4 | `ansible-playbook readiness.yml` | Assert the underlay is fit to provision; report what is not |
 | 5 | `ansible-playbook generate_evpn.yml` | Render candidates, then ask each switch what it would change. **Nothing is applied** |
 | 6 | *(read the diff)* | `commit-results/<host>-proposed-diff.cfg` — see [Rendering](#rendering-safe--no-configuration-changes) |
@@ -111,6 +118,8 @@ the role refuses. See [Deploying](#deploying) for why.
 | `readiness.yml` | Check a switch's hand-built underlay is fit to provision |
 | `trm_allocate.yml` | Allocate TRM PIM register sources in NetBox — the only playbook that writes to it |
 | `netbox_inv.yml` | NetBox dynamic inventory |
+| `group_vars/all/main.yml` | Connection wiring and the two project-wide conventions. Tracked — describes nobody's network |
+| `group_vars/all/deployment.yml` | **Gitignored.** This deployment's NTP / SNMPv3 / VTP identity, from `deployment.yml.example`. Read only by `readiness.yml` |
 | `roles/acm_evpn/` | The fabric role. **[Its README](roles/acm_evpn/README.md) is the NetBox data-model contract** |
 | `roles/underlay_readiness/` | Day-0 assertions, platform baseline and SNMPv3. Run at onboarding, and as an `acm_evpn` pre-flight |
 | `scripts/` | One-off NetBox provisioning helpers — `netbox_provision_schema.py` (the schema) and `netbox_multicast_carve.py` (the multicast carve) |
@@ -313,8 +322,9 @@ would otherwise check it. `roles/underlay_readiness/` asserts a switch is fit
 for fabric provisioning:
 
 ```bash
-ansible-playbook readiness.yml                            # whole fabric
-ansible-playbook readiness.yml -e deploy_target=access1-1 # one switch
+ansible-playbook readiness.yml                                        # every fabric
+ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus # one fabric
+ansible-playbook readiness.yml -e deploy_target=access1-1              # one switch
 ```
 
 It also runs automatically as a **pre-flight inside `acm_evpn`**, so a switch

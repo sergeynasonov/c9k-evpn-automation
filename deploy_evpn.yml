@@ -20,9 +20,10 @@
 #     01_gather_data.yml works out which fabrics deploy_target actually names
 #     and drops the rest.
 #
-#   full fabric : ansible-playbook deploy_evpn.yml
-#   one leaf    : ansible-playbook deploy_evpn.yml -e deploy_target=access1-1
+#   one fabric  : ansible-playbook deploy_evpn.yml -e deploy_target=site_group_evpn_campus
 #   one building: ansible-playbook deploy_evpn.yml -e deploy_target=sites_evpn_building_a
+#   one leaf    : ansible-playbook deploy_evpn.yml -e deploy_target=access1-1
+#   EVERY fabric: ansible-playbook deploy_evpn.yml   (no deploy_target at all)
 - name: Deploy EVPN Configurations to Live Fabric
   hosts: >-
     {{ deploy_target
