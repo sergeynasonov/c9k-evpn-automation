@@ -16,6 +16,8 @@
   gather_facts: false
   strategy: linear
   vars:
+    # Every run must be scoped; these harnesses exercise the whole fixture.
+    deploy_target: all
   tasks:
     - name: Resolve fabric membership
       ansible.builtin.import_role:

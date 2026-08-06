@@ -91,23 +91,29 @@ all** — everything the fabric is comes from NetBox.
 
 Then, per switch, in order:
 
+**Every run must be scoped.** `-e deploy_target=<fabric>` is required, on all
+four playbooks — an unscoped run is refused, and the refusal lists the fabrics
+in your inventory. Without it the host pattern means *every fabric node in the
+estate*, which nobody intends by omission. `-e deploy_target=all` is accepted,
+because that is a deliberate act rather than a missing flag.
+
 | Step | Command | What it does |
 |---|---|---|
 | 1 | *(by hand)* | Build the underlay — see [Phase 1](#phase-1--day-0-hand-build-the-underlay). Ansible never touches it |
 | 2 | `scripts/netbox_provision_schema.py --apply` | Create the custom fields, tags and roles NetBox must carry. Once per NetBox |
 | 3 | *(in NetBox)* | Model the **fabric** (an ASN on each of its sites, an anycast-RP IPAddress per spine), then the devices, then the tenants. **[The role README is the data contract](roles/acm_evpn/README.md)** |
-| 4 | `ansible-playbook readiness.yml` | Assert the underlay is fit to provision; report what is not |
-| 5 | `ansible-playbook generate_evpn.yml` | Render candidates, then ask each switch what it would change. **Nothing is applied** |
+| 4 | `ansible-playbook readiness.yml -e deploy_target=<fabric>` | Assert the underlay is fit to provision; report what is not |
+| 5 | `ansible-playbook generate_evpn.yml -e deploy_target=<fabric>` | Render candidates, then ask each switch what it would change. **Nothing is applied** |
 | 6 | *(read the diff)* | `commit-results/<host>-proposed-diff.cfg` — see [Rendering](#rendering-safe--no-configuration-changes) |
-| 7 | `ansible-playbook deploy_evpn.yml` | Apply under a rollback timer, confirm, save |
+| 7 | `ansible-playbook deploy_evpn.yml -e deploy_target=<fabric>` | Apply under a rollback timer, confirm, save |
 
 **Step 5 is the one to get into the habit of.** It changes no configuration,
 and the diff it produces is the switch's own answer to the candidate a deploy
 would push — so it is how you find out what a change actually does before it
 does it.
 
-Scope any run with `-e deploy_target=<host-or-group>`; **never `--limit`**, which
-the role refuses. See [Deploying](#deploying) for why.
+Scope with `-e deploy_target=<host-or-group>` — **never `--limit`**, which the
+role also refuses, for a different reason. See [Deploying](#deploying) for both.
 
 ## Layout
 
@@ -322,9 +328,10 @@ would otherwise check it. `roles/underlay_readiness/` asserts a switch is fit
 for fabric provisioning:
 
 ```bash
-ansible-playbook readiness.yml                                        # every fabric
 ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus # one fabric
+ansible-playbook readiness.yml -e deploy_target=sites_evpn_building_a  # one building
 ansible-playbook readiness.yml -e deploy_target=access1-1              # one switch
+ansible-playbook readiness.yml -e deploy_target=all                    # every fabric
 ```
 
 It also runs automatically as a **pre-flight inside `acm_evpn`**, so a switch

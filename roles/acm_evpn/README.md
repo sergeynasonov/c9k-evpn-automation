@@ -12,22 +12,24 @@ fabric, driven by NetBox, and applies it with `acm replace`.
 Scope a run with `deploy_target`, **never `--limit`**:
 
 ```bash
-ansible-playbook generate_evpn.yml                                      # render + preview, no config changes
-ansible-playbook deploy_evpn.yml -e deploy_target=site_group_evpn_campus # one fabric
-ansible-playbook deploy_evpn.yml -e deploy_target=access1-1              # one leaf switch
-ansible-playbook deploy_evpn.yml                                        # EVERY fabric
+ansible-playbook generate_evpn.yml -e deploy_target=site_group_evpn_campus # render + preview, no changes
+ansible-playbook deploy_evpn.yml   -e deploy_target=site_group_evpn_campus # one fabric
+ansible-playbook deploy_evpn.yml   -e deploy_target=access1-1              # one leaf switch
+ansible-playbook deploy_evpn.yml   -e deploy_target=all                    # every fabric, deliberately
 ```
 
 `generate_evpn.yml` renders each candidate, then asks the switch what it would
 change via `acm replace … diff`, writing the answer to
 `commit-results/<host>-proposed-diff.cfg`. Nothing is applied.
 
-An unscoped run targets **every** fabric in the inventory, which is rarely what
-is wanted once there is more than one: name the fabric with `deploy_target`. A
-run that names one leaf still re-renders that leaf's own fabric's spines, so
-their peer lists cannot go stale — see below.
+**`deploy_target` is required.** An unscoped run is refused before anything is
+contacted, and the refusal lists the fabrics in the inventory. The host pattern
+without it means *every fabric node in the estate*, and nobody intends that by
+omitting a flag — `-e deploy_target=all` says it deliberately. A run that names
+one leaf still re-renders that leaf's own fabric's spines, so their peer lists
+cannot go stale; see below.
 
-`--limit` is refused by task 0. It can drop spine switches out of the play,
+`--limit` is refused too, by task 0, and for a different reason. It can drop spine switches out of the play,
 leaving their EVPN peer lists stale on the device; the playbooks union
 `tags_fabric_spine` into
 the host pattern so that cannot happen. Peer *addresses* come from inventory

@@ -55,8 +55,8 @@
     targeted_fabrics: "{{ _fabrics | from_json }}"
   vars:
     # deploy_target as the OPERATOR wrote it, resolved to hosts independently of
-    # the spine union. Defaulting to 'all' means an unscoped run targets every
-    # fabric, which is exactly the pre-existing behaviour.
+    # the spine union. fabric_resolve.yml has already refused an unscoped run, so
+    # the default here is unreachable and exists only to keep the lookup total.
     _target_hosts: "{{ query('ansible.builtin.inventory_hostnames', deploy_target | default('all')) }}"
     _fabrics: >-
       {%- set out = [] -%}
@@ -85,7 +85,6 @@
       have continued with just the spines the host pattern unions in — and
       deployed to all of them.
     quiet: true
-  when: deploy_target is defined
   run_once: true
   delegate_to: localhost
 

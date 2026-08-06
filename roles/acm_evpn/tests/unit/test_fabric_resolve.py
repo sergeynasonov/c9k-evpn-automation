@@ -97,13 +97,19 @@ def _render_gate_tasks():
     return wanted
 
 
-def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None,
+UNSCOPED = object()
+
+
+def run_fabric(inventory, reentry=False, mutate=None, deploy_target="all",
                render_gate=False):
     """Run the harness against a fixture inventory.
 
     ``reentry`` imports the resolver a second time, the way acm_evpn does when
     it resolves in 01_gather_data.yml and then runs underlay_readiness as a
     pre-flight.
+
+    ``deploy_target`` defaults to "all" because every run must now be scoped;
+    pass ``UNSCOPED`` to exercise the refusal.
 
     ``mutate`` is called with the parsed YAML inventory and may edit it in
     place; the edited copy is written into the temp dir and used instead. The
@@ -148,7 +154,8 @@ def run_fabric(inventory, reentry=False, mutate=None, deploy_target=None,
              "-e", "result_file=" + result_file,
              "-e", "reentry=" + ("true" if reentry else "false"),
              "-e", "render_gate=" + ("true" if render_gate else "false")]
-            + (["-e", "deploy_target=" + deploy_target] if deploy_target else []),
+            + ([] if deploy_target is UNSCOPED
+               else ["-e", "deploy_target=" + deploy_target]),
             cwd=workdir, env=env, capture_output=True, text=True,
         )
         output = proc.stdout + proc.stderr
@@ -588,6 +595,54 @@ class TestAFabricWithNoAsnIsRefused(unittest.TestCase):
         """Fatal for the run, not a per-fabric skip: a site tree that cannot
         answer this is not trustworthy for the fabrics that happen to work."""
         self.assertIsNone(self.result)
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestAnUnscopedRunIsRefused(unittest.TestCase):
+    """Every run must say which fabric it is for.
+
+    Unscoped, the host pattern defaults to every fabric node in the inventory --
+    with more than one fabric that is the whole estate, opening a session to
+    every switch in every building and, on a deploy, applying a candidate to all
+    of them. Nobody means that by omission.
+
+    Enforced in the shared resolver, so readiness.yml, generate_evpn.yml,
+    deploy_evpn.yml and trm_allocate.yml all get it from one place.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini",
+                                                 deploy_target=UNSCOPED)
+
+    def test_the_run_is_refused(self):
+        self.assertNotEqual(self.rc, 0)
+
+    def test_nothing_is_rendered(self):
+        self.assertIsNone(self.result)
+
+    def test_it_says_what_is_wrong(self):
+        self.assertIn("This run is not scoped", self.out)
+
+    def test_it_lists_the_fabrics_to_choose_from(self):
+        self.assertIn("site_group_evpn_campus", self.out)
+        self.assertIn("sites_evpn_remote", self.out)
+
+    def test_it_shows_how_to_scope(self):
+        self.assertIn("-e deploy_target=", self.out)
+
+    def test_an_empty_deploy_target_is_refused_too(self):
+        """'-e deploy_target=' defines the variable as an empty string, which
+        would otherwise pass an is-defined check and match nothing."""
+        rc, out, _ = run_fabric("fabric_multi.ini", deploy_target="")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("This run is not scoped", out)
+
+    def test_targeting_everything_deliberately_is_allowed(self):
+        """The point is that the estate cannot be reached by ACCIDENT."""
+        rc, out, result = run_fabric("fabric_multi.ini", deploy_target="all")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":

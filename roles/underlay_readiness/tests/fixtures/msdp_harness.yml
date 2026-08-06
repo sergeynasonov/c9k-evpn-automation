@@ -16,6 +16,8 @@
   strategy: linear
   vars:
     vtep_source_intf: Loopback0
+    # Every run must be scoped; this harness exercises the whole fixture.
+    deploy_target: all
     # Normally resolved from NetBox by fabric_anycast_rp.yml, which needs a live
     # NetBox. The spine check only consumes the value, so it is supplied here.
     fabric_rp_address: 192.0.2.1

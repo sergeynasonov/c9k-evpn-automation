@@ -4,7 +4,7 @@
 # Run at onboarding, before deploy_evpn.yml ever touches the node. Safe to
 # re-run: it only ever adds, and never removes.
 #
-#   every fabric : ansible-playbook readiness.yml
+#   deploy_target is REQUIRED -- an unscoped run is refused, naming the fabrics.
 #   one fabric   : ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus
 #   one building : ansible-playbook readiness.yml -e deploy_target=sites_evpn_building_a
 #   one switch   : ansible-playbook readiness.yml -e deploy_target=access1-1

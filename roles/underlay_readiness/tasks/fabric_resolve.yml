@@ -44,7 +44,7 @@
 #   fabric_asn     this fabric's iBGP ASN, from its sites in NetBox
 #   fabric_scope_map  {"site:<id>"|"sitegroup:<id>": fabric} for the inventory,
 #                     which is how NetBox-scoped data (VLANs) is placed in a
-#                     fabric at all -- see task 9
+#                     fabric at all -- see task 10
 #
 # fabric_asn is resolved here rather than in acm_evpn for the same reason as the
 # rest: it is a property of the fabric, from the same inventory data, and having
@@ -52,17 +52,17 @@
 # use it -- but it validates it, which catches the data error at onboarding
 # rather than on the first render.
 
-# Tasks 1-3 are guarded so that re-entering this file is free. acm_evpn resolves
+# Tasks 1-4 are guarded so that re-entering this file is free. acm_evpn resolves
 # in 01_gather_data.yml and then imports underlay_readiness as a pre-flight,
 # which enters here again; readiness.yml re-gathers after configuring, likewise.
 # Without the guard the orphan report below prints once per entry.
 #
-# The marker is 'fabric_id', which task 4 sets LAST -- not fabric_map, which
-# task 1 sets and which would therefore already be defined by the time task 3
+# The marker is 'fabric_id', which task 5 sets LAST -- not fabric_map, which
+# task 1 sets and which would therefore already be defined by the time task 4
 # tested for it, skipping the report on the very first pass.
 #
-# Tasks 4 and 5 are deliberately unguarded. They are per host and idempotent,
-# and a condition covering the whole file would disable the end_host in task 5
+# Tasks 5 and 6 are deliberately unguarded. They are per host and idempotent,
+# and a condition covering the whole file would disable the end_host in task 6
 # on every re-entry, silently ending the skip.
 - name: 1. Resolve every device's fabric from inventory
   ansible.builtin.set_fact:
@@ -143,9 +143,48 @@
   delegate_to: localhost
 
 # Fatal, and fatal for the whole run rather than per device: an inventory whose
+# EVERY run must name what it is for. Unscoped, the host pattern defaults to
+# every fabric node in the inventory -- which with more than one fabric means
+# every fabric in the estate, and the operator almost never meant that. It is
+# not a correctness bug (each device renders its own fabric and converges), but
+# it opens a session to every switch in every building, and on a deploy it
+# applies a candidate to all of them.
+#
+# Refused here rather than by removing the host pattern's default: without the
+# default the play forms with no hosts, and Ansible's "skipping: no hosts
+# matched" says nothing about why. The default exists so that this assertion is
+# reachable and can explain itself.
+#
+# 'deploy_target=all' is accepted, because that is a deliberate act rather than
+# an omission. The point is that the whole estate cannot be reached by accident.
+- name: 2. Refuse a run that is not scoped to a fabric
+  ansible.builtin.assert:
+    that:
+      - deploy_target is defined
+      - deploy_target | default('') | trim | length > 0
+    fail_msg: |-
+      This run is not scoped. Every run must say which fabric it is for.
+
+      Fabrics in this inventory: {{ fabric_ids | join(', ') or 'none' }}
+
+      Add -e deploy_target=<pattern>, where <pattern> is one of:
+        a fabric      -e deploy_target={{ fabric_ids | first | default('site_group_<slug>') }}
+        one building  -e deploy_target=sites_<slug>
+        one switch    -e deploy_target=<hostname>
+        everything    -e deploy_target=all      (deliberately, not by omission)
+
+      Unscoped, this would have targeted every fabric node in the inventory —
+      every fabric in the estate, not just one — opening a session to each and,
+      on a deploy, applying a candidate to all of them.
+    success_msg: "run is scoped"
+    quiet: true
+  when: fabric_id is not defined
+  run_once: true
+  delegate_to: localhost
+
 # site tree does not partition cleanly into fabrics cannot be trusted for ANY
 # device's peer list, including the ones that happen to resolve.
-- name: 2. Refuse an inventory that does not partition into fabrics
+- name: 3. Refuse an inventory that does not partition into fabrics
   ansible.builtin.assert:
     that:
       - fabric_ambiguous | length == 0
@@ -167,8 +206,8 @@
 
 # Reported, never fatal. A device that cannot be placed is simply not part of
 # any fabric -- it is left alone rather than blocking the fabrics that are fine.
-# The devices themselves drop out of the play in task 5.
-- name: 3. Report fabric devices that belong to no fabric
+# The devices themselves drop out of the play in task 6.
+- name: 4. Report fabric devices that belong to no fabric
   ansible.builtin.debug:
     msg: >-
       {{ ['NetBox: device(s) ' ~ (fabric_orphans | join(', '))
@@ -181,7 +220,7 @@
   run_once: true
   delegate_to: localhost
 
-- name: 4. Determine this device's fabric
+- name: 5. Determine this device's fabric
   ansible.builtin.set_fact:
     fabric_id: "{{ fabric_map.get(inventory_hostname, '') }}"
     fabric_members: "{{ groups.get(fabric_map.get(inventory_hostname, ''), []) | sort }}"
@@ -190,7 +229,7 @@
 # rendered for it and nothing is pushed to it, while the rest of the run
 # continues. Rendering it instead would be the dangerous option -- with no
 # fabric it has no peers, and an empty peer list is a session teardown.
-- name: 5. Skip a device that belongs to no fabric
+- name: 6. Skip a device that belongs to no fabric
   ansible.builtin.meta: end_host
   when: fabric_id | length == 0
 
@@ -205,7 +244,7 @@
 # an iBGP EVPN fabric, and every session in it is inside that ASN. So a site
 # carrying two, or two sites in one fabric disagreeing, is not something to pick
 # a winner from.
-- name: 6. Resolve each fabric's BGP ASN from its sites
+- name: 7. Resolve each fabric's BGP ASN from its sites
   ansible.builtin.set_fact:
     fabric_asn_map: "{{ (_asns | from_json).map }}"
     fabric_asn_problems: "{{ (_asns | from_json).problems }}"
@@ -250,7 +289,7 @@
   run_once: true
   delegate_to: localhost
 
-- name: 7. Refuse a fabric without exactly one BGP ASN
+- name: 8. Refuse a fabric without exactly one BGP ASN
   ansible.builtin.assert:
     that:
       - fabric_asn_problems | length == 0
@@ -271,9 +310,9 @@
   run_once: true
   delegate_to: localhost
 
-- name: 8. Determine this device's BGP ASN
+- name: 9. Determine this device's BGP ASN
   ansible.builtin.set_fact:
-    # No fallback: task 7 has already refused any fabric without exactly one
+    # No fallback: task 8 has already refused any fabric without exactly one
     # ASN, so a lookup that misses can only be a device in a site that is not a
     # fabric at all -- one holding no fabric node. Nothing renders for such a
     # device, so the 0 is unreachable wherever it would matter.
@@ -289,7 +328,7 @@
 # Consumed by netbox_evpn_data.py to scope VNI uniqueness per fabric. Sites with
 # no devices never appear, which is correct -- a VLAN scoped to one is in scope
 # for no host and renders nowhere.
-- name: 9. Map each NetBox site and site group to its fabric
+- name: 10. Map each NetBox site and site group to its fabric
   ansible.builtin.set_fact:
     fabric_scope_map: "{{ _scopes | from_json }}"
   vars:
