@@ -312,9 +312,11 @@ You do not need to manually activate virtual environments, decrypt vaults, or ex
 3. Run your playbooks normally:
    ```bash
    ansible-inventory --list                # confirm NetBox inventory resolves
-   ansible-playbook readiness.yml          # check the hand-built underlay
-   ansible-playbook generate_evpn.yml      # render candidates, no device changes
-   ansible-playbook deploy_evpn.yml        # apply under a rollback timer
+   # deploy_target is REQUIRED on every playbook -- an unscoped run is refused,
+   # and the refusal lists the fabrics in your inventory.
+   ansible-playbook readiness.yml     -e deploy_target=<fabric>   # check the hand-built underlay
+   ansible-playbook generate_evpn.yml -e deploy_target=<fabric>   # render candidates, no device changes
+   ansible-playbook deploy_evpn.yml   -e deploy_target=<fabric>   # apply under a rollback timer
    ```
    See the [README](README.md) for what each does and the order to run them in.
 

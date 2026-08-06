@@ -417,7 +417,7 @@ without configuring anything.
 
 ```bash
 ANSIBLE_DISPLAY_OK_HOSTS=false ANSIBLE_DISPLAY_SKIPPED_HOSTS=false \
-  ansible-playbook readiness.yml
+  ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus
 ```
 
 Note this hides every `debug` summary too, since those report `ok`.
@@ -464,7 +464,7 @@ VLAN, so nothing has to be modelled or named by convention.
 ## Rendering (safe — no configuration changes)
 
 ```bash
-ansible-playbook generate_evpn.yml
+ansible-playbook generate_evpn.yml -e deploy_target=site_group_evpn_campus
 ```
 
 Renders each switch's candidate to `switch-configuration/`, then **asks the
@@ -508,10 +508,16 @@ so this is not new contact, but it does leave a file on flash.
 ## Deploying
 
 ```bash
-ansible-playbook deploy_evpn.yml                             # whole fabric
-ansible-playbook deploy_evpn.yml -e deploy_target=access1-1  # one leaf switch
-ansible-playbook deploy_evpn.yml -e deploy_target=sites_evpn_building_a
+ansible-playbook deploy_evpn.yml -e deploy_target=site_group_evpn_campus  # one fabric
+ansible-playbook deploy_evpn.yml -e deploy_target=sites_evpn_building_a  # one building
+ansible-playbook deploy_evpn.yml -e deploy_target=access1-1              # one leaf switch
+ansible-playbook deploy_evpn.yml -e deploy_target=all                    # every fabric
 ```
+
+**`deploy_target` is required — an unscoped run is refused**, before anything is
+contacted, with the fabrics in your inventory listed. Without it the pattern
+means every fabric node in the estate, which nobody intends by omitting a flag;
+`all` says it deliberately.
 
 **Scope with `deploy_target`, never `--limit`.** `--limit` is refused by the
 role's first task. It can drop spine switches out of the play, and a spine
@@ -534,8 +540,8 @@ net-diff download, because there is nothing to do.
 ## Allocating TRM register sources
 
 ```bash
-ansible-playbook trm_allocate.yml --check --diff   # dry run: who needs one, how many
-ansible-playbook trm_allocate.yml                  # allocate
+ansible-playbook trm_allocate.yml -e deploy_target=site_group_evpn_campus --check --diff   # dry run
+ansible-playbook trm_allocate.yml -e deploy_target=site_group_evpn_campus                  # allocate
 ```
 
 **This is the only playbook that writes to NetBox, and it touches no device.**
@@ -611,13 +617,13 @@ the evicted files. Set `acm_checkpoint: false` to disable, or point
 | New tenant VLAN | Add it in NetBox with role `edge`; deploy |
 | New VRF | Set `l3vni` and `mcast_base_group`; create its multicast carve; deploy |
 | New VRF handoff | Add the handoff VLAN with role `vrf_l3_handoff_vlan`, tagged with the border switch's hostname. The trunk list updates itself |
-| New switch | Day 0 by hand, then onboard in NetBox, then `readiness.yml`, then deploy |
-| Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a `trm_allocate.yml` run |
+| New switch | Day 0 by hand, then onboard in NetBox, then `readiness.yml`, then deploy — both scoped to its fabric |
+| Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a scoped `trm_allocate.yml` run |
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
-| Admin or SNMPv3 password | Change it in your secret store — they are read from the environment, never stored here — then `ansible-playbook readiness.yml` |
-| SNMP/NTP/VTP identity | Edit `group_vars/all/deployment.yml`, then `ansible-playbook readiness.yml` |
+| Admin or SNMPv3 password | Change it in your secret store — they are read from the environment, never stored here — then re-run `readiness.yml` |
+| SNMP/NTP/VTP identity | Edit `group_vars/all/deployment.yml`, then re-run `readiness.yml` |
 | Fabric ASN, anycast RP, upstream ASN | Edit NetBox — see [the data contract](roles/acm_evpn/README.md). Nothing to edit here |
-| What the baseline or the assertions contain | Edit `roles/underlay_readiness/defaults/main.yml` (behaviour, not site values), then `ansible-playbook readiness.yml` |
+| What the baseline or the assertions contain | Edit `roles/underlay_readiness/defaults/main.yml` (behaviour, not site values), then re-run `readiness.yml` |
 
 ---
 
@@ -640,7 +646,7 @@ the candidate config is small and valid, and without the guard `acm replace`
 would strip the switch. Override a legitimate large change with:
 
 ```bash
-ansible-playbook deploy_evpn.yml -e acm_safety_force=true
+ansible-playbook deploy_evpn.yml -e deploy_target=<fabric> -e acm_safety_force=true
 ```
 
 Expect to need that flag on a first cutover from a legacy config, and after a

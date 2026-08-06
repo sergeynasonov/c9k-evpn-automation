@@ -188,6 +188,6 @@ commit_timeout: 120
 # NetBox response can silently strip a switch. Refuse to deploy when any
 # tracked object class (VRFs, SVIs, EVPN instances, VNIs) would lose more than
 # this share of its members. Override for a legitimate large removal with:
-#   ansible-playbook deploy_evpn.yml -e acm_safety_force=true
+#   ansible-playbook deploy_evpn.yml -e deploy_target=<fabric> -e acm_safety_force=true
 acm_safety_max_removal_pct: 50
 acm_safety_force: false

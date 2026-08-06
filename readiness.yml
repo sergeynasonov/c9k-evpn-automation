@@ -8,8 +8,8 @@
 #   one fabric   : ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus
 #   one building : ansible-playbook readiness.yml -e deploy_target=sites_evpn_building_a
 #   one switch   : ansible-playbook readiness.yml -e deploy_target=access1-1
-#   check only   : ansible-playbook readiness.yml -e readiness_apply_baseline=false \
-#                                                 -e readiness_apply_snmp=false
+#   check only   : ansible-playbook readiness.yml -e deploy_target=<fabric> \
+#                    -e readiness_apply_baseline=false -e readiness_apply_snmp=false
 #
 # Every unready switch gets readiness-results/<hostname>-readiness.cfg, a
 # paste-ready remediation file. The play prints one summary and fails once at
