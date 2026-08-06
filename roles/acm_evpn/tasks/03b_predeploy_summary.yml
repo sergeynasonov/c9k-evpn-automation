@@ -34,9 +34,19 @@
     # from a seven-switch summary. At 500 switches a single fatal: line is lost
     # in the scroll, and a silently skipped switch keeps its old config while
     # the fabric is believed consistent.
+    #
+    # But only hosts this run was going to RENDER count as missing. A host
+    # pattern also selects devices this role renders nothing for -- ':' is a
+    # union, so a site-scoped deploy_target picks up that site's distribution
+    # switches -- and they are dropped on purpose, before any device is touched,
+    # and named once already by 02_render_configs.yml. Counting them here
+    # reported four healthy switches as "failed before a candidate was built",
+    # which is alarming and false. Same mistake the readiness summary made; see
+    # underlay_readiness/tasks/05_report.yml.
     _missing: >-
       {%- set out = [] -%}
-      {%- for h in ansible_play_hosts_all | sort if h not in ansible_play_hosts -%}
+      {%- for h in ansible_play_hosts_all | sort
+            if h not in ansible_play_hosts and h in fabric_nodes -%}
       {%-   set _ = out.append(h) -%}
       {%- endfor -%}
       {{ out | to_json }}
