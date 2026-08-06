@@ -54,12 +54,25 @@
     readiness_unreachable: "{{ _unreachable | from_json }}"
     readiness_oversized_area: "{{ _oversized | from_json }}"
   vars:
+    # The switches this run was SUPPOSED to evaluate. A host pattern can select
+    # devices this automation renders nothing for -- ':' is a union, so
+    # 'deploy_target=<site>' picks up that site's distribution switches -- and
+    # fabric_resolve.yml drops them before any device is touched. They never had
+    # a readiness result and never should have, so counting them as UNREACHABLE
+    # sent an operator looking for a connectivity problem that did not exist.
+    # They are already named once, by fabric_resolve.yml, which is enough.
+    _candidates: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts_all if h in fabric_nodes -%}
+      {%-   set _ = out.append(h) -%}
+      {%- endfor -%}
+      {{ out | to_json }}
     # Explicit loops rather than select/extract chains: a READY switch has an
     # EMPTY findings list, which is falsy, so any truthiness-based filter drops
     # exactly the hosts that passed.
     _ready: >-
       {%- set out = [] -%}
-      {%- for h in ansible_play_hosts_all
+      {%- for h in _candidates | from_json
             if 'readiness_failures' in hostvars[h]
                and hostvars[h].readiness_failures | length == 0 -%}
       {%-   set _ = out.append(h) -%}
@@ -67,7 +80,7 @@
       {{ out | to_json }}
     _unready: >-
       {%- set out = [] -%}
-      {%- for h in ansible_play_hosts_all
+      {%- for h in _candidates | from_json
             if 'readiness_failures' in hostvars[h]
                and hostvars[h].readiness_failures | length > 0 -%}
       {%-   set _ = out.append(h) -%}
@@ -77,13 +90,13 @@
     # as either would be a lie. It gets its own line in the summary.
     _unreachable: >-
       {%- set out = [] -%}
-      {%- for h in ansible_play_hosts_all if 'readiness_failures' not in hostvars[h] -%}
+      {%- for h in _candidates | from_json if 'readiness_failures' not in hostvars[h] -%}
       {%-   set _ = out.append(h) -%}
       {%- endfor -%}
       {{ out | to_json }}
     _oversized: >-
       {%- set out = [] -%}
-      {%- for h in ansible_play_hosts_all
+      {%- for h in _candidates | from_json
             if (hostvars[h].readiness_ospf_area_routers | default(0) | int)
                > (readiness_ospf_routers_warn | int) -%}
       {%-   set _ = out.append(h) -%}
@@ -121,7 +134,7 @@
   vars:
     _lines: >-
       {%- set out = [] -%}
-      {%- set _ = out.append('Underlay readiness — ' ~ ansible_play_hosts_all | length
+      {%- set _ = out.append('Underlay readiness — ' ~ (readiness_ready | length + readiness_unready | length + readiness_unreachable | length)
                              ~ ' switch(es): ' ~ readiness_ready | length ~ ' ready, '
                              ~ readiness_unready | length ~ ' NOT ready, '
                              ~ readiness_unreachable | length ~ ' unreachable') -%}

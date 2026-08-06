@@ -30,7 +30,8 @@
 #
 # Sets, for every host in the play:
 #   fabric_map     {device: its site group or site} for the whole inventory
-#   fabric_ids     the subset of those that are FABRICS -- i.e. hold a fabric
+#   fabric_nodes   every device this automation renders for, inventory-wide
+#   fabric_ids     the subset of the sites/site groups that are FABRICS -- i.e. hold a fabric
 #                  node. An ordinary NetBox site holding WAN kit or servers is
 #                  in fabric_map but not in fabric_ids, and is asked for
 #                  nothing.
@@ -63,6 +64,7 @@
   ansible.builtin.set_fact:
     fabric_map: "{{ (_resolved | from_json).map }}"
     fabric_ids: "{{ (_resolved | from_json).fabrics }}"
+    fabric_nodes: "{{ (_resolved | from_json).nodes }}"
     fabric_ambiguous: "{{ (_resolved | from_json).ambiguous }}"
     fabric_orphans: "{{ (_resolved | from_json).orphans }}"
   vars:
@@ -130,6 +132,7 @@
       {%-   set _ = fabrics.append(out[host]) -%}
       {%- endfor -%}
       {{ {'map': out, 'fabrics': fabrics | sort,
+          'nodes': fabric_nodes | unique | sort,
           'ambiguous': ambiguous, 'orphans': orphans} | to_json }}
   when: fabric_id is not defined
   run_once: true
