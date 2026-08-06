@@ -180,7 +180,19 @@
   delegate_to: localhost
   run_once: true
 
+# Fabric nodes only. This is the OVERLAY data -- which VRFs and VLANs this
+# switch carries -- and the transform validates it for the host it is scoping
+# to, including that every VTEP in an external-RP VRF has a PIM register source.
+# A distribution switch has no overlay and no register source, correctly, so
+# running this for one fails on a requirement that does not apply to it.
+#
+# Such a device is in the play so underlay_readiness can check its underlay: it
+# carries fabric traffic between a leaf and a border, so its MTU and PIM matter
+# even though nothing is rendered for it. It is dropped at the top of
+# 02_render_configs.yml, after the pre-flight and before anything is rendered,
+# and nothing between here and there reads these facts.
 - name: 7. Transform NetBox data and assign the facts the templates read
+  when: group_names | intersect(fabric_node_groups) | length > 0
   ansible.builtin.set_fact:
     netbox_vlan_groups: "{{ {'vrfs': _processed_data.vrfs,
                           'l2_vlans': _processed_data.l2_vlans,
