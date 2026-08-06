@@ -626,7 +626,7 @@ checks run before a switch is touched:
 | Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |
 | Fabric partition | Refuses the whole run if the NetBox site tree does not partition into fabrics — today, if any device sits under nested site groups. Fabric-wide: an ambiguous tree makes every peer list suspect, not just the ambiguous device's. |
 | Route reflector assertion | Fails a device whose fabric contains no `fabric_spine`. It would otherwise render a `router bgp` with no overlay neighbours, which `acm replace` applies as a teardown of every EVPN session on the switch. Per device, so one mis-sited leaf does not stop a healthy fabric. |
-| Blast-radius guard | Blocks a deploy removing >`acm_safety_max_removal_pct` of any tracked object class, and **any** underlay removal (zero tolerance). Override with `-e acm_safety_force=true`. Generate runs warn instead of failing. |
+| Blast-radius guard | Blocks a deploy removing >`acm_safety_max_removal_pct` of any tracked object class, and **any** underlay removal (zero tolerance). **Strictly** greater, so a single removal blocks only when it was the last member of its class — the reasoning is in `defaults/main.yml`. Override with `-e acm_safety_force=true`. Generate runs warn instead of failing. |
 
 ## Tests
 

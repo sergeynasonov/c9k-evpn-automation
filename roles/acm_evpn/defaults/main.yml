@@ -189,5 +189,24 @@ commit_timeout: 120
 # tracked object class (VRFs, SVIs, EVPN instances, VNIs) would lose more than
 # this share of its members. Override for a legitimate large removal with:
 #   ansible-playbook deploy_evpn.yml -e deploy_target=<fabric> -e acm_safety_force=true
+#
+# The comparison is STRICTLY greater, and stays that way (decided 2026-08-06 --
+# do not "fix" it). On a small class the percentage is a coarse instrument: one
+# of two members is 50%, one of three is 33%. So at this threshold a SINGLE
+# removal only ever blocks when it was the LAST member of its class.
+#
+# Both consequences are accepted deliberately:
+#   * dropping one of two overlays does NOT block. Verified live: removing an
+#     L2-only VLAN from a border that carried two came to exactly 50.0% of
+#     evpn_instances and passed. Tightening to >= would demand the force flag
+#     for a routine change, and reaching for --force by habit is a worse hazard
+#     than a slightly permissive boundary.
+#   * a 1 -> 0 removal DOES block. That is noise in a lab, where a fabric often
+#     carries exactly one of something; it is rare in production, where classes
+#     are larger, and it is the shape of the failure this guard exists for.
+#
+# The catastrophic case is caught whatever the class size: if NetBox returns
+# nothing, every class goes to zero, which is 100%. See
+# tests/unit/test_ios_config_census.py::test_fifty_percent_exactly_does_not_violate.
 acm_safety_max_removal_pct: 50
 acm_safety_force: false
