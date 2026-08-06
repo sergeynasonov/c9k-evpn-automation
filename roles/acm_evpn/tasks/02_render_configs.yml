@@ -229,8 +229,19 @@
       {%- for vid in (_dev_cfg_vlans | difference(_new_cfg_vlans)) -%}
       {%-   set _ = out.append('vlan configuration ' ~ vid) -%}
       {%- endfor -%}
+      {#- A VLAN the render still emits is NOT gone, however it emits it. A
+          HANDOFF VLAN is the case that matters: border_config.j2 renders
+          'vlan 197' and 'interface Vlan197' but never an EVI or a 'vlan
+          configuration', because a handoff carries no VNI -- so measuring
+          "gone" by EVI/vlan-configuration alone declared every handoff stale on
+          every run. Harmless in the candidate (the managed set drops those two
+          headers anyway and the template re-emits them, which is why ACM
+          reported no diff) but it put a PRUNE line in the pre-deploy summary
+          for objects nothing was pruning. A summary that cries wolf is worse
+          than no summary. -#}
+      {%- set _new_vlan_defs = fabric_config | regex_findall('(?m)^vlan ([0-9]+)$') -%}
       {%- set gone_vlans = (_dev_evi_vlans + _dev_cfg_vlans + _dev_fabric_svis) | unique
-                           | difference(_new_evi_vlans + _new_cfg_vlans) -%}
+                           | difference(_new_evi_vlans + _new_cfg_vlans + _new_vlan_defs) -%}
       {#- The SVI is pruned only where the device HAD one; the 'vlan <id>'
           definition is pruned for every gone fabric VLAN.
 
