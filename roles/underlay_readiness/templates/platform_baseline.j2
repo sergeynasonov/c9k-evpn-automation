@@ -166,8 +166,29 @@ ntp server {{ ntp_server_2 }}
   'snmp-server trap-source' above stays: it is source-interface hygiene along
   with the ip http / ip radius / logging lines, not an SNMP credential.
 #}
+{#
+  System MTU. 9100 is unchanged as the value a new switch is brought to -- it
+  covers jumbo tenant frames as well as the 50 bytes of VXLAN header -- but it
+  is now rendered ONLY for a switch that has not been given a value of its own.
+
+  It used to be unconditional. That was invisible on a fabric already at 9100,
+  and is why it went unnoticed, but ios_config merges: on a switch running
+  'system mtu 1600' the 9100 line is missing from the running config, so every
+  readiness run would push it and bounce every interface on the box. Harmless
+  while the check demanded 9100 anyway; not harmless now that any value at or
+  above readiness_system_mtu_min is valid and deliberate.
+
+  Below the floor is, in practice, a switch that has never been configured:
+  1500 is the platform default and IOS-XE does not render it back. Above the
+  floor the value is left exactly as found.
+
+  Guarded on the fact being defined too -- an unreachable switch never reached
+  the gather, and rendering must not fail before the connection does.
+#}
+{% if _readiness_system_mtu is defined and (_readiness_system_mtu | int) < (readiness_system_mtu_min | int) %}
 system mtu 9100
 !
+{% endif %}
 archive
  log config
   logging enable

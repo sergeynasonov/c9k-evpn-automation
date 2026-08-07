@@ -1,0 +1,72 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# Evaluates the REAL system-MTU logic against hand-written running configs.
+# Driven by tests/unit/test_system_mtu.py, which lifts three pieces out of the
+# shipped files and writes them next to this one -- so what is under test is
+# what ships:
+#
+#   mtu_parse.yml      the '_sys_mtu' expression from 01_gather.yml
+#   mtu_consensus.yml  the whole "resolve the fabric's system MTU" task, ditto
+#   mtu_check.yml      the '_mtu' expression from 02_check.yml
+#
+# The three are separate tasks here for the same reason they are separate in the
+# role: the consensus is cross-device, so every host must publish its own MTU
+# before any host reads the fabric's. 'strategy: linear' is what guarantees that
+# ordering, in the harness as in the playbooks.
+
+- name: System MTU floor and fabric consistency
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  vars:
+    vtep_source_intf: Loopback0
+    # Every run must be scoped; this harness exercises the whole fixture.
+    deploy_target: all
+    readiness_system_mtu_min: 1550
+  tasks:
+    - name: Resolve fabric membership
+      ansible.builtin.import_role:
+        name: underlay_readiness
+        tasks_from: fabric_resolve.yml
+
+    # What 01_gather.yml's stanza indexer would have produced from the device.
+    # Written as data rather than parsed here: the indexer has its own coverage,
+    # and re-running it would test that instead of the MTU logic.
+    - name: Stand in for the indexed running configuration
+      ansible.builtin.set_fact:
+        _stanzas: "{{ mtu_stanzas.get(inventory_hostname, {}) }}"
+      when: inventory_hostname in mtu_stanzas
+
+    - name: Read this switch's system MTU
+      ansible.builtin.import_tasks: mtu_parse.yml
+
+    - name: Resolve the fabric's system MTU
+      ansible.builtin.import_tasks: mtu_consensus.yml
+
+    - name: Check the system MTU
+      ansible.builtin.import_tasks: mtu_check.yml
+
+    - name: Write the findings for the test to read
+      ansible.builtin.copy:
+        content: "{{ _out | to_nice_json }}"
+        dest: "{{ result_file }}"
+        mode: "0644"
+      vars:
+        _findings: >-
+          {%- set out = {} -%}
+          {%- for host in ansible_play_hosts | sort -%}
+          {%-   set hv = hostvars[host] -%}
+          {%-   set _ = out.update({host: {
+                  'fabric_id': hv.fabric_id | default(''),
+                  'mtu': hv._readiness_system_mtu | default(''),
+                  'fabric_mtu': hv.readiness_fabric_mtu | default(''),
+                  'msgs': (hv.mtu_findings | default([])) | map(attribute='msg') | list,
+                  'lines': (hv.mtu_findings | default([]))
+                            | map(attribute='lines') | flatten | list}}) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+        _out: "{{ _findings | from_json }}"
+      run_once: true
+      delegate_to: localhost

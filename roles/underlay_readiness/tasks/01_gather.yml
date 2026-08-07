@@ -108,6 +108,19 @@
     # never fabric uplinks and would fail 'no switchport' for the wrong reason.
     _readiness_uplinks: "{{ _uplinks | from_json }}"
     _readiness_lo0: "{{ _lo0 }}"
+    # 'system mtu' is rendered only when it is NOT the platform default of
+    # 1500, so absence is a fact here rather than an ambiguity: every C9K
+    # defaults to 1500, and 1500 is below the floor, so a switch that never
+    # had it set is correctly reported. This is the opposite of the 'ip
+    # routing' case above, where the default varies by platform and absence
+    # therefore proves nothing.
+    #
+    # The '[0-9]+' is what makes this safe, not the anchor: IOS has sibling
+    # commands in this space ('system mtu routing 1500'), and a prefix match on
+    # 'system mtu ' reads 'routing' as the number and silently yields 0. The
+    # trailing '$' then pins it to exactly this command; 'match' anchors only
+    # at the start, so it is not implied.
+    _readiness_system_mtu: "{{ _sys_mtu }}"
   vars:
     _uplinks: >-
       {%- set out = [] -%}
@@ -124,4 +137,47 @@
       {%- set addrs = _stanzas.get('interface ' ~ vtep_source_intf, [])
                       | select('match', 'ip address ') | list -%}
       {{ addrs[0].split()[2] if addrs else '' }}
+    _sys_mtu: >-
+      {%- set found = _stanzas | select('match', 'system mtu [0-9]+$') | list -%}
+      {{ found[0].split()[2] | int if found else 1500 }}
+  when: _stanzas is defined
+
+# Cross-device, so it cannot be another key in the task above: that task is
+# where each host publishes its own MTU, and this one has to read what the
+# others published. Under 'strategy: linear' every host finishes the task above
+# before any host starts this one -- the same ordering 05_report.yml's run_once
+# tasks already depend on, and which every playbook here sets explicitly.
+#
+# It costs one more console line per host, which the rest of this file works
+# hard to avoid. The alternative is comparing MTU in 05_report.yml, and that
+# runs after 04_apply_baseline.yml has already pushed a value.
+- name: Readiness — resolve the fabric's system MTU
+  ansible.builtin.set_fact:
+    readiness_fabric_mtu: "{{ _consensus }}"
+  vars:
+    # The value this fabric has settled on, or 0 when it has not: either no
+    # member was read, or two values tied for most common. Zero needs no
+    # special handling downstream -- an MTU is never 0, so "this switch differs
+    # from its fabric" and "the fabric has no single value" reduce to the same
+    # comparison in 02_check.yml.
+    #
+    # Only members this run actually READ are counted, which is what makes the
+    # check degrade honestly rather than wrongly. A run scoped to one switch
+    # finds only itself, agrees with itself, and checks the floor alone; a
+    # fabric-wide run checks both. An unreachable member is excluded for the
+    # same reason: its MTU was never seen, so it cannot be judged or counted.
+    _consensus: >-
+      {%- set counts = {} -%}
+      {%- for h in fabric_members | default([]) -%}
+      {%-   set v = hostvars[h].get('_readiness_system_mtu') -%}
+      {%-   if v -%}
+      {%-     set _ = counts.update({v | int: counts.get(v | int, 0) + 1}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set top = counts.values() | list | max if counts else 0 -%}
+      {%- set winners = [] -%}
+      {%- for value, seen in counts.items() if seen == top -%}
+      {%-   set _ = winners.append(value) -%}
+      {%- endfor -%}
+      {{ winners[0] if winners | length == 1 else 0 }}
   when: _stanzas is defined

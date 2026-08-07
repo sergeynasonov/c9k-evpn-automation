@@ -169,6 +169,20 @@ from the moment the underlay carries traffic, and re-applying them is a no-op.
 
 ### Every node — globals
 
+`system mtu` is checked as a floor of **1550** — 1500 plus VXLAN's 50 bytes of
+outer header — not as the exact value below. Any value at or above the floor is
+accepted, so a fabric standardised on 1600 or 9216 is left alone; 9100 is shown
+because it also covers jumbo tenant frames, and it is what both the remediation
+and the platform baseline propose for a switch below the floor.
+
+The fabric still has to agree on whatever it picks — OSPF carries the MTU in
+its DBD packets and will not form an adjacency across a mismatch — and that is
+checked too. Expect it to surface indirectly, though: a leaf or distribution
+switch out of step forms no adjacency, so its loopback never reaches the
+underlay and it shows up as **unreachable** rather than as an MTU finding. A
+border stays reachable over its BGP handoff and is reported properly. An
+otherwise healthy switch that has gone unreachable is worth checking for this.
+
 ```
 system mtu 9100
 !
@@ -358,7 +372,8 @@ configures cleanly and then silently fails to forward:
 
 | Check | Why |
 |---|---|
-| `system mtu 9100`, `ip multicast-routing`, PIM RP / register-source / SSM | VXLAN needs the headroom; no multicast routing means no BUM replication |
+| `system mtu` at or above **1550** | 1500 + 50 bytes of VXLAN header. The exact value is yours. The fabric must also agree on it, or OSPF refuses the adjacency — but a switch that disagrees usually presents as unreachable, not as this finding |
+| `ip multicast-routing`, PIM RP / register-source / SSM | No multicast routing means no BUM replication |
 | CEF load-sharing with `include-ports` | The default hashes on the outer header, which is identical for every flow between a pair of VTEPs — so the whole tunnel pins to one uplink |
 | IP routing enabled — **derived, not text-matched** | It is a silent platform default on the C9400/9500/9600, so absence proves nothing |
 | `Loopback0` is a /32, with `ip pim sparse-mode` and in OSPF | It is the VTEP source, the router-id and the PIM register source |
