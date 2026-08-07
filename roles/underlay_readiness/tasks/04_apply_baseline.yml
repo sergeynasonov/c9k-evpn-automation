@@ -54,35 +54,77 @@
 # than a number to remember.
 #
 # Getting here took removing every line the device would never report back:
-# 'ip tcp window-size' and 'hidekeys' (platform defaults -- asserted negatively
-# in 02_check.yml instead), 'vtp version 3' and the VTP password (meaningless
-# in transparent mode), and 'ip routing' is now conditional on the switch not
-# already routing. See the config-visibility note in the README.
+# 'ip tcp window-size' (dropped entirely -- the default is platform-specific,
+# so neither pushing nor checking it was right), 'hidekeys' (a platform default,
+# asserted negatively in 02_check.yml instead), 'vtp version 3' and the VTP
+# password (meaningless in transparent mode), and 'ip routing' is now
+# conditional on the switch not already routing. See the config-visibility note
+# in the README.
 #
 # Set readiness_apply_baseline=false to check without configuring anything.
-- name: Readiness — report platform baseline changes
+#
+# ONE summary for the run, not a wall of config per host. This used to print
+# every pushed line for every switch, which on a first run is the entire
+# baseline on every box -- seven hosts x 85 lines of correct, expected output
+# nobody reads, burying the findings the run exists to produce.
+#
+# It was also a multi-line STRING, which the default callback renders as a
+# single JSON blob full of \n escapes. A LIST prints one line per element
+# regardless of callback format; that is a rule this project has written down
+# and this task predated.
+#
+# The COUNT is the signal, and it is what survives by default. Zero on an
+# established switch, so this does not fire at all; identical across switches on
+# a first run; an outlier, or a count that grows week to week, is the thing to
+# look at. The lines themselves move behind readiness_show_baseline_lines --
+# "investigate a line you do not recognise" is useless advice if there is no way
+# to see them, but it does not have to be the default.
+- name: Readiness — platform baseline summary
   ansible.builtin.debug:
-    msg: |-
-      {{ inventory_hostname }}: platform baseline applied ({{ _updates | length }} line(s)).
-      A stable count on re-run is expected. A count that grows, or a line you do
-      not recognise, is worth investigating.
-      {% for line in _shown %}
-        {{ line }}
-      {% endfor %}
-      {% if _withheld > 0 %}
-        ({{ _withheld }} line(s) withheld -- they carry credentials)
-      {% endif %}
+    msg: "{{ _summary | from_json }}"
   vars:
-    _updates: "{{ _baseline_applied.updates | default([]) }}"
-    # The task above is no_log, so this is the only visibility into what was
-    # pushed -- which is the whole point, since 'investigate an unfamiliar line'
-    # is useless advice if the lines are never shown. Credential-bearing lines
-    # are counted rather than printed.
+    # Credential-bearing lines are counted, never printed. The apply task is
+    # no_log precisely because the local admin hash is in there.
     _secret_re: "username |secret |password | user |authentication"
-    _shown: "{{ _updates | reject('search', _secret_re) | list }}"
-    _withheld: "{{ _updates | select('search', _secret_re) | list | length }}"
+    _summary: >-
+      {%- set out = [] -%}
+      {%- set changed = [] -%}
+      {%- for h in ansible_play_hosts | sort -%}
+      {%-   if hostvars[h].get('_baseline_applied', {}).get('changed') -%}
+      {%-     set _ = changed.append(h) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if changed -%}
+      {%-   set _ = out.append('Platform baseline — ' ~ changed | length
+                               ~ ' switch(es) configured. A count that is stable on'
+                               ~ ' re-run is expected; one that grows is not.') -%}
+      {%-   for h in changed -%}
+      {%-     set updates = hostvars[h]._baseline_applied.updates | default([]) -%}
+      {%-     set shown = updates | reject('search', _secret_re) | list -%}
+      {%-     set withheld = updates | select('search', _secret_re) | list | length -%}
+      {%-     set _ = out.append('  ' ~ '%-16s' | format(h)
+                                 ~ updates | length ~ ' line(s)') -%}
+      {%-     if readiness_show_baseline_lines | bool -%}
+      {%-       for line in shown -%}
+      {%-         set _ = out.append('      ' ~ line) -%}
+      {%-       endfor -%}
+      {%-       if withheld > 0 -%}
+      {%-         set _ = out.append('      (' ~ withheld
+                                     ~ ' line(s) withheld -- they carry credentials)') -%}
+      {%-       endif -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if not (readiness_show_baseline_lines | bool) -%}
+      {%-     set _ = out.append('  -e readiness_show_baseline_lines=true lists what was pushed') -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ out | to_json }}
+  run_once: true
+  delegate_to: localhost
   # noqa: no-handler -- this reports what the previous task pushed, it does not
   # react to it. A handler would run at the end of the play, detached from the
-  # host and the task whose output it is explaining, and would be skipped
-  # entirely if a later task failed first -- exactly when the report matters.
-  when: _baseline_applied is changed
+  # task whose output it is explaining, and would be skipped entirely if a later
+  # task failed first -- exactly when the report matters.
+  when: ansible_play_hosts | map('extract', hostvars, '_baseline_applied')
+        | select('defined') | selectattr('changed', 'defined')
+        | selectattr('changed') | list | length > 0

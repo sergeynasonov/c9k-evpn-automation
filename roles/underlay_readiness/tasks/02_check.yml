@@ -55,17 +55,19 @@
     # A default is not rendered, so it cannot be asserted positively. A
     # NON-default value IS rendered, so the line appearing at all is the
     # finding. Same asymmetry as 'no ip routing'.
+    #
+    # 'ip tcp window-size' USED TO BE HERE and is deliberately gone. The check
+    # assumed one right value across the fabric (131072) and reported anything
+    # else; the value is platform-specific, so on a real fabric it fired on
+    # every switch at once for a setting that was correct on each of them. A
+    # check that cannot be satisfied except by making the fabric uniform is
+    # asserting a fabric-wide policy this role has no business holding -- and
+    # seven identical findings is how a summary stops being read at all.
+    #
+    # The bar for adding something here: wrong on ANY platform, not merely
+    # different between them.
     _defaults: >-
       {%- set bad = [] -%}
-      {%- for line in _stanzas if line.startswith('ip tcp window-size ') -%}
-      {%-   if line != 'ip tcp window-size ' ~ readiness_tcp_window_size -%}
-      {%-     set _ = bad.append({
-                'msg': line ~ ' -- expected the default of ' ~ readiness_tcp_window_size
-                       ~ '; a non-default value is rendered, so this was set deliberately',
-                'parents': [],
-                'lines': ['default ip tcp window-size']}) -%}
-      {%-   endif -%}
-      {%- endfor -%}
       {%- if 'no hidekeys' in _stanzas.get('archive', []) -%}
       {%-   set _ = bad.append({
               'msg': 'archive log config: "no hidekeys" -- archived configurations will contain credentials in clear text',
@@ -228,13 +230,13 @@
     # because that would put credentials in a file on disk.
     _snmp: >-
       {%- set bad = [] -%}
-      {%- if snmp_v3_user not in _readiness_state.stdout[0] -%}
+      {%- if snmp_v3_user not in _readiness_snmp_users -%}
       {%-   set _ = bad.append({
               'msg': 'SNMPv3 user "' ~ snmp_v3_user ~ '" not present (show snmp user)'
                      ~ ' -- run readiness.yml with readiness_apply_snmp=true to configure it',
               'parents': [], 'lines': []}) -%}
       {%- endif -%}
-      {%- if snmp_v3_group not in _readiness_state.stdout[1] -%}
+      {%- if snmp_v3_group not in _readiness_snmp_groups -%}
       {%-   set _ = bad.append({
               'msg': 'SNMPv3 group "' ~ snmp_v3_group ~ '" not present (show snmp group)',
               'parents': [], 'lines': []}) -%}

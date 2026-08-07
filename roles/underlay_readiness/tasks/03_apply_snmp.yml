@@ -44,8 +44,8 @@
   # change on every single run and never settle.
   when:
     - readiness_apply_snmp | bool
-    - snmp_v3_user not in _readiness_state.stdout[0]
-      or snmp_v3_group not in _readiness_state.stdout[1]
+    - snmp_v3_user not in _readiness_snmp_users
+      or snmp_v3_group not in _readiness_snmp_groups
   no_log: true
   register: _snmp_applied
 
@@ -54,5 +54,12 @@
 #
 # Worth remembering if one is ever added back -- a task with 'register' that is
 # SKIPPED still overwrites its target with {'skipped': true}. Pointing a
-# conditional re-read straight at _readiness_state would destroy the gathered
+# conditional re-read straight at _readiness_snmp would destroy the gathered
 # output on every run where SNMP was already correct.
+#
+# The two variables above are normalised in 01_gather.yml and are EMPTY STRINGS
+# when the state read produced nothing -- which is the normal case here, since a
+# switch with no SNMP at all answers 'show snmp user' with '%SNMP agent not
+# enabled'. An empty string means no user was seen, so this task fires and
+# configures one. That is the whole point: configuring 'snmp-server user' is
+# itself what enables the agent.

@@ -1,0 +1,64 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# Drives the REAL derive task from 01_gather.yml and the REAL '_snmp' check from
+# 02_check.yml over operational-state reads that may not have produced anything.
+# Driven by tests/unit/test_snmp_state.py, which lifts both out of the shipped
+# files and writes derive.yml and snmp_check.yml next to this one.
+#
+# The device calls themselves cannot run offline, so the two ios_command reads
+# are supplied as data in the shape ios_command registers them -- including the
+# shape it registers when the command errored and 'failed_when: false' swallowed
+# it, which is a result with no 'stdout' key at all.
+
+- name: SNMP and OSPF state, including reads that produced nothing
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  vars:
+    vtep_source_intf: Loopback0
+    deploy_target: all
+    readiness_ospf_process: 1
+    readiness_ospf_area: 0
+    snmp_v3_user: example-snmpv3
+    snmp_v3_group: AuthPrivGroup
+  tasks:
+    # Empty is fine: the SNMP check reads none of it, and the other derivations
+    # in the same task have their own coverage elsewhere.
+    - name: Stand in for the indexed running configuration
+      ansible.builtin.set_fact:
+        _stanzas: {}
+
+    - name: Stand in for the two operational-state reads
+      ansible.builtin.set_fact:
+        _readiness_snmp: "{{ snmp_reads.get(inventory_hostname, {}) }}"
+        _readiness_ospf: "{{ ospf_reads.get(inventory_hostname, {}) }}"
+
+    - name: Derive underlay facts
+      ansible.builtin.import_tasks: derive.yml
+
+    - name: Check SNMPv3
+      ansible.builtin.import_tasks: snmp_check.yml
+
+    - name: Write the findings for the test to read
+      ansible.builtin.copy:
+        content: "{{ _out | to_nice_json }}"
+        dest: "{{ result_file }}"
+        mode: "0644"
+      vars:
+        _findings: >-
+          {%- set out = {} -%}
+          {%- for host in ansible_play_hosts | sort -%}
+          {%-   set hv = hostvars[host] -%}
+          {%-   set _ = out.update({host: {
+                  'users': hv._readiness_snmp_users | default('__unset__'),
+                  'groups': hv._readiness_snmp_groups | default('__unset__'),
+                  'ospf_routers': hv._readiness_ospf_routers | default('__unset__'),
+                  'routing_enabled': hv._readiness_routing_enabled | default('__unset__'),
+                  'msgs': (hv.snmp_findings | default([])) | map(attribute='msg') | list}}) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+        _out: "{{ _findings | from_json }}"
+      run_once: true
+      delegate_to: localhost

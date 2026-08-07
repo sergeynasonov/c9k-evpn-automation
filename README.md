@@ -332,6 +332,64 @@ every leaf and spine switch a path out. A leaf switch running it would advertise
 a default it cannot
 honour.
 
+### Every node — SNMPv3
+
+The one block on this page you do **not** paste: `readiness.yml` configures it
+for you, in merge mode. It is here because it is *checked*, and because it is
+the only check a switch built exactly to this page can still fail.
+
+```
+ip access-list standard SNMP-ACL
+ 10 permit 198.51.100.20
+!
+snmp-server group AuthPrivGroup v3 priv access SNMP-ACL
+snmp-server user example-snmpv3 AuthPrivGroup v3 auth sha <auth> priv aes 128 <priv>
+```
+
+The identity — user, group, ACL name and the permitted collectors — comes from
+`group_vars/all/deployment.yml`; the two passwords come from the environment
+(`ios_snmp_auth`, `ios_snmp_priv`) and are never written to a file. See
+[SETUP.md](SETUP.md). The ACL is skipped entirely if `snmp_acl` is empty, and
+the group then carries no `access` clause.
+
+**Run `readiness.yml` on a new switch before `generate_evpn.yml` or
+`deploy_evpn.yml`.** The readiness role also runs as a pre-flight inside
+`acm_evpn`, but that path only *checks* — it never configures. So a switch that
+has never had a standalone readiness run reports its SNMPv3 user and group
+missing, which looks like a Day-0 mistake and is really just an ordering one:
+
+```bash
+ansible-playbook readiness.yml -e deploy_target=<new switch>   # configures, then checks
+```
+
+If it still reports the user missing after that, the passwords are not reaching
+the play — the line is pushed with empty credentials, which the device accepts
+in a form that never matches. Check `ios_snmp_auth` and `ios_snmp_priv` are in
+Infisical, then `direnv reload`.
+
+Both checks read **operational state**, `show snmp user` and `show snmp group`,
+rather than the running config. IOS-XE hides `snmp-server user` from `show
+running-config` entirely, which is also why SNMPv3 is installed here in merge
+mode instead of being rendered into the `acm_evpn` candidate — a full-replace
+candidate could never converge on a line the device will not read back.
+
+### Every node — one default to leave alone
+
+`readiness.yml` fails a switch for this being *present*, which is why it does
+not appear in the blocks above. A default is not rendered into the running
+config, so a value that **is** rendered was set deliberately by someone.
+
+| Do not set | Why, and how to clear it |
+|---|---|
+| `no hidekeys`, under `archive` → `log config` | Archived configurations would store credentials in clear text. `hidekeys` is the default, so the baseline never pushes it — but an explicit `no hidekeys` overrides it. `archive` / `log config` / `hidekeys` |
+
+Nothing else about platform tuning is checked, and `ip tcp window-size` is the
+worked example of why. It was checked against one fabric-wide value until a real
+fabric reported all seven switches at once for a setting that was correct on
+each of them — the default is platform-specific. A check earns its place here
+only if the thing it finds is wrong on *any* platform, not merely different
+between them.
+
 Once this is done the node is reachable and self-sufficient; everything from here
 is additive.
 
@@ -381,7 +439,8 @@ configures cleanly and then silently fails to forward:
 | OSPF `router-id` equals the `Loopback0` address | BGP takes its router-id from the same interface; disagreement makes route dumps unreadable |
 | Border switches additionally originate the default route | `default-information originate` |
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
-| SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group`, never by reading passwords |
+| SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group`, never by reading passwords. `readiness.yml` installs these; the `acm_evpn` pre-flight only checks them |
+| No `no hidekeys` under `archive log config` | Checked *negatively* — a platform default is never rendered, so a value that is rendered was set deliberately |
 | **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch **in the same fabric** | A one-way MSDP mesh looks complete on each switch individually |
 
 The one **warning** is OSPF area size: above 200 routers in an area it
