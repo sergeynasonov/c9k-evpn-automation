@@ -153,6 +153,17 @@ readiness_write_csv: true
 # Set false to check a switch without configuring anything at all.
 readiness_apply_baseline: true
 
+# List every line the baseline pushed, per switch, instead of just the count.
+# Off by default: a first run legitimately pushes the whole baseline to every
+# switch, and that is a page of correct, expected output per host burying the
+# findings the run exists to produce. Turn it on when a count looks wrong:
+#
+#   ansible-playbook readiness.yml -e deploy_target=<fabric> \
+#                                  -e readiness_show_baseline_lines=true
+#
+# Credential-bearing lines are counted rather than printed either way.
+readiness_show_baseline_lines: false
+
 # The device roles and tags that make a device a FABRIC NODE -- something this
 # automation renders configuration for. A device outside all of these (a
 # distribution switch, say) is site-scoped like any other and belongs to a
