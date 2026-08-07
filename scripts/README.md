@@ -91,7 +91,7 @@ the PIM register source.
 
 ### `ip_address_import.csv`
 
-`address`, `status`, `device`, `interface`, `is_primary`
+`address`, `status`, `role`, `device`, `interface`, `is_primary`, `tags`
 
 Required by NetBox: **`address`, `status`**. The rest is the assignment.
 
@@ -101,6 +101,24 @@ Required by NetBox: **`address`, `status`**. The rest is the assignment.
 - **The primary IPv4 must be the `Loopback0` address.** The automation asserts
   it on every run: it is what Ansible connects to and what the fabric uses as
   the VTEP source. Exactly one `true` per device.
+
+`role` is optional to NetBox and only one value changes behaviour — but filling
+it in is most of why importing beats clicking. Every fabric address in one
+column, sorted, is where a `10.67.` among a column of `10.66.` is obvious; in
+the UI it is one field on one form you will never see beside the others.
+
+**`anycast` is the value that does something.** NetBox rejects a duplicate
+address for every other role, and the underlay anycast RP is deliberately the
+same address on every spine — so the role is what permits the model to exist at
+all. The two example rows show it: one object per spine, identical address,
+each assigned to that spine's own RP loopback.
+
+`tags` is here for the same reason, and the anycast rows are the only ones that
+need it. The readiness role finds the RP by querying the
+**`underlay_anycast_rp`** tag and then checks the role locally, so an object
+with the role and no tag is invisible to it, and one with the tag and the wrong
+role is reported rather than silently skipped. Slugs, quoted, as in
+`device_import.csv`.
 
 ---
 
@@ -127,10 +145,6 @@ it is per-device drudgery in the same way:
 
 - **VLANs, VRFs and prefixes**, with the `l2vni` / `l3vni` custom fields that
   enrol them in the fabric.
-- **The underlay anycast RP** — one IPAddress per spine, all the same address,
-  each on that spine's RP loopback. Those rows need two more columns,
-  `role` (`anycast`) and `tags` (`"underlay_anycast_rp"`); the address is a
-  legal duplicate only because of the role.
 
 ## Checking the columns against your own NetBox
 
