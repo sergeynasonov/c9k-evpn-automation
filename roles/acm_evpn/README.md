@@ -264,8 +264,31 @@ these. A VLAN with no role produces nothing and is listed in the run output.
 | Role | Renders as |
 |---|---|
 | `edge` | An EVPN segment: `vlan`, `vlan configuration`, `l2vpn evpn instance`, NVE member, and (if in a VRF with a prefix) an anycast-gateway SVI. |
-| `core_vlan` | The VRF's L3VNI transit VLAN + `ip unnumbered` SVI. |
+| `core_vlan` | The VRF's L3VNI transit VLAN + `ip unnumbered` SVI. Needs a placeholder prefix to reach its VRF at all — see below. |
 | `vrf_l3_handoff_vlan` | A border handoff SVI + eBGP neighbour. Lowest usable address ⇒ remote peer, highest ⇒ local SVI. |
+
+### How a VLAN joins a VRF
+
+**Through a prefix, and only through a prefix.** NetBox has no VRF field on a
+VLAN object. The link is: *prefix assigned to the VLAN* → *that prefix's `vrf`*.
+Nothing else is read — a VLAN with no prefix has no VRF, whatever its role or
+name.
+
+Usually that is invisible, because an `edge` VLAN needs a prefix anyway for its
+gateway. It bites on **`core_vlan`**, whose SVI is `ip unnumbered` and therefore
+appears to need no addressing at all. Give it a **placeholder prefix in the
+VRF** regardless. Without one it is read as a VRF-less VLAN, and — having no
+`l2vni` either — it is dropped as unenrolled. Nothing is rendered for it, no
+error is raised, and the fabric bridges perfectly while routing nothing.
+
+The placeholder's value is never used: the SVI is unnumbered, and `core_vlan` is
+excluded from the border's edge-subnet advertisement. Choose something clearly
+not a host subnet, outside the edge ranges — a `/31` is enough.
+
+> This is the opposite of the rule for **underlay multicast** prefixes, which
+> stay in the global table and record their VRF in the description. That rule is
+> about groups the tenant data plane never routes to; this one is about a VLAN
+> that must land in a tenant VRF. Do not carry either across to the other.
 
 ### VLAN tags
 

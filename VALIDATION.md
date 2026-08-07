@@ -35,8 +35,8 @@ the 239.x allocations stay consistent with what is already deployed.
 
 | VID | Name | VRF | Role | Tags | Prefix |
 |---|---|---|---|---|---|
-| 181 | `VAL_A_CORE` | `VAL_A` | `core_vlan` | — | *none* |
-| 182 | `VAL_B_CORE` | `VAL_B` | `core_vlan` | — | *none* |
+| 181 | `VAL_A_CORE` | `VAL_A` | `core_vlan` | — | `10.181.0.0/31`, **in VRF `VAL_A`** |
+| 182 | `VAL_B_CORE` | `VAL_B` | `core_vlan` | — | `10.182.0.0/31`, **in VRF `VAL_B`** |
 
 The core VLAN is the VRF's **L3VNI transit segment**. It is what renders
 `vlan configuration <vid>` / `member vni <l3vni>` and the `ip unnumbered` SVI
@@ -49,8 +49,18 @@ not — which is rows 2.3 through 2.6 of the forwarding matrix, both the intra-V
 and the inter-VRF cases, and it would read as a fabric fault rather than missing
 data.
 
-**No prefix.** The SVI is `ip unnumbered` from `Loopback0`; an address here
-would be modelling something that is never rendered.
+**The prefix is a placeholder, and it is mandatory.** NetBox has no VRF field on
+a VLAN: a VLAN reaches a VRF only through a **prefix assigned to it whose own
+VRF is set** — `netbox_evpn_data.py` reads `vrf` off the prefix and nowhere
+else. So a core VLAN with no prefix has no VRF, falls into the VRF-less branch
+of the transform, and is dropped as an unenrolled L2 VLAN. The routing it exists
+to carry never appears, and nothing complains.
+
+Its value is never used. The SVI is `ip unnumbered` from `Loopback0`, and a
+`core_vlan` is excluded from the border's edge-subnet advertisement (that is
+gated on the edge roles), so the addresses above are inert in both directions.
+Pick something obviously not a host subnet and keep it out of the edge ranges —
+a `/31` per core VLAN is enough.
 
 ### Edge VLANs and the L2-only overlay
 
