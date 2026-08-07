@@ -1,0 +1,13 @@
+device,name,type
+core1,Loopback0,virtual
+core1,TenGigabitEthernet1/0/1,10gbase-x-sfpp
+core1,TenGigabitEthernet1/0/2,10gbase-x-sfpp
+core2,Loopback0,virtual
+core2,TenGigabitEthernet1/0/1,10gbase-x-sfpp
+core2,TenGigabitEthernet1/0/2,10gbase-x-sfpp
+dist1-1,Loopback0,virtual
+dist1-1,TenGigabitEthernet1/1/1,10gbase-x-sfpp
+access1-1,Loopback0,virtual
+access1-1,TenGigabitEthernet1/1/1,10gbase-x-sfpp
+access1-2,Loopback0,virtual
+access1-2,TenGigabitEthernet1/1/1,10gbase-x-sfpp

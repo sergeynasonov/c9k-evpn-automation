@@ -1,0 +1,6 @@
+name,role,manufacturer,device_type,platform,serial,site,location,rack,position,face,status,tags
+core1,Fabric Border,Cisco,C9500-32QC,IOS-XE,FXS0000A001,Building A,Ground Floor,R101,42,front,active,"fabric_spine"
+core2,Fabric Border,Cisco,C9500-32QC,IOS-XE,FXS0000A002,Building A,Ground Floor,R102,42,front,active,"fabric_spine"
+dist1-1,Distribution Switch,Cisco,C9500-24Y4C,IOS-XE,FXS0000A003,Building A,Floor 1,R201,40,front,active,
+access1-1,Fabric Leaf,Cisco,C9300-48P,IOS-XE,FOC0000B001,Building A,Floor 1,R201,36,front,active,
+access1-2,Fabric Leaf,Cisco,C9300-48P,IOS-XE,FOC0000B002,Building A,Floor 2,R202,36,front,active,
