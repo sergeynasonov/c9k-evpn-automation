@@ -33,8 +33,11 @@
 #   fabric_nodes   every device acm_evpn RENDERS for, inventory-wide. NOT the
 #                  set this role checks: a distribution switch between a leaf
 #                  and a border carries fabric traffic, so its underlay has to
-#                  be fit even though nothing is rendered for it. Dropping
-#                  non-fabric devices is acm_evpn's business and happens there.
+#                  be fit even though nothing is rendered for it. Dropping a
+#                  device for not being a fabric NODE is acm_evpn's business and
+#                  happens there; task 8 below drops only what is outside
+#                  fabric_managed_groups, which is wider by exactly that transit
+#                  path.
 #   fabric_ids     the subset of the sites/site groups that are FABRICS -- i.e. hold a fabric
 #                  node. An ordinary NetBox site holding WAN kit or servers is
 #                  in fabric_map but not in fabric_ids, and is asked for
@@ -44,7 +47,7 @@
 #   fabric_asn     this fabric's iBGP ASN, from its sites in NetBox
 #   fabric_scope_map  {"site:<id>"|"sitegroup:<id>": fabric} for the inventory,
 #                     which is how NetBox-scoped data (VLANs) is placed in a
-#                     fabric at all -- see task 10
+#                     fabric at all -- see task 12
 #
 # fabric_asn is resolved here rather than in acm_evpn for the same reason as the
 # rest: it is a property of the fabric, from the same inventory data, and having
@@ -52,18 +55,18 @@
 # use it -- but it validates it, which catches the data error at onboarding
 # rather than on the first render.
 
-# Tasks 1-4 are guarded so that re-entering this file is free. acm_evpn resolves
+# Tasks 1-5 are guarded so that re-entering this file is free. acm_evpn resolves
 # in 01_gather_data.yml and then imports underlay_readiness as a pre-flight,
 # which enters here again; readiness.yml re-gathers after configuring, likewise.
 # Without the guard the orphan report below prints once per entry.
 #
-# The marker is 'fabric_id', which task 5 sets LAST -- not fabric_map, which
-# task 1 sets and which would therefore already be defined by the time task 4
-# tested for it, skipping the report on the very first pass.
+# The marker is 'fabric_id', which task 6 sets LAST -- not fabric_map, which
+# task 1 sets and which would therefore already be defined by the time tasks 4
+# and 5 tested for it, skipping both reports on the very first pass.
 #
-# Tasks 5 and 6 are deliberately unguarded. They are per host and idempotent,
-# and a condition covering the whole file would disable the end_host in task 6
-# on every re-entry, silently ending the skip.
+# Tasks 6, 7 and 8 are deliberately unguarded. They are per host and idempotent,
+# and a condition covering the whole file would disable the end_host in tasks 7
+# and 8 on every re-entry, silently ending the skips.
 - name: 1. Resolve every device's fabric from inventory
   ansible.builtin.set_fact:
     fabric_map: "{{ (_resolved | from_json).map }}"
@@ -206,7 +209,7 @@
 
 # Reported, never fatal. A device that cannot be placed is simply not part of
 # any fabric -- it is left alone rather than blocking the fabrics that are fine.
-# The devices themselves drop out of the play in task 6.
+# The devices themselves drop out of the play in task 7.
 - name: 4. Report fabric devices that belong to no fabric
   ansible.builtin.debug:
     msg: >-
@@ -220,7 +223,43 @@
   run_once: true
   delegate_to: localhost
 
-- name: 5. Determine this device's fabric
+# The other reason a host is dropped, and the one an operator is most likely to
+# be surprised by, so it is named rather than left to silence.
+#
+# A run scoped by site or site group selects everything in it -- servers,
+# printers, wireless controllers, virtual machines -- because 'deploy_target'
+# REPLACES the playbook's role-scoped default pattern rather than intersecting
+# with it. Those are not devices this automation has any business contacting.
+#
+# Reported for the case this cannot distinguish: a transit switch modelled under
+# a role name fabric_managed_groups does not list looks exactly like a printer
+# from here, and silently skipping it would leave a hole in the very path
+# readiness exists to cover. Widen fabric_managed_groups when that is what this
+# names.
+- name: 5. Report devices this automation does not act on
+  ansible.builtin.debug:
+    msg: >-
+      {{ ['scope: ' ~ (_out_of_scope | from_json | length)
+          ~ ' device(s) selected by the target but skipped — not a fabric role: '
+          ~ (_out_of_scope | from_json | join(', '))
+          ~ '. A switch in the fabric transit path listed here needs its device'
+          ~ ' role adding to fabric_managed_groups.'] }}
+  vars:
+    _out_of_scope: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts_all | sort -%}
+      {%-   if hostvars[h].group_names | intersect(fabric_managed_groups) | length == 0 -%}
+      {%-     set _ = out.append(h) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+  when:
+    - fabric_id is not defined
+    - _out_of_scope | from_json | length > 0
+  run_once: true
+  delegate_to: localhost
+
+- name: 6. Determine this device's fabric
   ansible.builtin.set_fact:
     fabric_id: "{{ fabric_map.get(inventory_hostname, '') }}"
     fabric_members: "{{ groups.get(fabric_map.get(inventory_hostname, ''), []) | sort }}"
@@ -229,9 +268,19 @@
 # rendered for it and nothing is pushed to it, while the rest of the run
 # continues. Rendering it instead would be the dangerous option -- with no
 # fabric it has no peers, and an empty peer list is a session teardown.
-- name: 6. Skip a device that belongs to no fabric
+- name: 7. Skip a device that belongs to no fabric
   ansible.builtin.meta: end_host
   when: fabric_id | length == 0
+
+# Unguarded and per host, like task 7 above: a file-level condition would
+# disable the end_host on every re-entry and silently end the skip.
+#
+# After the fabric skip rather than before it. Both are terminal, so for a host
+# that is neither in a fabric nor in scope the order decides nothing except
+# which reason an operator reads -- and "no site" is the more specific one.
+- name: 8. Skip a device this automation does not act on
+  ansible.builtin.meta: end_host
+  when: group_names | intersect(fabric_managed_groups) | length == 0
 
 # --- the fabric's BGP ASN ---------------------------------------------------
 #
@@ -244,7 +293,7 @@
 # an iBGP EVPN fabric, and every session in it is inside that ASN. So a site
 # carrying two, or two sites in one fabric disagreeing, is not something to pick
 # a winner from.
-- name: 7. Resolve each fabric's BGP ASN from its sites
+- name: 9. Resolve each fabric's BGP ASN from its sites
   ansible.builtin.set_fact:
     fabric_asn_map: "{{ (_asns | from_json).map }}"
     fabric_asn_problems: "{{ (_asns | from_json).problems }}"
@@ -289,7 +338,7 @@
   run_once: true
   delegate_to: localhost
 
-- name: 8. Refuse a fabric without exactly one BGP ASN
+- name: 10. Refuse a fabric without exactly one BGP ASN
   ansible.builtin.assert:
     that:
       - fabric_asn_problems | length == 0
@@ -310,9 +359,9 @@
   run_once: true
   delegate_to: localhost
 
-- name: 9. Determine this device's BGP ASN
+- name: 11. Determine this device's BGP ASN
   ansible.builtin.set_fact:
-    # No fallback: task 8 has already refused any fabric without exactly one
+    # No fallback: task 10 has already refused any fabric without exactly one
     # ASN, so a lookup that misses can only be a device in a site that is not a
     # fabric at all -- one holding no fabric node. Nothing renders for such a
     # device, so the 0 is unreachable wherever it would matter.
@@ -328,7 +377,7 @@
 # Consumed by netbox_evpn_data.py to scope VNI uniqueness per fabric. Sites with
 # no devices never appear, which is correct -- a VLAN scoped to one is in scope
 # for no host and renders nowhere.
-- name: 10. Map each NetBox site and site group to its fabric
+- name: 12. Map each NetBox site and site group to its fabric
   ansible.builtin.set_fact:
     fabric_scope_map: "{{ _scopes | from_json }}"
   vars:

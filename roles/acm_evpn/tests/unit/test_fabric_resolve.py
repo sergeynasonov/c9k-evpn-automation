@@ -101,7 +101,7 @@ UNSCOPED = object()
 
 
 def run_fabric(inventory, reentry=False, mutate=None, deploy_target="all",
-               render_gate=False):
+               render_gate=False, target_scoping=True):
     """Run the harness against a fixture inventory.
 
     ``reentry`` imports the resolver a second time, the way acm_evpn does when
@@ -153,7 +153,8 @@ def run_fabric(inventory, reentry=False, mutate=None, deploy_target="all",
             [ANSIBLE, "-i", inv_path, "harness.yml",
              "-e", "result_file=" + result_file,
              "-e", "reentry=" + ("true" if reentry else "false"),
-             "-e", "render_gate=" + ("true" if render_gate else "false")]
+             "-e", "render_gate=" + ("true" if render_gate else "false"),
+             "-e", "target_scoping=" + ("true" if target_scoping else "false")]
             + ([] if deploy_target is UNSCOPED
                else ["-e", "deploy_target=" + deploy_target]),
             cwd=workdir, env=env, capture_output=True, text=True,
@@ -295,6 +296,81 @@ class TestASiteWithNoFabricNodeIsNotAFabric(unittest.TestCase):
     def test_it_is_never_reported_for_missing_an_asn(self):
         """The regression, straight from a real run."""
         self.assertNotIn("sites_wan_edge", self.out)
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestScopedToDeviceRolesThisAutomationActsOn(unittest.TestCase):
+    """This project acts on fabric leaves, fabric borders and the distribution
+    switches in the transit path. Nothing else.
+
+    Each playbook's DEFAULT host pattern already says so, but 'deploy_target'
+    REPLACES that pattern rather than intersecting with it, and the documented
+    usage scopes by site or site group — so a site-scoped run selects every
+    server, printer and WAN router that happens to share the site.
+
+    It cannot be fixed in the host pattern. Ansible applies ':&' after every
+    union, so '<roles>:&<target>' works only while the target is a single term;
+    a multi-term deploy_target silently turns the trailing terms back into
+    unions, and 'query(inventory_hostnames, deploy_target)' accepts any pattern.
+    So it is a task, alongside the two 'meta: end_host' rules already there.
+
+    The fixture's sites_wan_edge holds a WAN router and a file server, neither
+    of which is in fabric_managed_groups.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # WITHOUT acm_evpn's target scoping. That drops the same two hosts for
+        # an unrelated reason -- their site is not a fabric, so it is never a
+        # targeted one -- and with it on, deleting the resolver's scope rule
+        # changed nothing here. readiness.yml runs the resolver alone, so this
+        # is the path that has to be tested.
+        cls.rc, cls.out, cls.result = run_fabric("fabric_multi.ini",
+                                                 target_scoping=False)
+
+    def test_run_succeeds(self):
+        self.assertEqual(self.rc, 0, self.out)
+
+    def test_a_device_outside_the_managed_roles_is_dropped(self):
+        for host in ("wan-rtr-1", "fileserver"):
+            self.assertIn(host, self.result["targeted"], host)
+            self.assertNotIn(host, self.result["survivors"], host)
+
+    def test_it_is_reported_rather_than_silently_skipped(self):
+        """The whole reason the report exists: a transit switch modelled under
+        an unlisted role name looks exactly like a printer from here, and
+        silently dropping it would leave a hole in the path readiness covers."""
+        self.assertIn("not a fabric role", self.out)
+        self.assertIn("wan-rtr-1", self.out)
+        self.assertIn("fabric_managed_groups", self.out)
+
+    def test_the_distribution_switch_survives(self):
+        """The line that matters. fabric_managed_groups is wider than
+        fabric_node_groups by exactly the transit path — nothing is rendered for
+        a distribution switch, but its underlay is still checked."""
+        self.assertIn("dist1", self.result["survivors"])
+
+    def test_every_fabric_node_survives(self):
+        for host in ("core1", "core2", "access1-1", "access2-1",
+                     "rcore1", "raccess1"):
+            self.assertIn(host, self.result["survivors"], host)
+
+    def test_a_fabricless_node_is_still_reported_as_an_orphan(self):
+        """orphan1 is a fabric leaf, so it is in scope by role. The new rule
+        must not take over its reporting: it is dropped for having no site, and
+        that is the message an operator needs."""
+        self.assertNotIn("orphan1", self.result["survivors"])
+        self.assertIn("orphan1", self.result["orphans"])
+        self.assertIn("belong to no fabric", self.out)
+
+    def test_the_scope_report_does_not_claim_a_fabric_node(self):
+        """The two reports must not blur: only non-fabric roles belong in the
+        scope one."""
+        scope_line = [ln for ln in self.out.splitlines()
+                      if "not a fabric role" in ln]
+        self.assertTrue(scope_line, self.out)
+        for host in ("core1", "access1-1", "dist1", "orphan1"):
+            self.assertNotIn(host, " ".join(scope_line), host)
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")

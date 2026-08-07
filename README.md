@@ -422,6 +422,25 @@ for it. The three checks that look VTEP-specific all still apply to one:
 | `ip pim register-source Loopback0` | PIM transits the switch, so it still registers |
 | `ip pim rp-address <anycast RP>` | Same reason — it needs to know the fabric's RP to forward multicast |
 
+**And nothing else.** Fabric leaves, fabric borders, spines and distribution
+switches are the whole of what this project contacts. A run scoped by site or
+site group selects everything in that site — servers, printers, wireless
+controllers — because `deploy_target` replaces the playbook's role-scoped
+default pattern rather than intersecting with it. Anything outside those roles
+is dropped before a single device is contacted, and **named while it is
+dropped**:
+
+```
+scope: 2 device(s) selected by the target but skipped — not a fabric role:
+  fileserver, wan-rtr-1. A switch in the fabric transit path listed here needs
+  its device role adding to fabric_managed_groups.
+```
+
+That report is the point. A transit switch modelled under a role name
+`fabric_managed_groups` does not list is indistinguishable from a printer here,
+and silently skipping it would leave a hole in exactly the path this check
+exists to cover. Widen `fabric_managed_groups` when the report names one.
+
 Only the spine-specific block is skipped for them: carrying the anycast RP
 *address* on a loopback, and the MSDP mesh, belong to route reflectors.
 

@@ -178,6 +178,31 @@ fabric_node_groups:
   - device_roles_fabric_border
   - tags_fabric_spine
 
+# Every device role this automation acts on AT ALL. Wider than
+# fabric_node_groups by exactly the transit path: nothing is rendered for a
+# distribution switch, but its underlay is checked, because a wrong MTU or a
+# missing PIM on a switch between a leaf and a border breaks the overlay exactly
+# as it would on a leaf.
+#
+# This is what keeps a site-scoped run from reaching a server, a printer or a
+# wireless controller that happens to share the site. The playbooks' DEFAULT
+# host patterns are already role-scoped, but 'deploy_target' REPLACES the
+# pattern rather than intersecting with it -- and the documented usage scopes by
+# site or site group. The intersection cannot be done in the host pattern
+# either: Ansible applies ':&' after every union, so a multi-term deploy_target
+# silently turns the trailing terms back into unions. It is enforced as a task;
+# see fabric_resolve.yml tasks 5 and 8.
+#
+# Widen this rather than working around it if a fabric's transit path uses a
+# role this list does not name. A device dropped for being out of scope is
+# REPORTED, so that case is visible rather than silent -- which is the whole
+# reason the report exists.
+fabric_managed_groups:
+  - device_roles_fabric_leaf
+  - device_roles_fabric_border
+  - tags_fabric_spine
+  - device_roles_distribution_switch
+
 # Tag(s) marking an IPAddress as a fabric's UNDERLAY anycast RP. One object per
 # spine, all with the same address and role Anycast (which is what lets NetBox
 # hold the duplicates), each assigned to that spine's RP loopback. See
