@@ -11,11 +11,15 @@ fabric built on any other value. The requirement is a floor plus agreement:
                 is a common one rather than a requirement.
 
   CONSISTENCY   OSPF carries the interface MTU in its DBD packets and refuses
-                the adjacency when the two ends disagree, so a fabric that mixes
-                values has neighbours stuck in EXSTART and an underlay that
-                never converges. Exactly like the MSDP mesh, each switch's own
-                config looks perfectly correct, so it can only be caught across
-                devices. This is the half that catches real faults.
+                the adjacency when the two ends disagree. Checked, but secondary
+                to the floor because of how it presents: a leaf or distribution
+                switch out of step forms no adjacency, so its loopback never
+                reaches the underlay and Ansible sees it as UNREACHABLE rather
+                than as an MTU finding. A BORDER stays reachable over its BGP
+                handoff, and is what this branch actually catches.
+
+Only the floor proposes a command, and it is 9100 flat -- the same literal
+platform_baseline.j2 installs, which one test here exists to keep in step.
 
 Everything under test is Jinja inside a set_fact or a template, where
 --syntax-check evaluates nothing, so each piece is lifted out of the shipped
@@ -236,33 +240,37 @@ class TestGreenfieldFabric(MtuTestCase):
             self.assertEqual(len(self.msgs(host)), 1, host)
             self.assertNotIn("does not agree", " ".join(self.msgs(host)), host)
 
-    def test_no_command_is_guessed_when_the_fabric_has_nothing_valid(self):
-        """Every member is below the floor, so there is no fabric value to
-        offer. The baseline installs 9100 on the standalone path."""
+    def test_every_switch_is_told_to_use_the_build_value(self):
         for host in CAMPUS:
-            self.assertEqual(self.lines(host), [], host)
+            self.assertEqual(self.lines(host), ["system mtu 9100"], host)
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
-class TestRemediationFollowsTheFabric(MtuTestCase):
-    """Where a command IS emitted, it must be the fabric's own value. Handing
-    out a number from a defaults file would fix the floor and create a
-    mismatch, which is the more expensive of the two faults."""
+class TestRemediationProposesTheBuildValue(MtuTestCase):
+    """A command is emitted for the floor and nothing else, and it is 9100 flat.
+
+    A switch below the floor cannot hold an adjacency with the fabric anyway,
+    so it is not joining an established one -- it is being built, and 9100 is
+    the build value.
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.result = run_check(fabric(
             {"core1": 1600, "core2": 1600, "access1-1": 1400}))
         # A below-floor switch whose fabric has not settled on anything: core1
-        # and core2 disagree, so there is no value to hand out.
+        # and core2 disagree, so there is nothing to inherit either way.
         cls.no_consensus = run_check(fabric(
             {"core1": 9100, "core2": 1600, "access1-1": 1400}))
 
-    def test_the_below_floor_switch_is_given_the_fabrics_value(self):
-        self.assertEqual(self.lines("access1-1"), ["system mtu 1600"])
+    def test_the_below_floor_switch_is_told_to_use_9100(self):
+        self.assertEqual(self.lines("access1-1"), ["system mtu 9100"])
 
-    def test_it_is_not_given_a_number_from_the_defaults_file(self):
-        self.assertNotIn("9100", " ".join(self.lines("access1-1")))
+    def test_the_proposal_does_not_vary_with_the_fabric(self):
+        """Same command whether the fabric sits at 1600 or disagrees entirely,
+        so a remediation file never depends on who else answered this run."""
+        self.assertEqual(self.no_consensus["access1-1"]["lines"],
+                         ["system mtu 9100"])
 
     def test_the_established_switches_are_untouched(self):
         self.assertClean("core1", "core2")
@@ -272,10 +280,14 @@ class TestRemediationFollowsTheFabric(MtuTestCase):
         one fix; reporting it twice is how a summary stops being readable."""
         self.assertEqual(len(self.msgs("access1-1")), 1, self.msgs("access1-1"))
 
-    def test_no_command_is_guessed_when_the_fabric_has_no_value(self):
-        found = self.no_consensus["access1-1"]
-        self.assertIn("is below the 1550", " ".join(found["msgs"]))
-        self.assertEqual(found["lines"], [])
+    def test_the_proposal_matches_what_the_baseline_installs(self):
+        """The literal 9100 lives in both 02_check.yml and platform_baseline.j2
+        rather than in a variable, so this is what stops them drifting: an
+        operator who pastes the remediation must land where the standalone
+        readiness run would have put the switch anyway."""
+        rendered = [line.strip() for line in render_baseline(1500).splitlines()
+                    if line.strip().startswith("system mtu ")]
+        self.assertEqual(rendered, self.lines("access1-1"))
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
@@ -392,6 +404,25 @@ class TestParsingRejectsSiblingCommands(MtuTestCase):
         self.assertNotIn("system mtu 0", " ".join(self.msgs("core1")))
 
 
+def render_baseline(mtu):
+    """Render the shipped platform baseline for a switch at this MTU.
+
+    'mtu=None' stands in for an unreachable switch, which never reached the
+    gather and so has no fact at all.
+    """
+    env = jinja2.Environment(undefined=jinja2.ChainableUndefined,
+                             keep_trailing_newline=True)
+    # The template is rendered by Ansible, which has filters bare Jinja does
+    # not. Only 'bool' is used here.
+    env.filters["bool"] = lambda v: str(v).lower() in ("true", "yes", "1", "on")
+    with open(BASELINE) as fh:
+        template = env.from_string(fh.read())
+    ctx = {"readiness_system_mtu_min": FLOOR}
+    if mtu is not None:
+        ctx["_readiness_system_mtu"] = mtu
+    return template.render(**ctx)
+
+
 class TestBaselineOnlyMovesAnUnconfiguredSwitch(unittest.TestCase):
     """The baseline still suggests 9100, but 'ios_config' MERGES: an
     unconditional 'system mtu 9100' is missing from the running config of a
@@ -401,17 +432,7 @@ class TestBaselineOnlyMovesAnUnconfiguredSwitch(unittest.TestCase):
 
     @staticmethod
     def render(mtu):
-        env = jinja2.Environment(undefined=jinja2.ChainableUndefined,
-                                 keep_trailing_newline=True)
-        # The template is rendered by Ansible, which has filters bare Jinja
-        # does not. Only 'bool' is used here.
-        env.filters["bool"] = lambda v: str(v).lower() in ("true", "yes", "1", "on")
-        with open(BASELINE) as fh:
-            template = env.from_string(fh.read())
-        ctx = {"readiness_system_mtu_min": FLOOR}
-        if mtu is not None:
-            ctx["_readiness_system_mtu"] = mtu
-        return template.render(**ctx)
+        return render_baseline(mtu)
 
     def test_a_switch_still_on_the_platform_default_is_brought_to_9100(self):
         self.assertIn("system mtu 9100", self.render(1500))

@@ -56,15 +56,19 @@ readiness_global_lines:
 #
 # At or above it, the exact value is the fabric's own decision and this role
 # has no business relitigating it. 9100 is the usual choice because it also
-# covers jumbo tenant frames, and it is what platform_baseline.j2 installs on a
-# switch that has never been given a value -- but a fabric standardised on 1600
-# or 9216 is equally correct and must not be dragged towards it.
+# covers jumbo tenant frames, and it is what both the remediation and
+# platform_baseline.j2 propose for a switch below the floor -- but a fabric
+# standardised on 1600 or 9216 is equally correct and must not be dragged
+# towards it.
 #
-# What is NOT a local choice is that the fabric AGREES. OSPF puts the interface
-# MTU in its DBD packets and refuses the adjacency when the two ends disagree,
-# so a single mismatched switch leaves its neighbours stuck in EXSTART and the
-# underlay never converges -- a fault that looks nothing like an MTU problem
-# from the console. See the '_mtu' block in tasks/02_check.yml.
+# The fabric also has to AGREE on whatever it picks, since OSPF puts the
+# interface MTU in its DBD packets and refuses the adjacency when the two ends
+# disagree. That is checked, but it is a secondary signal rather than the point
+# of this setting: a leaf or distribution switch out of step forms no adjacency,
+# so its loopback never reaches the underlay and it presents as UNREACHABLE
+# rather than as an MTU finding. Borders stay reachable over their BGP handoff
+# and are what the consistency branch actually catches. See the '_mtu' block in
+# tasks/02_check.yml.
 readiness_system_mtu_min: 1550
 
 # Loopback0 is the VTEP source, the OSPF router-id and the PIM register source.
