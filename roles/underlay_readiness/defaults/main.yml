@@ -27,7 +27,6 @@
 # Before adding a line here, check it is not a default on every platform in the
 # fabric. If it might be, derive it from something observable instead.
 readiness_global_lines:
-  - "system mtu 9100"
   - "ip multicast-routing"
   - "ip pim register-source {{ vtep_source_intf }}"
   - "ip pim ssm default"
@@ -45,6 +44,28 @@ readiness_global_lines:
   # drift silently.
   - "ip cef load-sharing algorithm include-ports source destination"
   - "ipv6 cef load-sharing algorithm include-ports source destination"
+
+# System MTU. Checked as a FLOOR plus fabric consistency, not as an exact line,
+# which is why it is not in the list above -- this used to demand "system mtu
+# 9100" verbatim and failed every fabric built on any other value.
+#
+# 1500 + 50, and not a number of its own: VXLAN adds 50 bytes of outer
+# encapsulation -- 14 Ethernet + 20 IPv4 + 8 UDP + 8 VXLAN -- on top of a
+# standard 1500-byte tenant frame. Below this the underlay silently fragments
+# or drops full-size tenant traffic.
+#
+# At or above it, the exact value is the fabric's own decision and this role
+# has no business relitigating it. 9100 is the usual choice because it also
+# covers jumbo tenant frames, and it is what platform_baseline.j2 installs on a
+# switch that has never been given a value -- but a fabric standardised on 1600
+# or 9216 is equally correct and must not be dragged towards it.
+#
+# What is NOT a local choice is that the fabric AGREES. OSPF puts the interface
+# MTU in its DBD packets and refuses the adjacency when the two ends disagree,
+# so a single mismatched switch leaves its neighbours stuck in EXSTART and the
+# underlay never converges -- a fault that looks nothing like an MTU problem
+# from the console. See the '_mtu' block in tasks/02_check.yml.
+readiness_system_mtu_min: 1550
 
 # Loopback0 is the VTEP source, the OSPF router-id and the PIM register source.
 readiness_loopback_lines:

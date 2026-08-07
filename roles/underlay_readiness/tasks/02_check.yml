@@ -19,8 +19,8 @@
   ansible.builtin.set_fact:
     readiness_failures: >-
       {{ (_global | from_json) + (_routing | from_json) + (_defaults | from_json)
-         + (_loopback | from_json) + (_ospf | from_json) + (_uplinks | from_json)
-         + (_snmp | from_json) + (_spine | from_json) }}
+         + (_mtu | from_json) + (_loopback | from_json) + (_ospf | from_json)
+         + (_uplinks | from_json) + (_snmp | from_json) + (_spine | from_json) }}
     readiness_ospf_area_routers: "{{ _readiness_ospf_routers | int }}"
   vars:
     # --- global single-line settings -------------------------------------
@@ -70,6 +70,75 @@
       {%-   set _ = bad.append({
               'msg': 'archive log config: "no hidekeys" -- archived configurations will contain credentials in clear text',
               'parents': ['archive', ' log config'], 'lines': ['hidekeys']}) -%}
+      {%- endif -%}
+      {{ bad | to_json }}
+
+    # --- system MTU --------------------------------------------------------
+    # Two requirements, and only the first is visible from one switch.
+    #
+    # A FLOOR, not an exact value: this used to demand "system mtu 9100"
+    # verbatim and failed every fabric built on anything else. 1500 + 50 bytes
+    # of VXLAN header is what the underlay actually has to carry; above that
+    # the value is the fabric's own choice.
+    #
+    # CONSISTENCY, which needs the inventory -- like the MSDP mesh check below,
+    # and for the same reason: each switch's own config looks perfectly fine.
+    # OSPF puts the interface MTU in its DBD packets and will not form an
+    # adjacency when the two ends disagree, so one mismatched switch leaves its
+    # neighbours in EXSTART and the underlay never converges.
+    #
+    # 'elif': a switch below the floor is already being told to change, and the
+    # command it is handed is the fabric's own value, so it would be reported
+    # twice for one fault. The mismatch branch carries no command at all --
+    # changing system MTU bounces every interface on the box, and which end
+    # moves is a judgement about the fabric, not about this switch.
+    _mtu: >-
+      {%- set bad = [] -%}
+      {%- set floor = readiness_system_mtu_min | int -%}
+      {%- set mine = _readiness_system_mtu | int -%}
+      {#- Group the fabric by the MTU each member was READ at. Capped at three
+          names per value: this runs per host, so an inconsistent 500-switch
+          fabric would otherwise print 500 names 500 times. -#}
+      {%- set by_mtu = {} -%}
+      {%- for h in fabric_members | default([]) | sort -%}
+      {%-   set seen = hostvars[h].get('_readiness_system_mtu') -%}
+      {%-   if seen -%}
+      {%-     set _ = by_mtu.setdefault(seen | int, []).append(h) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set parts = [] -%}
+      {%- for value in by_mtu | sort -%}
+      {%-   set hosts = by_mtu[value] -%}
+      {%-   set _ = parts.append(value ~ ' on ' ~ hosts[:3] | join(', ')
+                                 ~ (' and ' ~ (hosts | length - 3) ~ ' more'
+                                    if hosts | length > 3 else '')) -%}
+      {%- endfor -%}
+      {#- The command offered is the FABRIC's value, so a switch joining an
+          established fabric is brought into step with it rather than to some
+          number in a defaults file -- which would fix the floor and create a
+          mismatch, the more expensive of the two faults. Where the fabric has
+          no value at or above the floor there is nothing honest to offer, and
+          on the standalone path platform_baseline.j2 has already installed
+          9100 by the time this is reported. -#}
+      {%- if mine < floor -%}
+      {%-   set _ = bad.append({
+              'msg': 'system mtu ' ~ mine
+                     ~ (' (the platform default -- no "system mtu" line is configured)'
+                        if mine == 1500 else '')
+                     ~ ' is below the ' ~ floor ~ ' that VXLAN needs: 50 bytes of outer'
+                     ~ ' header on top of a standard 1500-byte tenant frame',
+              'parents': [],
+              'lines': (['system mtu ' ~ (readiness_fabric_mtu | int)]
+                        if (readiness_fabric_mtu | int) >= floor else [])}) -%}
+      {#- An MTU is never 0, so the single comparison covers both "this switch
+          is the odd one out" and "the fabric has no dominant value at all";
+          see readiness_fabric_mtu in 01_gather.yml. -#}
+      {%- elif (readiness_fabric_mtu | int) != mine -%}
+      {%-   set _ = bad.append({
+              'msg': 'system mtu ' ~ mine ~ ' -- this fabric does not agree on one value ('
+                     ~ parts | join('; ') ~ '); OSPF carries the MTU in its DBD packets'
+                     ~ ' and will not form an adjacency across a mismatch',
+              'parents': [], 'lines': []}) -%}
       {%- endif -%}
       {{ bad | to_json }}
 

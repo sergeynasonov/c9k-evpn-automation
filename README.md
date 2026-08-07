@@ -169,6 +169,15 @@ from the moment the underlay carries traffic, and re-applying them is a no-op.
 
 ### Every node — globals
 
+`system mtu` is checked as a floor of **1550** — 1500 plus VXLAN's 50 bytes of
+outer header — and for **agreement across the fabric**, not as the exact value
+below. Any value at or above the floor is accepted, so a fabric standardised on
+1600 or 9216 is left alone; 9100 is shown because it also covers jumbo tenant
+frames, and it is what the platform baseline installs on a switch that has
+never been given a value. What is not optional is that every switch in the
+fabric matches: OSPF carries the MTU in its DBD packets and will not form an
+adjacency across a mismatch.
+
 ```
 system mtu 9100
 !
@@ -358,7 +367,8 @@ configures cleanly and then silently fails to forward:
 
 | Check | Why |
 |---|---|
-| `system mtu 9100`, `ip multicast-routing`, PIM RP / register-source / SSM | VXLAN needs the headroom; no multicast routing means no BUM replication |
+| `system mtu` at or above **1550**, and **identical across the fabric** | 1500 + 50 bytes of VXLAN header. The exact value is yours; OSPF refuses an adjacency when the two ends disagree, so the fabric must pick one |
+| `ip multicast-routing`, PIM RP / register-source / SSM | No multicast routing means no BUM replication |
 | CEF load-sharing with `include-ports` | The default hashes on the outer header, which is identical for every flow between a pair of VTEPs — so the whole tunnel pins to one uplink |
 | IP routing enabled — **derived, not text-matched** | It is a silent platform default on the C9400/9500/9600, so absence proves nothing |
 | `Loopback0` is a /32, with `ip pim sparse-mode` and in OSPF | It is the VTEP source, the router-id and the PIM register source |

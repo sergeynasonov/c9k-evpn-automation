@@ -16,7 +16,7 @@ all:
     dist1-1:
       fabric_id: site_group_evpn_campus
       readiness_failures:
-        - {msg: "missing global: system mtu 9100", parents: [], lines: ["system mtu 9100"]}
+        - {msg: "missing global: ip multicast-routing", parents: [], lines: ["ip multicast-routing"]}
     # Meant to be checked, no result: genuinely unreachable.
     downswitch:
       fabric_id: site_group_evpn_campus
