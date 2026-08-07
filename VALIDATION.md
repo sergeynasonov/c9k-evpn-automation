@@ -15,8 +15,10 @@ genuinely need a human are manual.
 ## Part 1 — Test data to create in NetBox
 
 The current lab cannot exercise the matrix: it has one tenant VRF and no
-segment pairs that isolate a single variable. Six VLANs across two VRFs cover
-every path.
+segment pairs that isolate a single variable. Two VRFs and twelve VLANs cover
+every path — **2 core, 6 edge and L2-only, 4 handoff**. Each group is listed
+below with what it is for; none of the three is optional, and leaving out the
+core VLANs in particular fails quietly rather than loudly.
 
 ### VRFs
 
@@ -29,7 +31,28 @@ Set `mcast_base_group` on both from the existing carve — run
 `scripts/netbox_multicast_carve.py` rather than picking addresses by hand, so
 the 239.x allocations stay consistent with what is already deployed.
 
-### VLANs
+### Core VLANs — one per VRF, and nothing routes without them
+
+| VID | Name | VRF | Role | Tags | Prefix |
+|---|---|---|---|---|---|
+| 181 | `VAL_A_CORE` | `VAL_A` | `core_vlan` | — | *none* |
+| 182 | `VAL_B_CORE` | `VAL_B` | `core_vlan` | — | *none* |
+
+The core VLAN is the VRF's **L3VNI transit segment**. It is what renders
+`vlan configuration <vid>` / `member vni <l3vni>` and the `ip unnumbered` SVI
+that carries routed traffic between leaves — symmetric IRB has nowhere to put a
+packet without it.
+
+Miss it and the fabric still builds: VLANs appear, SVIs appear, `acm replace`
+succeeds. Bridging inside a segment works. Everything *routed* silently does
+not — which is rows 2.3 through 2.6 of the forwarding matrix, both the intra-VRF
+and the inter-VRF cases, and it would read as a fabric fault rather than missing
+data.
+
+**No prefix.** The SVI is `ip unnumbered` from `Loopback0`; an address here
+would be modelling something that is never rendered.
+
+### Edge VLANs and the L2-only overlay
 
 | VID | Name | VRF | Role | Tags | Prefix | Isolates |
 |---|---|---|---|---|---|---|
@@ -90,10 +113,10 @@ fabric-internal bridging between leaves must keep working while the external
 handoff is gone. If you model it on both borders instead, the failover test
 becomes a test of your upstream loop-breaking rather than of the fabric.
 
-Why these six and not fewer: 201 vs 203 isolates *routing between segments of
-one VRF* from *bridging within one segment*; 201 vs 202 isolates the two BUM
-replication paths and the MAC-advertisement asymmetry; 201 vs 211 forces the
-external hairpin; 220 is the only shape with no gateway at all.
+Why these six edge segments and not fewer: 201 vs 203 isolates *routing between
+segments of one VRF* from *bridging within one segment*; 201 vs 202 isolates the
+two BUM replication paths and the MAC-advertisement asymmetry; 201 vs 211 forces
+the external hairpin; 220 is the only shape with no gateway at all.
 
 
 ### Endpoints — three VMs, not nine
