@@ -228,13 +228,13 @@
     # because that would put credentials in a file on disk.
     _snmp: >-
       {%- set bad = [] -%}
-      {%- if snmp_v3_user not in _readiness_state.stdout[0] -%}
+      {%- if snmp_v3_user not in _readiness_snmp_users -%}
       {%-   set _ = bad.append({
               'msg': 'SNMPv3 user "' ~ snmp_v3_user ~ '" not present (show snmp user)'
                      ~ ' -- run readiness.yml with readiness_apply_snmp=true to configure it',
               'parents': [], 'lines': []}) -%}
       {%- endif -%}
-      {%- if snmp_v3_group not in _readiness_state.stdout[1] -%}
+      {%- if snmp_v3_group not in _readiness_snmp_groups -%}
       {%-   set _ = bad.append({
               'msg': 'SNMPv3 group "' ~ snmp_v3_group ~ '" not present (show snmp group)',
               'parents': [], 'lines': []}) -%}
