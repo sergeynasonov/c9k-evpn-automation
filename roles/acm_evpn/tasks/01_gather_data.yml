@@ -46,7 +46,7 @@
 # empty diff. But it is a deploy touching devices the operator did not ask for,
 # and the cost grows with every fabric added.
 #
-# It cannot be fixed in the host pattern -- see fabric_resolve.yml task 6 for
+# It cannot be fixed in the host pattern -- see fabric_resolve.yml task 7 for
 # why -- so the targeted fabrics are worked out here, from deploy_target
 # resolved through the inventory rather than from play membership, which the
 # union has already widened.

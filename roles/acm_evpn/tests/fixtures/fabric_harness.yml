@@ -39,8 +39,15 @@
 
     # Tasks 13-15: which fabrics this run targets, and dropping the spines the
     # playbooks' unscoped ':tags_fabric_spine' union pulls in from the others.
+    #
+    # Skippable because it is acm_evpn's, not the resolver's, and it drops some
+    # of the same hosts for a different reason -- which masked the resolver's
+    # own scope rule until a mutation test showed removing that rule changed
+    # nothing here. readiness.yml runs the resolver WITHOUT any of this, so a
+    # test of the resolver alone has to be able to as well.
     - name: Target scoping
       ansible.builtin.import_tasks: target_tasks.yml
+      when: target_scoping | default(true) | bool
 
     # The render gate from 02_render_configs.yml: acm_evpn renders nothing for a
     # device that is not a fabric node, but underlay_readiness must still have
