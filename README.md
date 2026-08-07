@@ -507,9 +507,40 @@ Create the device in NetBox with:
   `fabric_spine` tag;
 - its **site**, inside the fabric's site group.
 
-Then model the tenants — VRFs, VLANs, prefixes and the custom fields that enrol
-them. Those are specified in full in the
-[role README](roles/acm_evpn/README.md#netbox-data-model-contract).
+### Doing it by CSV
+
+Past two or three switches that is a lot of clicking. [`scripts/`](scripts/)
+ships import templates for exactly these objects, which NetBox takes at
+**Devices → Devices → Import** and the equivalent page for each type:
+
+| | |
+|---|---|
+| [`device_import.csv`](scripts/device_import.csv) | name, role, manufacturer and device type, platform, serial, site, rack position, and the `fabric_spine` tag |
+| [`interface_import.csv`](scripts/interface_import.csv) | device, name, type — including the `Loopback0` every fabric switch needs |
+| [`ip_address_import.csv`](scripts/ip_address_import.csv) | address, role, its device and interface, `is_primary`, tags |
+
+**Import in that order.** Each file resolves its references by name, so the
+devices have to exist before their interfaces, and both before their addresses.
+
+Fill in the address `role` column even though NetBox does not require it. A
+column of loopbacks read side by side is where a wrong digit in a network
+address is obvious — on a per-object form it is not. `anycast` is the one value
+that changes behaviour: it is what allows NetBox to hold the underlay RP's
+duplicate address across the spines, and
+[`ip_address_import.csv`](scripts/ip_address_import.csv) carries that as a
+worked example, `underlay_anycast_rp` tag included, so the Day 0 RP model above
+comes out of the same import.
+
+[`scripts/README.md`](scripts/README.md) documents every column, what must exist
+before the first import, and the traps — chiefly that everything matches by
+*name* except `tags`, which matches by *slug*.
+
+### Then model the tenants
+
+VRFs, VLANs, prefixes and the custom fields that enrol them, specified in full
+in the [role README](roles/acm_evpn/README.md#netbox-data-model-contract).
+Those are not covered by the templates above: they are a data model rather than
+a per-device form, so the clicking does not scale the same way.
 
 If the fabric carries **tenant multicast**, the VRF also needs its MDT range set
 Active and an RP; where the RP is external, each VTEP needs a unique PIM
