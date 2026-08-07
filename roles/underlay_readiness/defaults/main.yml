@@ -76,11 +76,6 @@ readiness_loopback_lines:
   - "ip pim sparse-mode"
   - "ip ospf {{ readiness_ospf_process }} area {{ readiness_ospf_area }}"
 
-# Platform defaults that must not be overridden. NOT pushed -- the default is
-# already in effect, so pushing it is a no-op the device never renders back.
-# 02_check.yml checks for a non-default value instead, which IS rendered.
-readiness_tcp_window_size: 131072
-
 readiness_ospf_process: 1
 readiness_ospf_area: 0
 

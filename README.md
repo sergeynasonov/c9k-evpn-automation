@@ -373,16 +373,22 @@ running-config` entirely, which is also why SNMPv3 is installed here in merge
 mode instead of being rendered into the `acm_evpn` candidate — a full-replace
 candidate could never converge on a line the device will not read back.
 
-### Every node — two defaults to leave alone
+### Every node — one default to leave alone
 
-`readiness.yml` fails a switch for these being *present*, which is why neither
-appears in the blocks above. A default is not rendered into the running config,
-so a value that **is** rendered was set deliberately by someone.
+`readiness.yml` fails a switch for this being *present*, which is why it does
+not appear in the blocks above. A default is not rendered into the running
+config, so a value that **is** rendered was set deliberately by someone.
 
 | Do not set | Why, and how to clear it |
 |---|---|
-| `ip tcp window-size <n>` | The platform default is 131072 and is not rendered. Anything else is, and is reported. `default ip tcp window-size` |
 | `no hidekeys`, under `archive` → `log config` | Archived configurations would store credentials in clear text. `hidekeys` is the default, so the baseline never pushes it — but an explicit `no hidekeys` overrides it. `archive` / `log config` / `hidekeys` |
+
+Nothing else about platform tuning is checked, and `ip tcp window-size` is the
+worked example of why. It was checked against one fabric-wide value until a real
+fabric reported all seven switches at once for a setting that was correct on
+each of them — the default is platform-specific. A check earns its place here
+only if the thing it finds is wrong on *any* platform, not merely different
+between them.
 
 Once this is done the node is reachable and self-sufficient; everything from here
 is additive.
@@ -434,7 +440,7 @@ configures cleanly and then silently fails to forward:
 | Border switches additionally originate the default route | `default-information originate` |
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
 | SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group`, never by reading passwords. `readiness.yml` installs these; the `acm_evpn` pre-flight only checks them |
-| No non-default `ip tcp window-size`, and no `no hidekeys` under `archive log config` | Checked *negatively* — a platform default is never rendered, so a value that is rendered was set deliberately |
+| No `no hidekeys` under `archive log config` | Checked *negatively* — a platform default is never rendered, so a value that is rendered was set deliberately |
 | **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch **in the same fabric** | A one-way MSDP mesh looks complete on each switch individually |
 
 The one **warning** is OSPF area size: above 200 routers in an area it

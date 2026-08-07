@@ -125,10 +125,16 @@ port-channel load-balance src-dst-mixed-ip-port
 !
 ip tcp path-mtu-discovery
 ip tcp mss 8000
-{# 'ip tcp window-size 131072' removed: 131072 IS the platform default, so
-   pushing it changed nothing and the device never rendered it back -- an
-   unconvergeable no-op reported on every run. A NON-default value does render,
-   so 02_check.yml checks for that instead. #}
+{# 'ip tcp window-size 131072' removed, and NOT replaced by a check.
+
+   It was pushed here first, which changed nothing on a switch already at the
+   default and was never rendered back -- an unconvergeable no-op reported on
+   every run. It then became a negative check in 02_check.yml, which was no
+   better: the default is platform-specific, so on a real fabric that fired on
+   all seven switches at once for a value correct on each of them.
+
+   Neither pushed nor checked now. It is a per-platform setting and the fabric
+   does not need to agree on it. #}
 !
 no ip forward-protocol nd
 no ip forward-protocol udp tftp
@@ -193,9 +199,11 @@ archive
  log config
   logging enable
   logging size 500
-{# 'hidekeys' removed for the same reason as 'ip tcp window-size': it is the
-   default, so it never renders back and was re-pushed forever. Its absence is
-   checked negatively in 02_check.yml. #}
+{# 'hidekeys' removed because it is the default, so it never renders back and
+   was re-pushed forever. Unlike 'ip tcp window-size' above it IS still checked
+   negatively in 02_check.yml, and that distinction is the point: 'no hidekeys'
+   writes credentials into archived configs on every platform, so it is wrong
+   everywhere rather than merely different between platforms. #}
 !
 vtp mode transparent
 vtp domain {{ vtp_domain }}

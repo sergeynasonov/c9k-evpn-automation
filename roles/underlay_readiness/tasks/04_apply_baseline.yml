@@ -54,10 +54,12 @@
 # than a number to remember.
 #
 # Getting here took removing every line the device would never report back:
-# 'ip tcp window-size' and 'hidekeys' (platform defaults -- asserted negatively
-# in 02_check.yml instead), 'vtp version 3' and the VTP password (meaningless
-# in transparent mode), and 'ip routing' is now conditional on the switch not
-# already routing. See the config-visibility note in the README.
+# 'ip tcp window-size' (dropped entirely -- the default is platform-specific,
+# so neither pushing nor checking it was right), 'hidekeys' (a platform default,
+# asserted negatively in 02_check.yml instead), 'vtp version 3' and the VTP
+# password (meaningless in transparent mode), and 'ip routing' is now
+# conditional on the switch not already routing. See the config-visibility note
+# in the README.
 #
 # Set readiness_apply_baseline=false to check without configuring anything.
 - name: Readiness — report platform baseline changes
