@@ -143,8 +143,18 @@ no ip http server
 ip http authentication local
 no ip http secure-server
 !
-ip ftp passive
-ip tftp blocksize 8192
+{# 'ip ftp passive' and 'ip tftp blocksize 8192' removed. Both are defaults on
+   IOS-XE 17.18 (verified against a c9kv running config: neither is rendered
+   after being configured), so both were pushed and re-pushed on every run
+   forever. Both DO render on the C9300/C9400 -- 7/7 of the physical lab
+   switches carry them -- which is exactly what makes them unfixable here: the
+   default is platform-specific, and a running config cannot distinguish "not
+   set" from "set to the default".
+
+   Dropping them does not remove them from a switch that has them: this merges.
+   It only stops the fabric being told to agree on something it does not need
+   to agree on. Same trade as 'ip tcp window-size', and the third time this
+   template has made it. #}
 ip ssh bulk-mode 131072
 ip ssh source-interface {{ vtep_source_intf }}
 ntp source {{ vtep_source_intf }}
@@ -323,7 +333,12 @@ vrf definition Mgmt-vrf
 interface GigabitEthernet0/0
  vrf forwarding Mgmt-vrf
  no ip address
- ip proxy-arp
+{# ' ip proxy-arp' removed: proxy ARP is the interface default, so it renders on
+   the C9300/C9400 and not on a c9kv, and was re-pushed on every run there. It
+   also asserted nothing -- the line requested the state the interface was
+   already in. Contrast Vlan1 above, which sets 'no ip proxy-arp': that IS a
+   deviation from the default, so the device renders it back and it converges.
+   Only the deviation is worth a line. #}
  shutdown
  negotiation auto
 !
