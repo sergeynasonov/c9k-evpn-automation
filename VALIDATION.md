@@ -38,15 +38,63 @@ the 239.x allocations stay consistent with what is already deployed.
 | 203 | `VAL_A_BR2` | `VAL_A` | `edge` | `multicast_enabled` | `10.203.0.0/24` | Second bridged segment — intra-VRF inter-segment routing |
 | 211 | `VAL_B_BR1` | `VAL_B` | `edge` | `multicast_enabled` | `10.211.0.0/24` | Inter-VRF peer, bridged |
 | 212 | `VAL_B_RT1` | `VAL_B` | `edge` | `dag_routed` | `10.212.0.0/24` | Inter-VRF peer, routed-only |
-| 220 | `VAL_L2` | *none* | — | `l2vni` set, `mcast_group` set | *none* | L2-only overlay — no VRF, no SVI, no gateway |
+| 220 | `VAL_L2` | *none* | — | `l2vni`, `mcast_group`, `border1` | *none* | L2-only overlay — no VRF, no SVI, no gateway. One border by recommendation; see below |
+
+### L3 handoffs — one per VRF per border
+
+Without all four, neither the inter-VRF hairpin nor border failover can be
+tested: inter-VRF traffic has to leave and return, and "verify forwarding via
+the other border" needs the other border to have a path out for that VRF.
+
+| VID | Name | VRF | Role | Tags | Prefix |
+|---|---|---|---|---|---|
+| 191 | `VAL_A_HO_B1` | `VAL_A` | `vrf_l3_handoff_vlan` | `border1` | `10.191.0.0/30` |
+| 192 | `VAL_A_HO_B2` | `VAL_A` | `vrf_l3_handoff_vlan` | `border2` | `10.192.0.0/30` |
+| 193 | `VAL_B_HO_B1` | `VAL_B` | `vrf_l3_handoff_vlan` | `border1` | `10.193.0.0/30` |
+| 194 | `VAL_B_HO_B2` | `VAL_B` | `vrf_l3_handoff_vlan` | `border2` | `10.194.0.0/30` |
+
+Each needs `upstream_asn`, and the external device must peer on all four. The
+`<hostname>` tag is what selects the border that renders it. Addressing follows
+the handoff convention — lowest usable to the upstream peer, highest to the
+switch SVI — which is inverted from an edge VLAN, so do not copy the edge
+pattern here.
+
+### The L2-only overlay: one border is the recommendation, not a rule
+
+`VAL_L2` carries **`border1` and no other border tag** — for testing, and as the
+recommended shape generally.
+
+Tagging both borders bridges the segment out of the fabric twice, putting the
+external L2 domain in parallel with the fabric's own VXLAN bridging between
+those two borders. That is the **possibility** of a forwarding loop, not a loop:
+whether one forms depends on what is upstream — spanning tree, an MLAG or
+stacked pair, a single upstream switch. Any of those breaks it, and a
+dual-homed L2 handoff built that way is perfectly sound.
+
+The reason to prefer one border anyway is narrower and worth stating precisely:
+**the thing that breaks the loop is configuration this project does not own.**
+It is outside the fabric, invisible to NetBox, unrendered, and unchecked by
+readiness. A single border keeps the guarantee inside the boundary this
+automation actually controls. Two borders moves it outside, which is a choice an
+operator can make deliberately and this project will not block.
+
+Contrast with an **L3** handoff, where two borders are exactly the point: those
+are routed, and BGP arbitrates the duplication inside the fabric's own
+configuration. That is why the four handoff VLANs above are per border and this
+one is not.
+
+Consequence for the failover tests, given the single-border choice here: losing
+`border1` takes the L2-only segment's path out of the fabric with it. That is
+expected, and it is what makes the segment worth watching during `border_a` —
+fabric-internal bridging between leaves must keep working while the external
+handoff is gone. If you model it on both borders instead, the failover test
+becomes a test of your upstream loop-breaking rather than of the fabric.
 
 Why these six and not fewer: 201 vs 203 isolates *routing between segments of
 one VRF* from *bridging within one segment*; 201 vs 202 isolates the two BUM
 replication paths and the MAC-advertisement asymmetry; 201 vs 211 forces the
 external hairpin; 220 is the only shape with no gateway at all.
 
-Keep the existing `vrf_l3_handoff_vlan` per VRF per border, and tag 220 for both
-borders so the dual-homed L2 handoff is exercised.
 
 ### Endpoints — three VMs, not nine
 
@@ -71,34 +119,20 @@ Model the VMs in NetBox as virtual machines with their interfaces, IPs and VLAN
 assignments, tagged `validation_endpoint`. That is what lets the automation
 derive expectations instead of being told them.
 
-### One wrinkle: scoping by site selects more than device roles
+Giving them a site is fine and is the natural way to model them. The fabric
+playbooks act on `fabric_managed_groups` only — fabric leaf, fabric border,
+spine, distribution switch — and `fabric_resolve.yml` ends the play for anything
+else before a device is contacted, whatever the target pattern selected. An
+endpoint VM in the same site as the fabric shows up once, by name, in the scope
+report:
 
-This project acts on device roles only — fabric leaf, fabric border, and the
-distribution switches in the transit path. `readiness.yml` defaults to exactly
-that pattern, so nothing else is ever touched.
+```
+scope: 3 device(s) selected by the target but skipped — not a fabric role:
+  ep-ext, ep-leaf1, ep-leaf2.
+```
 
-`deploy_target` **replaces** that pattern rather than intersecting with it,
-though, and the documented usage scopes by site or site group
-(`-e deploy_target=sites_cml_evpn_lab`). `nb_inventory` returns virtual machines
-alongside devices — `fetch_hosts()` queries both `/api/dcim/devices/` and
-`/api/virtualization/virtual-machines/` — so a VM sitting in that site is
-selected by the pattern.
-
-It does no harm: readiness cannot reach it, `ignore_unreachable` is set, and it
-appears as one `UNREACHABLE` line in the summary and one row in the CSV. Noise
-rather than breakage, and only on site-scoped runs. Two ways to keep it clean,
-in ascending order of effort:
-
-1. Give the endpoint VMs **no site** in NetBox. `fabric_resolve.yml` then reports
-   them once as belonging to no fabric and ends the play for them, which is
-   exactly the intended handling — and the validation playbooks address them by
-   tag, so they lose nothing.
-2. Add `is_virtual` to `group_by` in `netbox_inv.yml` (a supported choice the
-   plugin already computes) and skip virtual hosts in `fabric_resolve.yml`.
-   Worth doing only if a NetBox in use here holds VMs that *do* need sites.
-
-Option 1 needs no code change and is the default assumption for the rest of this
-document.
+Expect that line on every site-scoped fabric run once the endpoints exist. It is
+the automation saying what it declined to touch, not a warning.
 
 ---
 
@@ -200,7 +234,8 @@ Once the above exists, one command covers most of the original plan.
 | 5.2 | 200 flows between one VTEP pair, varied ports | Spread across uplinks — the whole point of `include-ports` hashing |
 | 6.1 | 220 to 220 across leaves | Reachable |
 | 6.2 | 220 to any other VLAN | **Unreachable**, and no ARP reply from the gateway address |
-| 6.3 | `VAL_A` to `VAL_B` with the handoff shut | **Unreachable** — proves there is no internal leak |
+| 6.3 | Count the borders 220 is rendered on | From the candidates, not the devices. One is the recommendation and what this plan models. More than one is allowed — record it, and then the honest test is whether the *upstream* breaks the loop, which is a test of your network rather than of this project |
+| 6.4 | `VAL_A` to `VAL_B` with the handoff shut | **Unreachable** — proves there is no internal leak |
 
 Multicast tooling: `iperf -s -u -B <group>` / `iperf -u -c <group> -T 5`
 (iperf2 handles multicast; iperf3 does not). `omping` is a faster first check.
@@ -214,7 +249,7 @@ complete from both ends.
 
 | Scenario | Injection | Expected |
 |---|---|---|
-| `border_a` / `border_b` | Shut both fabric uplinks on that border | Forwarding continues via the other; loss < 1 s. Run with the dual-homed 220 handoff active |
+| `border_a` / `border_b` | Shut both fabric uplinks on that border | **L3:** forwarding continues via the other border's handoff for that VRF; loss < 1 s. **L2-only:** losing `border1` takes VLAN 220's only way out of the fabric, by design — assert that leaf-to-leaf bridging on 220 keeps working anyway, and that it does *not* fail over |
 | `spine_a` / `spine_b` | Shut spine uplinks, **with multicast flowing** | Unicast and multicast both survive. This is the anycast RP and MSDP mesh's entire reason for existing and has never been exercised |
 | `collapsed` | Same, on the physical lab | Worse case: one node is RP, route reflector and border at once |
 | `border_external` | Shut the handoff interface only, border still up | Default route withdraws; other border takes over |

@@ -297,6 +297,24 @@ VLAN with that border switch's hostname — the same convention a
 `vrf_l3_handoff_vlan` uses. Untagged, border switches ignore it entirely while
 every in-scope leaf switch still carries it.
 
+**One border is recommended, and nothing enforces it.** Tagging two bridges the
+segment out of the fabric twice, which puts the external L2 domain in parallel
+with the fabric's own VXLAN bridging between those borders. That is the
+*possibility* of a forwarding loop rather than a loop: spanning tree, an MLAG or
+stacked pair, or a single upstream switch all break it, and a dual-homed L2
+handoff built on one of those is sound.
+
+The reason to prefer one is narrower than "it loops". Whatever breaks the loop
+is configuration **this project does not own** — outside the fabric, absent from
+NetBox, not rendered here and not checked by `underlay_readiness`. One border
+keeps the guarantee inside the boundary this automation controls; two moves it
+outside, to something no run can see or assert. That is a legitimate design an
+operator may choose deliberately, so the render allows it and says nothing.
+
+An L3 handoff is the opposite case, and the contrast is the point: two borders
+are exactly what you want there, because those are routed and BGP arbitrates the
+duplication inside the fabric's own configuration.
+
 Renders as:
 
 ```
