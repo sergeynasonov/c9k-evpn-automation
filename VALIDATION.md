@@ -71,29 +71,34 @@ Model the VMs in NetBox as virtual machines with their interfaces, IPs and VLAN
 assignments, tagged `validation_endpoint`. That is what lets the automation
 derive expectations instead of being told them.
 
-### Prerequisite: keep virtual machines out of the fabric plays
+### One wrinkle: scoping by site selects more than device roles
 
-**`nb_inventory` fetches virtual machines unconditionally**, alongside devices —
-`fetch_hosts()` calls both `/api/dcim/devices/` and
-`/api/virtualization/virtual-machines/`, and `netbox_inv.yml` sets nothing that
-would stop it. So the moment these endpoints exist in NetBox with a site and
-`status: active`, they land in `sites_<slug>`, `fabric_resolve.yml` resolves them
-into the fabric, and `readiness.yml -e deploy_target=<site>` tries to SSH each
-one as an IOS switch. Readiness deliberately checks every device in the transit
-path rather than only fabric nodes, so nothing downstream drops them.
+This project acts on device roles only — fabric leaf, fabric border, and the
+distribution switches in the transit path. `readiness.yml` defaults to exactly
+that pattern, so nothing else is ever touched.
 
-This is not specific to validation — it is true today for anyone whose NetBox
-holds virtual machines. Two changes make it safe, and both are small:
+`deploy_target` **replaces** that pattern rather than intersecting with it,
+though, and the documented usage scopes by site or site group
+(`-e deploy_target=sites_cml_evpn_lab`). `nb_inventory` returns virtual machines
+alongside devices — `fetch_hosts()` queries both `/api/dcim/devices/` and
+`/api/virtualization/virtual-machines/` — so a VM sitting in that site is
+selected by the pattern.
 
-1. Add `is_virtual` to `group_by` in `netbox_inv.yml`. It is a supported choice
-   and the plugin already computes the value, so this only surfaces what is
-   there.
-2. Have `fabric_resolve.yml` end the play for a virtual host, the same way it
-   already does for a device belonging to no fabric — reported once, never
-   fatal.
+It does no harm: readiness cannot reach it, `ignore_unreachable` is set, and it
+appears as one `UNREACHABLE` line in the summary and one row in the CSV. Noise
+rather than breakage, and only on site-scoped runs. Two ways to keep it clean,
+in ascending order of effort:
 
-The endpoints then stay in NetBox as the source of truth for the test topology,
-addressable by the validation playbooks and invisible to the fabric ones.
+1. Give the endpoint VMs **no site** in NetBox. `fabric_resolve.yml` then reports
+   them once as belonging to no fabric and ends the play for them, which is
+   exactly the intended handling — and the validation playbooks address them by
+   tag, so they lose nothing.
+2. Add `is_virtual` to `group_by` in `netbox_inv.yml` (a supported choice the
+   plugin already computes) and skip virtual hosts in `fabric_resolve.yml`.
+   Worth doing only if a NetBox in use here holds VMs that *do* need sites.
+
+Option 1 needs no code change and is the default assumption for the rest of this
+document.
 
 ---
 
