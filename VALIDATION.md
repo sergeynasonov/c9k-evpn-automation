@@ -38,7 +38,7 @@ the 239.x allocations stay consistent with what is already deployed.
 | 203 | `VAL_A_BR2` | `VAL_A` | `edge` | `multicast_enabled` | `10.203.0.0/24` | Second bridged segment — intra-VRF inter-segment routing |
 | 211 | `VAL_B_BR1` | `VAL_B` | `edge` | `multicast_enabled` | `10.211.0.0/24` | Inter-VRF peer, bridged |
 | 212 | `VAL_B_RT1` | `VAL_B` | `edge` | `dag_routed` | `10.212.0.0/24` | Inter-VRF peer, routed-only |
-| 220 | `VAL_L2` | *none* | — | `l2vni`, `mcast_group`, **`border1` only** | *none* | L2-only overlay — no VRF, no SVI, no gateway |
+| 220 | `VAL_L2` | *none* | — | `l2vni`, `mcast_group`, `border1` | *none* | L2-only overlay — no VRF, no SVI, no gateway. One border by recommendation; see below |
 
 ### L3 handoffs — one per VRF per border
 
@@ -59,22 +59,36 @@ the handoff convention — lowest usable to the upstream peer, highest to the
 switch SVI — which is inverted from an edge VLAN, so do not copy the edge
 pattern here.
 
-### The L2-only overlay is handed off from exactly ONE border
+### The L2-only overlay: one border is the recommendation, not a rule
 
-`VAL_L2` carries **`border1` and no other border tag.** Tagging both bridges the
-segment out of the fabric twice, which puts the external L2 domain in parallel
-with the fabric's own VXLAN bridging between those two borders — a forwarding
-loop, with nothing to break it. There is no ESI multihoming here yet, and
-spanning tree does not run across VXLAN.
+`VAL_L2` carries **`border1` and no other border tag** — for testing, and as the
+recommended shape generally.
 
-This differs from an L3 handoff, where two borders are the point: those are
-routed, and BGP resolves the duplication into a path choice. An L2 handoff has
-no such arbiter.
+Tagging both borders bridges the segment out of the fabric twice, putting the
+external L2 domain in parallel with the fabric's own VXLAN bridging between
+those two borders. That is the **possibility** of a forwarding loop, not a loop:
+whether one forms depends on what is upstream — spanning tree, an MLAG or
+stacked pair, a single upstream switch. Any of those breaks it, and a
+dual-homed L2 handoff built that way is perfectly sound.
 
-Consequence for the failover tests: losing `border1` takes the L2-only segment's
-path out of the fabric with it. That is expected, and it is what makes the
-segment worth testing during `border_a` — the fabric-internal bridging between
-leaves must keep working even while the external handoff is gone.
+The reason to prefer one border anyway is narrower and worth stating precisely:
+**the thing that breaks the loop is configuration this project does not own.**
+It is outside the fabric, invisible to NetBox, unrendered, and unchecked by
+readiness. A single border keeps the guarantee inside the boundary this
+automation actually controls. Two borders moves it outside, which is a choice an
+operator can make deliberately and this project will not block.
+
+Contrast with an **L3** handoff, where two borders are exactly the point: those
+are routed, and BGP arbitrates the duplication inside the fabric's own
+configuration. That is why the four handoff VLANs above are per border and this
+one is not.
+
+Consequence for the failover tests, given the single-border choice here: losing
+`border1` takes the L2-only segment's path out of the fabric with it. That is
+expected, and it is what makes the segment worth watching during `border_a` —
+fabric-internal bridging between leaves must keep working while the external
+handoff is gone. If you model it on both borders instead, the failover test
+becomes a test of your upstream loop-breaking rather than of the fabric.
 
 Why these six and not fewer: 201 vs 203 isolates *routing between segments of
 one VRF* from *bridging within one segment*; 201 vs 202 isolates the two BUM
@@ -220,7 +234,7 @@ Once the above exists, one command covers most of the original plan.
 | 5.2 | 200 flows between one VTEP pair, varied ports | Spread across uplinks — the whole point of `include-ports` hashing |
 | 6.1 | 220 to 220 across leaves | Reachable |
 | 6.2 | 220 to any other VLAN | **Unreachable**, and no ARP reply from the gateway address |
-| 6.3 | 220 is rendered on **exactly one** border | Assert from the rendered candidates, not the devices. Two borders bridging one L2-only segment out of the fabric is a loop, and it is a modelling error rather than a forwarding one — the render is where it is visible |
+| 6.3 | Count the borders 220 is rendered on | From the candidates, not the devices. One is the recommendation and what this plan models. More than one is allowed — record it, and then the honest test is whether the *upstream* breaks the loop, which is a test of your network rather than of this project |
 | 6.4 | `VAL_A` to `VAL_B` with the handoff shut | **Unreachable** — proves there is no internal leak |
 
 Multicast tooling: `iperf -s -u -B <group>` / `iperf -u -c <group> -T 5`
