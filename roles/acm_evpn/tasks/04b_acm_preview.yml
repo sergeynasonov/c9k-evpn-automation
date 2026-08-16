@@ -43,6 +43,18 @@
     # 'Status : Success', so the two have to be tested separately.
     acm_preview_no_diff: "{{ 'No Diff to Validate/Apply' in (acm_preview_validate.stdout[0] | default('')) }}"
     acm_preview_ok: "{{ 'Status : Success' in (acm_preview_validate.stdout[0] | default('')) }}"
+    # A THIRD outcome, and the reason this is not a boolean. Some platforms --
+    # the virtual c9kv among them -- answer 'Validation on platform not
+    # supported'. That is neither success nor a rejected candidate: the switch
+    # never looked at it. Reporting it as REJECTED sends an operator hunting a
+    # configuration error that does not exist, on every switch at once.
+    #
+    # Third time a not-Success ACM response has turned out not to be a failure.
+    # The first was an empty diff, the second a converged switch. Add a case
+    # here rather than widening 'ok' -- what the switch did and did not do are
+    # different facts and the summary has to keep them apart.
+    acm_preview_unsupported: >-
+      {{ 'not supported' in (acm_preview_validate.stdout[0] | default('') | lower) }}
 
 - name: 11d. Ask the device for the net-diff
   cisco.ios.ios_command:
@@ -53,11 +65,15 @@
   failed_when: false
   changed_when: false
   # Only when there is something to show. A converged switch has no diff to ask
-  # for, and a candidate that failed validation has nothing meaningful to
-  # compare -- its rejection is the finding.
+  # for, and a candidate the switch REJECTED has nothing meaningful to compare
+  # -- its rejection is the finding.
+  #
+  # A candidate that could not be validated is different: nothing is known about
+  # it either way, so the diff is still worth asking for and is the only thing
+  # this playbook can offer on such a platform.
   when:
     - not (acm_preview_no_diff | bool)
-    - acm_preview_ok | bool
+    - acm_preview_ok | bool or acm_preview_unsupported | bool
 
 - name: 11e. Ensure the results directory exists
   ansible.builtin.file:
@@ -88,6 +104,7 @@
   when:
     - not (acm_preview_no_diff | bool)
     - not (acm_preview_ok | bool)
+    - not (acm_preview_unsupported | bool)
 
 - name: 11h. Report what each switch would change
   ansible.builtin.debug:
@@ -99,6 +116,15 @@
       {%-   set hv = hostvars[h] -%}
       {%-   if hv.acm_preview_no_diff | default(false) -%}
       {%-     set _ = out.append('%-14s' | format(h) ~ 'already converged -- nothing to apply') -%}
+      {%-   elif hv.acm_preview_unsupported | default(false) -%}
+      {%-     set _diff = hv.acm_preview_diff.stdout[0] | default('') -%}
+      {%-     set _ = out.append('%-14s' | format(h)
+                                 ~ 'candidate NOT VALIDATED -- this platform does not'
+                                 ~ ' support "acm replace ... validate". The candidate is'
+                                 ~ ' neither accepted nor rejected'
+                                 ~ (' (and the diff is unavailable too)'
+                                    if not _diff or 'not supported' in _diff | lower
+                                    else '; the diff below is still from the device')) -%}
       {%-   elif not (hv.acm_preview_ok | default(false)) -%}
       {%-     set _ = out.append('%-14s' | format(h) ~ 'CANDIDATE REJECTED by the switch'
                                  ~ ' -- see commit-results/' ~ h ~ '-validate-failed.cfg') -%}
