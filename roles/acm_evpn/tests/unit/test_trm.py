@@ -17,7 +17,6 @@ from ansible.errors import AnsibleFilterError  # noqa: E402
 from netbox_evpn_data import (  # noqa: E402
     build_evpn_data,
     _build_trm,
-    _fabric_mcast_vlan_vrfs,
 )
 
 # Mirrors the lab: CORP l3vni 20003 -> 239.3.x anycast, MEDICAL 20004 -> 239.4.x
@@ -216,7 +215,7 @@ class TestMulticastVlanTagging(unittest.TestCase):
             "tags": [{"slug": "multicast_enabled"}],
             "prefixes": [{"prefix": "10.66.119.128/27", "vrf": {"name": "MEDICAL"}}],
         }]
-        self.assertEqual(_fabric_mcast_vlan_vrfs(vlans), {"MEDICAL"})
+        self.assertEqual(_mcast_vrfs(vlans), {"MEDICAL"})
 
     def test_tag_on_a_non_edge_vlan_is_ignored(self):
         vlans = [{
@@ -224,7 +223,7 @@ class TestMulticastVlanTagging(unittest.TestCase):
             "tags": [{"slug": "multicast_enabled"}],
             "prefixes": [{"prefix": "10.0.0.0/31", "vrf": {"name": "CORP"}}],
         }]
-        self.assertEqual(_fabric_mcast_vlan_vrfs(vlans), set())
+        self.assertEqual(_mcast_vrfs(vlans), set())
 
     def test_dag_routed_and_multicast_enabled_coexist(self):
         """The lab's VLAN 100 carries both. They do not interact: BUM uses
@@ -234,13 +233,46 @@ class TestMulticastVlanTagging(unittest.TestCase):
             "tags": [{"slug": "dag_routed"}, {"slug": "multicast_enabled"}],
             "prefixes": [{"prefix": "10.67.118.128/27", "vrf": {"name": "CORP"}}],
         }]
-        self.assertEqual(_fabric_mcast_vlan_vrfs(vlans), {"CORP"})
+        self.assertEqual(_mcast_vrfs(vlans), {"CORP"})
 
 
 # A VLAN must be scoped to be enrolled at all, so these fixtures carry a site
 # and the rendering host belongs to it.
 SITE = "51"
 SG = "3"
+
+
+def _mcast_vrfs(vlans):
+    """Which VRFs the transform counts as holding a multicast-enabled edge VLAN.
+
+    This was a standalone function taking the raw VLAN list. It is now derived
+    inside build_evpn_data's main loop, because that is the only place the
+    VLAN's FABRIC is known -- and scanning the raw list meant a second fabric's
+    VRFs were judged against this run. Driving the transform is therefore the
+    only honest way to test it.
+
+    Read back from the per-VRF TRM block rather than asserted directly: a VRF
+    whose 'has_mcast_vlans' is true is exactly one the scan found.
+    """
+    scoped = []
+    for v in vlans:
+        v = dict(v, site={"id": SITE}, custom_field_data=v.get("custom_field_data", {}),
+                 group=None, name=v.get("name", "VLAN%s" % v["vid"]))
+        v["prefixes"] = [dict(p, custom_field_data=p.get("custom_field_data", {}),
+                              vrf=dict(p["vrf"], rd="1:1",
+                                       custom_field_data={"l3vni": 20003,
+                                                          "mcast_base_group": "239.3.1.1"}))
+                         for p in v.get("prefixes", [])]
+        # A handoff VLAN needs an upstream ASN or a different validator fires
+        # first and the case under test never runs.
+        if (v.get("role") or {}).get("slug") == "vrf_l3_handoff_vlan":
+            v["custom_field_data"] = dict(v["custom_field_data"],
+                                          upstream_asn=65000)
+        scoped.append(v)
+    data = build_evpn_data(scoped, [], SITE, SG, reserved_mcast_prefixes=MDT,
+                           trm_objects=TRM_OBJECTS, hostname="access1-1")
+    return {name for name, entry in data["vrfs"].items()
+            if (entry.get("trm") or {}).get("has_mcast_vlans")}
 
 
 class TestEndToEnd(unittest.TestCase):
@@ -290,6 +322,75 @@ class TestEndToEnd(unittest.TestCase):
         with self.assertRaises(AnsibleFilterError) as ctx:
             build_evpn_data(vlans, [], SITE, SG, reserved_mcast_prefixes=MDT,
                             trm_objects=TRM_OBJECTS, hostname="access1-1")
+        self.assertIn("not enrolled in the fabric", str(ctx.exception))
+
+
+class TestAnotherFabricsVrfIsNotJudgedAgainstThisRun(unittest.TestCase):
+    """The regression, straight off a live run.
+
+    The multicast-VRF scan read the RAW VLAN list -- every VLAN in NetBox, not
+    every VLAN in this fabric -- while the VRF registry it was compared against
+    was scoped to the rendering host's fabric. With one fabric those are the
+    same set. With two they are not, so the other fabric's VRFs came out of the
+    subtraction and were reported against this run as unenrolled.
+
+    The diagnosis was wrong as well as the finding: the VRF was enrolled, with a
+    perfectly good l3vni, just in the fabric that was not being rendered.
+    """
+
+    OTHER_SITE = "77"
+
+    # This run's fabric: one multicast-enabled VLAN in an enrolled VRF.
+    MINE = {
+        "vid": 201, "name": "VAL_A_BR1", "role": {"slug": "edge"},
+        "tags": [{"slug": "multicast_enabled"}],
+        "site": {"id": SITE}, "custom_field_data": {}, "group": None,
+        "prefixes": [{"prefix": "10.201.0.0/24", "custom_field_data": {},
+                      "vrf": {"name": "VAL_A", "rd": "1:1",
+                              "custom_field_data": {"l3vni": 20003,
+                                                    "mcast_base_group": "239.3.1.1"}}}],
+    }
+    # Another fabric entirely, with its own enrolled VRF and its own tagged VLAN.
+    THEIRS = {
+        "vid": 100, "name": "CORP_DATA", "role": {"slug": "edge"},
+        "tags": [{"slug": "multicast_enabled"}],
+        "site": {"id": OTHER_SITE}, "custom_field_data": {}, "group": None,
+        "prefixes": [{"prefix": "10.100.0.0/24", "custom_field_data": {},
+                      "vrf": {"name": "CORP", "rd": "1:1",
+                              "custom_field_data": {"l3vni": 20009,
+                                                    "mcast_base_group": "239.9.1.1"}}}],
+    }
+    SCOPE_MAP = {"site:%s" % SITE: "fabric_mine",
+                 "site:%s" % OTHER_SITE: "fabric_theirs"}
+
+    def test_the_other_fabrics_vrf_does_not_fail_this_render(self):
+        data = build_evpn_data(
+            [self.MINE, self.THEIRS], [], SITE, SG,
+            reserved_mcast_prefixes=MDT + [{"prefix": "239.9.2.0/24",
+                                            "role": "default_mdt",
+                                            "status": "active"}],
+            trm_objects={"pools": [], "addresses": [
+                {"address": "10.67.118.31/32", "vrf": "VAL_A",
+                 "tags": ["trm_anycast_rp"], "description": "", "device": ""}]},
+            hostname="leaf1", fabric_scope_map=self.SCOPE_MAP,
+            my_fabric="fabric_mine")
+        self.assertIn("VAL_A", data["vrfs"])
+        self.assertNotIn("CORP", data["vrfs"],
+                         "the other fabric's VRF is out of scope for this run")
+
+    def test_an_unenrolled_vrf_in_THIS_fabric_still_fails(self):
+        """Scoping the scan must not blunt the check it exists for."""
+        bad = dict(self.MINE, vid=202, name="VAL_A_BAD")
+        bad["prefixes"] = [{"prefix": "10.202.0.0/24", "custom_field_data": {},
+                            "vrf": {"name": "NOTFABRIC", "rd": "1:1",
+                                    "custom_field_data": {"l3vni": None}}}]
+        with self.assertRaises(AnsibleFilterError) as ctx:
+            build_evpn_data([self.MINE, bad], [], SITE, SG,
+                            reserved_mcast_prefixes=MDT,
+                            trm_objects=TRM_OBJECTS, hostname="leaf1",
+                            fabric_scope_map=self.SCOPE_MAP,
+                            my_fabric="fabric_mine")
+        self.assertIn("NOTFABRIC", str(ctx.exception))
         self.assertIn("not enrolled in the fabric", str(ctx.exception))
 
 
