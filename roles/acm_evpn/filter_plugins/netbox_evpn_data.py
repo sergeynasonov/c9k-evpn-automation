@@ -510,24 +510,6 @@ def _trm_objects_for_vrf(trm_objects, vrf_name, tag):
             if (o.get("vrf") or "") == vrf_name and tag in (o.get("tags") or [])]
 
 
-def _fabric_mcast_vlan_vrfs(vlan_list) -> set:
-    """VRF names having at least one edge VLAN tagged multicast_enabled,
-    across the WHOLE fabric rather than the rendering host's scope."""
-    out = set()
-    for vlan in vlan_list or []:
-        tags = {t.get("slug") for t in (vlan.get("tags") or []) if t}
-        if TRM_TAG_MCAST_VLAN not in tags:
-            continue
-        role = ((vlan.get("role") or {}).get("slug") or "")
-        if role not in _EDGE_ROLES:
-            continue
-        for pfx in (vlan.get("prefixes") or []):
-            vrf = (pfx.get("vrf") or {}).get("name")
-            if vrf:
-                out.add(vrf)
-    return out
-
-
 def _build_trm(vrf_name, l3vni, l3vni_base, mdt_prefixes, trm_objects,
                hostname, has_mcast_vlans, errors, require_register_source=True):
     """Resolve one VRF's TRM configuration, appending any problems to errors.
@@ -1234,6 +1216,11 @@ def build_evpn_data(
     # for. Two segments colliding on a replication group can sit in different
     # buildings, so seeing it takes a fabric-wide view.
     fabric_edge_vlans: Dict[str, Dict[str, Any]] = {}
+    # VRFs holding a multicast-enabled edge VLAN, per FABRIC. Deliberately not
+    # gated on _is_evpn_vrf: a VRF with no l3vni is exactly what the TRM check
+    # downstream exists to catch, so filtering it out here would remove the
+    # finding rather than the fault.
+    fabric_mcast_vrfs: Dict[str, set] = {}
 
     for vlan in vlan_list:
         site = vlan.get("site")
@@ -1277,6 +1264,9 @@ def build_evpn_data(
             # would be reported as a collision, which the existing suite caught.
             if not v_data["vrf_name"] or _is_evpn_vrf(v_data):
                 fabric_edge_vlans.setdefault(_fab, {})[vid_str] = v_data
+        if (role in _EDGE_ROLES and v_data["vrf_name"]
+                and TRM_TAG_MCAST_VLAN in (v_data.get("tags") or [])):
+            fabric_mcast_vrfs.setdefault(_fab, set()).add(v_data["vrf_name"])
         if v_data["vrf_name"]:
             if _is_evpn_vrf(v_data):
                 fabric_l3.setdefault(_fab, {}).setdefault(
@@ -1380,10 +1370,18 @@ def build_evpn_data(
 
     # TRM. 'has_mcast_vlans' is FABRIC-WIDE, not per-device: it decides whether
     # a border's handoff SVI needs PIM, and a border carries VRF traffic for
-    # VLANs that are never local to it. Computed from the unfiltered VLAN list
-    # for that reason.
+    # VLANs that are never local to it. So it ignores the per-HOST scope filter
+    # -- but NOT the per-fabric one.
+    #
+    # It used to be computed from the raw VLAN list, which is every VLAN in
+    # NetBox. With one fabric those are the same set; with two they are not, and
+    # a VRF belonging only to the OTHER fabric was reported against this run as
+    # "not enrolled in the fabric (no l3vni)" -- a diagnosis that was also
+    # wrong, since the VRF was enrolled, just elsewhere. Same rule the block
+    # above states for edge subnets: another fabric's data is not this run's
+    # business.
     trm_errors: List[str] = []
-    mcast_vlan_vrfs = _fabric_mcast_vlan_vrfs(vlan_list)
+    mcast_vlan_vrfs = fabric_mcast_vrfs.get(_host_fabric, set())
     for vrf_name, vrf_entry in vrfs.items():
         vrf_entry["trm"] = _build_trm(
             vrf_name, vrf_entry.get("l3vni"), l3vni_base,
@@ -1394,7 +1392,8 @@ def build_evpn_data(
     for vrf_name in sorted(mcast_vlan_vrfs - set(vrfs)):
         trm_errors.append(
             f"VLAN(s) tagged '{TRM_TAG_MCAST_VLAN}' are in VRF '{vrf_name}', "
-            f"which is not enrolled in the fabric (no 'l3vni' custom field).")
+            f"which has no 'l3vni' custom field and is therefore not enrolled "
+            f"in the fabric.")
     if trm_errors:
         raise AnsibleFilterError(
             "netbox_evpn_data: TRM configuration is invalid:\n  - "
