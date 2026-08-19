@@ -267,7 +267,7 @@
     # operational state: all three lines are rendered back, which is what lets
     # platform_baseline.j2 push them and lets them be checked as plain
     # membership. readiness_syslog_lines is empty when the deployment declares
-    # no syslog_server, so this loop is the gate and needs no condition of its
+    # no syslog_hosts, so this loop is the gate and needs no condition of its
     # own -- and because the SAME variable is both pushed and checked, a switch
     # cannot pass here against a different set of collectors than it was given.
     #

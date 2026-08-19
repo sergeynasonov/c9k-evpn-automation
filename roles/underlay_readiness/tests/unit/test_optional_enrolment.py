@@ -288,13 +288,13 @@ class TestSyslogDeclared(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.fresh = run({"syslog_server": [COLLECTOR]})
+        cls.fresh = run({"syslog_hosts": [COLLECTOR]})
         cls.configured = run(
-            {"syslog_server": [COLLECTOR]},
+            {"syslog_hosts": [COLLECTOR]},
             stanzas={"logging trap notifications": [],
                      "logging facility syslog": [],
                      "logging host " + COLLECTOR: []})
-        cls.two = run({"syslog_server": [COLLECTOR, "10.66.119.57"]})
+        cls.two = run({"syslog_hosts": [COLLECTOR, "10.66.119.57"]})
 
     def test_declaring_a_collector_enrols_it(self):
         self.assertTrue(self.fresh["syslog_enrolled"])
@@ -332,29 +332,29 @@ class TestSyslogValueIsValidated(unittest.TestCase):
         """The case the ipv4 filter alone would let through: it accepts a
         prefix and returns the host part, and 'logging host 10.0.0.1/24' is a
         device error. Only comparing the result with the input catches it."""
-        result = run({"syslog_server": [COLLECTOR + "/24"]})
+        result = run({"syslog_hosts": [COLLECTOR + "/24"]})
         self.assertTrue(result["assert_failed"])
         self.assertIn("bare IPv4", result["assert_msg"])
 
     def test_a_hostname_is_rejected(self):
-        result = run({"syslog_server": ["syslog.example.com"]})
+        result = run({"syslog_hosts": ["syslog.example.com"]})
         self.assertTrue(result["assert_failed"])
         self.assertIn("syslog.example.com", result["assert_msg"])
 
     def test_one_bad_entry_among_good_ones_is_caught(self):
-        result = run({"syslog_server": [COLLECTOR, "300.1.1.1"]})
+        result = run({"syslog_hosts": [COLLECTOR, "300.1.1.1"]})
         self.assertTrue(result["assert_failed"])
         self.assertIn("300.1.1.1", result["assert_msg"])
 
     def test_a_bare_string_is_named_as_the_mistake_it_is(self):
         """Iterating a string yields characters, so without this branch the
         operator would get one finding per letter of their address."""
-        result = run({"syslog_server": COLLECTOR})
+        result = run({"syslog_hosts": COLLECTOR})
         self.assertTrue(result["assert_failed"])
         self.assertIn("must be a LIST", result["assert_msg"])
 
     def test_an_empty_list_is_not_an_error_it_is_an_opt_out(self):
-        result = run({"syslog_server": []})
+        result = run({"syslog_hosts": []})
         self.assertFalse(result["assert_failed"], result["assert_msg"])
         self.assertFalse(result["syslog_enrolled"])
 
@@ -372,7 +372,7 @@ class TestPushAndCheckAgree(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.result = run({"syslog_server": [COLLECTOR, "10.66.119.57"]})
+        cls.result = run({"syslog_hosts": [COLLECTOR, "10.66.119.57"]})
 
     def test_the_baseline_pushes_exactly_what_the_check_demands(self):
         pushed = baseline_logging(json.dumps(self.result["syslog_cli"]))
@@ -381,7 +381,7 @@ class TestPushAndCheckAgree(unittest.TestCase):
 
     def test_and_a_switch_carrying_them_passes(self):
         pushed = baseline_logging(json.dumps(self.result["syslog_cli"]))
-        configured = run({"syslog_server": [COLLECTOR, "10.66.119.57"]},
+        configured = run({"syslog_hosts": [COLLECTOR, "10.66.119.57"]},
                          stanzas={line: [] for line in pushed})
         self.assertEqual(configured["syslog_msgs"], [])
 

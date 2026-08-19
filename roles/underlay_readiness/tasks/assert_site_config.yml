@@ -16,7 +16,7 @@
 #              them, so absence is always an error.
 #   enrolling  The SNMPv3 triple. Absent means "this deployment has no SNMP
 #              collector", which is a legitimate answer and is not an error.
-#   validated  syslog_server. Optional, but a declared collector that is not a
+#   validated  syslog_hosts. Optional, but a declared collector that is not a
 #              bare IPv4 address is a mistake, not an opt-out.
 #
 # The partial cases are what this file exists for now. Once absence is a
@@ -79,11 +79,11 @@
                                  ~ ' is -- SNMPv3 needs all three keys or none of them') -%}
       {%-   endfor -%}
       {%- endif -%}
-      {%- set syslog = syslog_server | default([], true) -%}
+      {%- set syslog = syslog_hosts | default([], true) -%}
       {#- A bare address instead of a list would iterate as characters and
           produce one finding per letter, so it is caught as its own case. -#}
       {%- if syslog is string -%}
-      {%-   set _ = bad.append('syslog_server must be a LIST of collectors, not a'
+      {%-   set _ = bad.append('syslog_hosts must be a LIST of collectors, not a'
                                ~ ' single string -- write it as "- ' ~ syslog ~ '"') -%}
       {%- else -%}
       {#-   Strict equality, not merely "does ipv4() return something": the
@@ -92,7 +92,7 @@
             dotted quad survives comparing the result with the input. -#}
       {%-   for s in syslog
               if ((s | string) | ansible.utils.ipv4('address')) != (s | string) -%}
-      {%-     set _ = bad.append('syslog_server: "' ~ s ~ '" is not a bare IPv4'
+      {%-     set _ = bad.append('syslog_hosts: "' ~ s ~ '" is not a bare IPv4'
                                  ~ ' address -- one address per list entry, no mask') -%}
       {%-   endfor -%}
       {%- endif -%}

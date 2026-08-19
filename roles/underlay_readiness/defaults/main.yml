@@ -155,13 +155,13 @@ readiness_snmp_enrolled: >-
 # entirely, so nothing downstream may reference the raw variable.
 readiness_snmp_acl: "{{ snmp_acl | default([], true) }}"
 
-# Syslog is enrolled when 'syslog_server' names at least one collector. A LIST,
+# Syslog is enrolled when 'syslog_hosts' names at least one collector. A LIST,
 # like snmp_acl, so a deployment with two syslog servers needs no second
 # variable. Every entry must be a bare IPv4 address; assert_site_config.yml
 # rejects anything else rather than quietly dropping it, for the same reason the
 # SNMP triple is all-or-none.
 readiness_syslog_enrolled: >-
-  {{ (syslog_server | default([], true)) | length > 0 }}
+  {{ (syslog_hosts | default([], true)) | length > 0 }}
 
 # The syslog CLI, defined ONCE, so the template that pushes it and the check
 # that verifies it cannot drift apart. JSON because an Ansible variable
@@ -181,7 +181,7 @@ readiness_syslog_lines: >-
   {%- if readiness_syslog_enrolled | bool -%}
   {%-   set _ = out.append('logging trap notifications') -%}
   {%-   set _ = out.append('logging facility syslog') -%}
-  {%-   for host in syslog_server -%}
+  {%-   for host in syslog_hosts -%}
   {%-     set _ = out.append('logging host ' ~ host) -%}
   {%-   endfor -%}
   {%- endif -%}

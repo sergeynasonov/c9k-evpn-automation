@@ -63,7 +63,7 @@ logging buffered 1000000
 service timestamps debug datetime msec localtime
 service timestamps log datetime msec localtime
 {#
-  SYSLOG -- OPTIONAL, and enrolled by 'syslog_server' in deployment.yml. A
+  SYSLOG -- OPTIONAL, and enrolled by 'syslog_hosts' in deployment.yml. A
   deployment that declares no collector renders nothing here at all, because
   readiness_syslog_lines is empty; there is no flag to remember and no way to
   disable it by forgetting one.

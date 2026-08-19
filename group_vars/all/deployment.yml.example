@@ -56,23 +56,29 @@ snmp_acl:
 
 # --- OPTIONAL: syslog -------------------------------------------------------
 #
-# Same enrolment rule: uncomment it and every switch gets
+# ENROLLED BY BEING HERE, exactly like the SNMPv3 keys above. Every collector
+# listed gets a 'logging host' line, and each switch gets the trap level and
+# facility that go with them:
 #
 #     logging trap notifications
 #     logging facility syslog
-#     logging host <each address below>
+#     logging host 198.51.100.30
+#     logging host 198.51.100.31
 #
-# and readiness.yml checks all three are present. Leave it commented out and
-# nothing syslog-related is pushed, checked or reported.
+# readiness.yml pushes those with the platform baseline and then checks all of
+# them are present. Comment the whole key out -- including its list items --
+# and nothing syslog-related is pushed, checked or reported.
 #
-# A LIST, like snmp_acl, so two collectors need no second variable. Each entry
-# must be a bare IPv4 address -- no mask, no hostname. Anything else fails the
-# run rather than being dropped.
+# A LIST, like snmp_acl above, so two collectors need no second variable. Each
+# entry must be a bare IPv4 address: no mask, no hostname, no port. Anything
+# else fails the run rather than being quietly dropped, because a typo must not
+# be able to masquerade as an opt-out.
 #
-# 'logging source-interface Loopback0' is applied either way: it is part of the
+# 'logging source-interface Loopback0' is applied either way. It is part of the
 # platform baseline's source-interface hygiene, not part of this enrolment.
-# syslog_server:
-#   - "198.51.100.30"
+syslog_hosts:
+  - "198.51.100.30"
+  - "198.51.100.31"
 
 # VTP domain. Every switch runs transparent mode, so this is cosmetic; the
 # password and version are deliberately not managed at all (see the role

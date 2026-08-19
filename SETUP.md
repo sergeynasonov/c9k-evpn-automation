@@ -142,11 +142,14 @@ Then edit `group_vars/all/deployment.yml`: your NTP servers and VTP domain, plus
 documented in the `.example` file, which ships with RFC 5737 placeholder
 addresses.
 
-**SNMPv3 and syslog are enrolled by presence.** Leave their keys set and
-`readiness.yml` configures and checks them on every switch; comment them out and
-it ignores them completely — no device read, no push, no check, no finding.
-There is no flag to pass. What it will not accept is *half* of either: a partial
-SNMPv3 triple, or a `syslog_server` entry that is not a bare IPv4 address, fails
+**SNMPv3 and syslog are enrolled by presence.** Both ship uncommented in the
+`.example` file, with placeholder addresses. Leave their keys set and
+`readiness.yml` configures and checks them on every switch; comment them out —
+list items included — and it ignores them completely: no device read, no push,
+no check, no finding. There is no flag to pass. Replace the placeholders or
+comment the block out before the first run, or the switches are pointed at
+198.51.100.x. What it will not accept is *half* of either: a partial
+SNMPv3 triple, or a `syslog_hosts` entry that is not a bare IPv4 address, fails
 the run rather than being quietly ignored, because a mistyped key name would
 otherwise be indistinguishable from a deliberate opt-out.
 

@@ -88,7 +88,9 @@ SNMP, syslog and VTP values never get committed.
 
 SNMPv3 and syslog in that file are **optional and enrolled by presence**: leave
 the keys set and `readiness.yml` configures and checks them, comment them out
-and it ignores them entirely. There is no flag to pass.
+and it ignores them entirely. There is no flag to pass. Both ship uncommented in
+`deployment.yml.example` with RFC 5737 placeholder addresses, so replace them or
+comment them out before the first run.
 
 `deployment.yml` is needed only by `readiness.yml`, which applies the platform
 baseline. **`generate_evpn.yml` and `deploy_evpn.yml` need no configuration at
@@ -373,21 +375,30 @@ silently: no auth error, no report PDU, no answer at all.
 
 ### Every node — syslog *(optional)*
 
-Same rule, one variable. Uncomment `syslog_server` in
-`group_vars/all/deployment.yml` and every switch gets:
+Same rule, one variable. `syslog_hosts` in `group_vars/all/deployment.yml` is a
+list of collectors, shaped exactly like `snmp_acl`:
+
+```yaml
+syslog_hosts:
+  - "198.51.100.30"
+  - "198.51.100.31"
+```
+
+and every switch gets:
 
 ```
 logging trap notifications
 logging facility syslog
 logging host 198.51.100.30
+logging host 198.51.100.31
 ```
 
-one `logging host` per entry in the list. Leave it commented out and nothing
-syslog-related is pushed, checked or reported.
+one `logging host` per entry. Comment the key out — list items included — and
+nothing syslog-related is pushed, checked or reported.
 
-Each entry must be a bare IPv4 address — no mask, no hostname. Anything else
-fails the run rather than being quietly dropped, for the same reason half an
-SNMP triple does.
+Each entry must be a bare IPv4 address: no mask, no hostname, no port. Anything
+else fails the run rather than being quietly dropped, for the same reason half
+an SNMP triple does.
 
 Unlike SNMPv3 this rides in the platform baseline rather than a task of its own,
 because all three lines *are* rendered back into `show running-config`
@@ -507,7 +518,7 @@ configures cleanly and then silently fails to forward:
 | Border switches additionally originate the default route | `default-information originate` |
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
 | SNMPv3 user and group present — **only if enrolled** | Checked with `show snmp user` / `show snmp group`, never by reading passwords. `readiness.yml` installs these; the `acm_evpn` pre-flight only checks them. A deployment that declares no SNMP identity is not checked, and the device read is skipped too |
-| `logging trap` / `logging facility` / `logging host` — **only if enrolled** | Present only when `syslog_server` is declared. Read from the running config, unlike SNMPv3, because all three lines are rendered back |
+| `logging trap` / `logging facility` / `logging host` — **only if enrolled** | Present only when `syslog_hosts` is declared. Read from the running config, unlike SNMPv3, because all three lines are rendered back |
 | No `no hidekeys` under `archive log config` | Checked *negatively* — a platform default is never rendered, so a value that is rendered was set deliberately |
 | **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch **in the same fabric** | A one-way MSDP mesh looks complete on each switch individually |
 
