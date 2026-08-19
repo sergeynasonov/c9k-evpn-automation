@@ -10,8 +10,9 @@
 # should fix it -- silently remediating would reintroduce exactly the risk that
 # keeping the underlay device-owned was meant to avoid.
 #
-# SNMPv3, at the bottom of this file, is the one exception: it is the only thing
-# this role configures, and only on the standalone path.
+# SNMPv3 and syslog are the exceptions: they are the only device-facing settings
+# this role configures beyond the platform baseline, only on the standalone
+# path, and only when deployment.yml enrols them. See the block further down.
 
 
 # Global single-line settings every fabric switch must carry.
@@ -119,10 +120,84 @@ readiness_uplink_lines:
 readiness_ospf_routers_warn: 200
 readiness_ospf_routers_max: 250
 
+# ---------------------------------------------------------------------------
+# SNMPv3 and syslog: OPTIONAL, and enrolled by what deployment.yml declares
+#
+# Neither is needed to run a fabric, and a deployment that does not use one of
+# them must not be told forever that every switch is unready for a collector it
+# does not have. So enrolment is derived from the deployment's own identity file
+# rather than from a run-time flag: declare the keys and the role reads, checks
+# and configures it; leave them commented out and the role does not read, check,
+# push or report on it at all.
+#
+# Everything in this block except 'readiness_apply_snmp' and the two password
+# lookups is DERIVED. Do not set them -- edit group_vars/all/deployment.yml,
+# which is where the decision belongs.
+# ---------------------------------------------------------------------------
+
+# SNMPv3 is enrolled when all three identity keys carry a value.
+#
+# ALL THREE, because a partial set is a typo rather than a decision.
+# assert_site_config.yml fails on a partial set rather than silently disabling
+# SNMP -- which is the one new failure mode this mechanism could otherwise
+# introduce, and it would be invisible: a mistyped key name reads exactly like
+# a deliberate opt-out.
+#
+# 'snmp_acl' is deliberately NOT part of the test. It is the list of permitted
+# collectors, and an enrolled deployment that leaves it empty gets the group
+# with no 'access' clause -- which was already the behaviour and is unchanged.
+readiness_snmp_enrolled: >-
+  {{ (snmp_v3_user | default('', true) | string | trim) != ''
+     and (snmp_v3_group | default('', true) | string | trim) != ''
+     and (snmp_acl_name | default('', true) | string | trim) != '' }}
+
+# Permitted collectors, normalised. deployment.yml may now omit 'snmp_acl'
+# entirely, so nothing downstream may reference the raw variable.
+readiness_snmp_acl: "{{ snmp_acl | default([], true) }}"
+
+# Syslog is enrolled when 'syslog_server' names at least one collector. A LIST,
+# like snmp_acl, so a deployment with two syslog servers needs no second
+# variable. Every entry must be a bare IPv4 address; assert_site_config.yml
+# rejects anything else rather than quietly dropping it, for the same reason the
+# SNMP triple is all-or-none.
+readiness_syslog_enrolled: >-
+  {{ (syslog_server | default([], true)) | length > 0 }}
+
+# The syslog CLI, defined ONCE, so the template that pushes it and the check
+# that verifies it cannot drift apart. JSON because an Ansible variable
+# templates to a string; both consumers pipe it back through 'from_json'.
+#
+# All three lines ARE rendered into 'show running-config' -- severity
+# 'notifications' is not the default (informational), and facility 'syslog' is
+# not the default (local7) -- so ios_config converges on them normally. That is
+# the whole reason syslog lives in platform_baseline.j2 while SNMPv3 needs a
+# task of its own: 'snmp-server user' is never read back, and this is.
+#
+# 'logging source-interface' is not here. It is unconditional in the baseline
+# already, and it is source-interface hygiene along with the ip http / ip radius
+# lines rather than part of a syslog enrolment.
+readiness_syslog_lines: >-
+  {%- set out = [] -%}
+  {%- if readiness_syslog_enrolled | bool -%}
+  {%-   set _ = out.append('logging trap notifications') -%}
+  {%-   set _ = out.append('logging facility syslog') -%}
+  {%-   for host in syslog_server -%}
+  {%-     set _ = out.append('logging host ' ~ host) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ out | to_json }}
+
 snmp_v3_auth_password: "{{ lookup('env', 'ios_snmp_auth') }}"
 snmp_v3_priv_password: "{{ lookup('env', 'ios_snmp_priv') }}"
 
-# Set false to check without configuring anything at all.
+# Push SNMPv3 on a deployment that is enrolled for it. This does NOT decide
+# enrolment: an unenrolled deployment is not checked either, whereas setting
+# this false leaves the check running against something the role was told not to
+# configure. Set false to verify an enrolled deployment without touching the
+# device.
+#
+# Syslog has no equivalent knob. It is part of the platform baseline, so
+# 'readiness_apply_baseline: false' already covers it.
 readiness_apply_snmp: true
 
 # Fail on an unready switch (the deploy path). generate_evpn.yml sets this

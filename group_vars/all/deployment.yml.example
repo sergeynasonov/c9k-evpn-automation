@@ -1,5 +1,10 @@
 ---
-# THIS deployment's management identity: NTP, SNMPv3 and VTP.
+# THIS deployment's management identity: NTP, VTP, and optionally SNMPv3 and
+# syslog.
+#
+# NTP and VTP are required. SNMPv3 and syslog are ENROLLED BY PRESENCE: declare
+# the keys and readiness.yml checks and configures them, comment them out and it
+# ignores them completely. Each optional block below says so at its head.
 #
 #   cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
 #   $EDITOR group_vars/all/deployment.yml
@@ -21,13 +26,53 @@
 ntp_server_1: "198.51.100.10"
 ntp_server_2: "198.51.100.11"
 
-# SNMPv3. The passwords come from the environment, never from here --
-# see SETUP.md. Only the identity lives in this file.
+# --- OPTIONAL: SNMPv3 -------------------------------------------------------
+#
+# ENROLLED BY BEING HERE. Leave all three keys below set and readiness.yml
+# reads SNMPv3 state off each switch, configures the group and user, and reports
+# a switch that is missing either. Comment all three out and it does none of
+# those things -- no read, no push, no check, no finding. There is no flag to
+# pass; a deployment that has no SNMP collector says so by not naming one.
+#
+# ALL THREE OR NONE. Half a set fails the run rather than quietly disabling
+# SNMP, because a mistyped key name would otherwise read exactly like a
+# deliberate opt-out and would silently stop configuring every switch.
+#
+# The passwords come from the environment, never from here -- see SETUP.md.
+# Only the identity lives in this file.
 snmp_v3_user: "example-snmpv3"
 snmp_v3_group: "AuthPrivGroup"
 snmp_acl_name: "SNMP-ACL"
+
+# The collectors permitted to poll. OPTIONAL WITHIN the above: an enrolled
+# deployment that leaves this out (or empty) gets the group with no 'access'
+# clause and no ACL, which permits any source.
+#
+# This is the list to check first when a poll times out. A collector that is not
+# named here is dropped by the switch silently -- no auth error, no report PDU,
+# just no answer at all.
 snmp_acl:
   - "198.51.100.20"
+
+# --- OPTIONAL: syslog -------------------------------------------------------
+#
+# Same enrolment rule: uncomment it and every switch gets
+#
+#     logging trap notifications
+#     logging facility syslog
+#     logging host <each address below>
+#
+# and readiness.yml checks all three are present. Leave it commented out and
+# nothing syslog-related is pushed, checked or reported.
+#
+# A LIST, like snmp_acl, so two collectors need no second variable. Each entry
+# must be a bare IPv4 address -- no mask, no hostname. Anything else fails the
+# run rather than being dropped.
+#
+# 'logging source-interface Loopback0' is applied either way: it is part of the
+# platform baseline's source-interface hygiene, not part of this enrolment.
+# syslog_server:
+#   - "198.51.100.30"
 
 # VTP domain. Every switch runs transparent mode, so this is cosmetic; the
 # password and version are deliberately not managed at all (see the role

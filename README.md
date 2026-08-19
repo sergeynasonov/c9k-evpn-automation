@@ -77,13 +77,18 @@ venv/bin/pip install -r requirements.txt
 venv/bin/ansible-galaxy collection install -r requirements.yml
 
 cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
-$EDITOR group_vars/all/deployment.yml     # your NTP / SNMP / VTP identity
+$EDITOR group_vars/all/deployment.yml     # your NTP / VTP identity, and
+                                          # optionally SNMPv3 and syslog
 ```
 
 Export `NETBOX_API` and `NETBOX_TOKEN`, plus the switch credentials
 (`ios_username`, `ios_password`) — see [SETUP.md](SETUP.md). Nothing in this
 repository contains secrets, and `deployment.yml` is gitignored so your NTP,
-SNMP and VTP values never get committed.
+SNMP, syslog and VTP values never get committed.
+
+SNMPv3 and syslog in that file are **optional and enrolled by presence**: leave
+the keys set and `readiness.yml` configures and checks them, comment them out
+and it ignores them entirely. There is no flag to pass.
 
 `deployment.yml` is needed only by `readiness.yml`, which applies the platform
 baseline. **`generate_evpn.yml` and `deploy_evpn.yml` need no configuration at
@@ -125,9 +130,9 @@ role also refuses, for a different reason. See [Deploying](#deploying) for both.
 | `trm_allocate.yml` | Allocate TRM PIM register sources in NetBox — the only playbook that writes to it |
 | `netbox_inv.yml` | NetBox dynamic inventory |
 | `group_vars/all/main.yml` | Connection wiring and the two project-wide conventions. Tracked — describes nobody's network |
-| `group_vars/all/deployment.yml` | **Gitignored.** This deployment's NTP / SNMPv3 / VTP identity, from `deployment.yml.example`. Read only by `readiness.yml` |
+| `group_vars/all/deployment.yml` | **Gitignored.** This deployment's NTP and VTP identity, plus optional SNMPv3 and syslog, from `deployment.yml.example`. Read only by `readiness.yml` |
 | `roles/acm_evpn/` | The fabric role. **[Its README](roles/acm_evpn/README.md) is the NetBox data-model contract** |
-| `roles/underlay_readiness/` | Day-0 assertions, platform baseline and SNMPv3. Run at onboarding, and as an `acm_evpn` pre-flight |
+| `roles/underlay_readiness/` | Day-0 assertions, platform baseline, and optional SNMPv3 and syslog. Run at onboarding, and as an `acm_evpn` pre-flight |
 | `scripts/` | One-off NetBox provisioning helpers — `netbox_provision_schema.py` (the schema) and `netbox_multicast_carve.py` (the multicast carve) |
 | `switch-configuration/` | Rendered candidate configs (regenerated every run) |
 | `commit-results/` | `<host>-proposed-diff.cfg` from a generate; net-diffs and validation failures from a deploy |
@@ -332,7 +337,7 @@ every leaf and spine switch a path out. A leaf switch running it would advertise
 a default it cannot
 honour.
 
-### Every node — SNMPv3
+### Every node — SNMPv3 *(optional)*
 
 The one block on this page you do **not** paste: `readiness.yml` configures it
 for you, in merge mode. It is here because it is *checked*, and because it is
@@ -346,11 +351,54 @@ snmp-server group AuthPrivGroup v3 priv access SNMP-ACL
 snmp-server user example-snmpv3 AuthPrivGroup v3 auth sha <auth> priv aes 128 <priv>
 ```
 
-The identity — user, group, ACL name and the permitted collectors — comes from
-`group_vars/all/deployment.yml`; the two passwords come from the environment
-(`ios_snmp_auth`, `ios_snmp_priv`) and are never written to a file. See
-[SETUP.md](SETUP.md). The ACL is skipped entirely if `snmp_acl` is empty, and
-the group then carries no `access` clause.
+**Enrolled by presence.** `snmp_v3_user`, `snmp_v3_group` and `snmp_acl_name` in
+`group_vars/all/deployment.yml` are the switch. Set them and the role reads
+SNMPv3 state off every switch, configures what is missing, and reports what it
+cannot fix. Comment all three out and it does none of that — no read, no push,
+no check, no finding. A deployment with no SNMP collector says so by not naming
+one, and is not told forever that its fabric is unready for a collector that
+does not exist.
+
+**All three, or none.** Half a set fails the run. Once absence means "no", a
+mistyped key name reads exactly like a deliberate opt-out and would silently
+stop configuring every switch in the fabric — so it is rejected instead.
+
+The two passwords come from the environment (`ios_snmp_auth`, `ios_snmp_priv`)
+and are never written to a file. See [SETUP.md](SETUP.md).
+
+`snmp_acl` — the permitted collectors — is optional *within* that: leave it out
+and the group carries no `access` clause. It is also the first thing to check
+when a poll times out, because a source that is not in the ACL is dropped
+silently: no auth error, no report PDU, no answer at all.
+
+### Every node — syslog *(optional)*
+
+Same rule, one variable. Uncomment `syslog_server` in
+`group_vars/all/deployment.yml` and every switch gets:
+
+```
+logging trap notifications
+logging facility syslog
+logging host 198.51.100.30
+```
+
+one `logging host` per entry in the list. Leave it commented out and nothing
+syslog-related is pushed, checked or reported.
+
+Each entry must be a bare IPv4 address — no mask, no hostname. Anything else
+fails the run rather than being quietly dropped, for the same reason half an
+SNMP triple does.
+
+Unlike SNMPv3 this rides in the platform baseline rather than a task of its own,
+because all three lines *are* rendered back into `show running-config`
+(`notifications` is not the default severity, `syslog` is not the default
+facility), so `ios_config` converges on them normally. The CLI is defined once,
+in `readiness_syslog_lines`, and both the push and the check read that same
+variable — so a switch cannot pass the check against a different set of
+collectors than the baseline was told to install.
+
+`logging source-interface Loopback0` is applied either way. It is part of the
+baseline's source-interface hygiene, not part of this enrolment.
 
 **Run `readiness.yml` on a new switch before `generate_evpn.yml` or
 `deploy_evpn.yml`.** The readiness role also runs as a pre-flight inside
@@ -362,8 +410,8 @@ missing, which looks like a Day-0 mistake and is really just an ordering one:
 ansible-playbook readiness.yml -e deploy_target=<new switch>   # configures, then checks
 ```
 
-If it still reports the user missing after that, the passwords are not reaching
-the play — the line is pushed with empty credentials, which the device accepts
+If it still reports the user missing after an enrolled run, the passwords are
+not reaching the play — the line is pushed with empty credentials, which the device accepts
 in a form that never matches. Check `ios_snmp_auth` and `ios_snmp_priv` are in
 Infisical, then `direnv reload`.
 
@@ -458,7 +506,8 @@ configures cleanly and then silently fails to forward:
 | OSPF `router-id` equals the `Loopback0` address | BGP takes its router-id from the same interface; disagreement makes route dumps unreadable |
 | Border switches additionally originate the default route | `default-information originate` |
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
-| SNMPv3 user and group present | Checked with `show snmp user` / `show snmp group`, never by reading passwords. `readiness.yml` installs these; the `acm_evpn` pre-flight only checks them |
+| SNMPv3 user and group present — **only if enrolled** | Checked with `show snmp user` / `show snmp group`, never by reading passwords. `readiness.yml` installs these; the `acm_evpn` pre-flight only checks them. A deployment that declares no SNMP identity is not checked, and the device read is skipped too |
+| `logging trap` / `logging facility` / `logging host` — **only if enrolled** | Present only when `syslog_server` is declared. Read from the running config, unlike SNMPv3, because all three lines are rendered back |
 | No `no hidekeys` under `archive log config` | Checked *negatively* — a platform default is never rendered, so a value that is rendered was set deliberately |
 | **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch **in the same fabric** | A one-way MSDP mesh looks complete on each switch individually |
 
@@ -494,9 +543,14 @@ Unlike everything else here, this role does configure two things — applied wit
   user, AAA, NTP, VTY hardening, spanning-tree, errdisable, UDLD, CoPP, CEF
   load-sharing and the routing/multicast globals. Set once at onboarding rather
   than rendered on every overlay change.
-- **SNMPv3** — IOS-XE never reports `snmp-server user` back, so a full-replace
-  candidate could never converge on it. It is applied here and checked from
-  operational state instead.
+- **SNMPv3**, when enrolled — IOS-XE never reports `snmp-server user` back, so a
+  full-replace candidate could never converge on it. It is applied here and
+  checked from operational state instead.
+- **Syslog**, when enrolled — part of the baseline above rather than a step of
+  its own, because these lines *do* come back in the running config.
+
+Both are optional and are enrolled by what `group_vars/all/deployment.yml`
+declares, not by a command-line flag — see the Day 0 sections above.
 
 Two consequences worth knowing: **rotating the local admin password is a
 `readiness.yml` run, not a deploy**, and on an established switch readiness
@@ -504,7 +558,9 @@ should report **no baseline change at all** — anything it does report is real
 drift.
 
 Set `readiness_apply_baseline: false` or `readiness_apply_snmp: false` to check
-without configuring anything.
+without configuring anything. Neither decides *enrolment* — an unenrolled
+deployment is not checked either, whereas these leave the checks running against
+something the role was told not to configure.
 
 #### Quieter output
 
@@ -745,7 +801,8 @@ the evicted files. Set `acm_checkpoint: false` to disable, or point
 | Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a scoped `trm_allocate.yml` run |
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
 | Admin or SNMPv3 password | Change it in your secret store — they are read from the environment, never stored here — then re-run `readiness.yml` |
-| SNMP/NTP/VTP identity | Edit `group_vars/all/deployment.yml`, then re-run `readiness.yml` |
+| SNMP / syslog / NTP / VTP identity | Edit `group_vars/all/deployment.yml`, then re-run `readiness.yml` |
+| Turn SNMPv3 or syslog off entirely | Comment its keys out of `group_vars/all/deployment.yml`. The role then stops checking, pushing and reporting it — it does **not** remove what is already on the switches |
 | Fabric ASN, anycast RP, upstream ASN | Edit NetBox — see [the data contract](roles/acm_evpn/README.md). Nothing to edit here |
 | What the baseline or the assertions contain | Edit `roles/underlay_readiness/defaults/main.yml` (behaviour, not site values), then re-run `readiness.yml` |
 

@@ -69,7 +69,7 @@ logic lives in Jinja — in task files and templates — where `--syntax-check`
 evaluates nothing at all. That is covered by running the **real task files under
 real Ansible** with only the device calls removed.
 
-This is no longer a manual exercise: four committed tests already do it, and CI
+This is no longer a manual exercise: five committed tests already do it, and CI
 runs them. Copy whichever is closest rather than starting from scratch.
 
 | Test | What it drives | How the device is removed |
@@ -78,6 +78,7 @@ runs them. Copy whichever is closest rather than starting from scratch.
 | `underlay_readiness/tests/unit/test_msdp_scope.py` | The real spine check from `02_check.yml` | The `_spine` expression is lifted out and fed a hand-written running config |
 | `underlay_readiness/tests/unit/test_anycast_rp.py` | The real anycast-RP resolution | The one `uri` task is stripped; a fixture stands in for the GraphQL result |
 | `acm_evpn/tests/unit/test_inventory_config.py` | `netbox_inv.yml`'s variable renames | Drives the inventory plugin's own methods with a stub inventory |
+| `underlay_readiness/tests/unit/test_optional_enrolment.py` | Whether SNMPv3 and syslog are enrolled at all, from the real `defaults/main.yml`, the real `assert_site_config.yml` and the real `_snmp` / `_syslog` checks | The whole defaults file is copied in as `vars_files` and each case's `deployment.yml` supplied as extra vars, which outrank it — so "this key is commented out" is expressible |
 
 The mechanics worth reusing:
 

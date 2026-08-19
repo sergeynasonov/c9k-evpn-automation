@@ -9,22 +9,41 @@
 # Only THIS role needs it -- it applies the platform baseline. acm_evpn requires
 # nothing of the kind, so generate_evpn.yml and deploy_evpn.yml run on a fresh
 # clone with no configuration at all.
+#
+# THREE CLASSES OF KEY, not one list:
+#
+#   required   NTP and VTP. The platform baseline cannot be rendered without
+#              them, so absence is always an error.
+#   enrolling  The SNMPv3 triple. Absent means "this deployment has no SNMP
+#              collector", which is a legitimate answer and is not an error.
+#   validated  syslog_server. Optional, but a declared collector that is not a
+#              bare IPv4 address is a mistake, not an opt-out.
+#
+# The partial cases are what this file exists for now. Once absence is a
+# meaningful answer, a MISTYPED key name reads exactly like a deliberate opt-out
+# -- so 'snmp_v3_gruop' would silently stop configuring SNMP on every switch in
+# the fabric and nothing would ever say so. A partial SNMP triple is therefore
+# an error, and so is a syslog entry that is not an address.
 
-- name: Deployment configuration is present
+- name: Deployment configuration is present and consistent
   ansible.builtin.assert:
     that:
-      - _missing | from_json | length == 0
+      - _problems | from_json | length == 0
     fail_msg: |-
-      Deployment configuration is incomplete — {{ _missing | from_json | length }} key(s) missing:
-      {% for k in _missing | from_json %}
-        - {{ k }}
+      Deployment configuration is not usable — {{ _problems | from_json | length }} problem(s):
+      {% for p in _problems | from_json %}
+        - {{ p }}
       {% endfor %}
-      These are THIS deployment's NTP, SNMPv3 and VTP identity — real addresses
-      and names on your network — so the role ships no defaults for them.
-      Create the file and fill it in:
+      These are THIS deployment's NTP, SNMPv3, syslog and VTP identity — real
+      addresses and names on your network — so the role ships no defaults for
+      them. Create the file and fill it in:
 
         cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
         $EDITOR group_vars/all/deployment.yml
+
+      SNMPv3 and syslog are OPTIONAL: comment the keys out and the role skips
+      them entirely, checks included. What it will not accept is half of either,
+      because a mistyped key name is indistinguishable from an opt-out.
 
       deployment.yml is gitignored, so it stays yours and is never published.
     success_msg: "deployment configuration present"
@@ -33,16 +52,50 @@
     _required:
       - ntp_server_1
       - ntp_server_2
+      - vtp_domain
+    # All three, or none. See readiness_snmp_enrolled in defaults/main.yml.
+    _snmp_keys:
       - snmp_v3_user
       - snmp_v3_group
       - snmp_acl_name
-      - snmp_acl
-      - vtp_domain
-    _missing: >-
+    _problems: >-
       {%- set bad = [] -%}
-      {%- for k in _required if k not in hostvars[inventory_hostname] -%}
-      {%-   set _ = bad.append(k) -%}
+      {%- set hv = hostvars[inventory_hostname] -%}
+      {#- Set-and-non-empty, not merely present: a key left with no value after
+          the colon parses as None, which 'in hostvars' cannot tell from a real
+          one and which reaches the baseline as the string 'None'. -#}
+      {%- for k in _required
+            if (hv.get(k) | default('', true) | string | trim) == '' -%}
+      {%-   set _ = bad.append(k ~ ' is required and is not set') -%}
       {%- endfor -%}
+      {%- set snmp_set = [] -%}
+      {%- for k in _snmp_keys
+            if (hv.get(k) | default('', true) | string | trim) != '' -%}
+      {%-   set _ = snmp_set.append(k) -%}
+      {%- endfor -%}
+      {%- if snmp_set and snmp_set | length < _snmp_keys | length -%}
+      {%-   for k in _snmp_keys if k not in snmp_set -%}
+      {%-     set _ = bad.append(k ~ ' is not set, but ' ~ snmp_set | join(' and ')
+                                 ~ ' is -- SNMPv3 needs all three keys or none of them') -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- set syslog = syslog_server | default([], true) -%}
+      {#- A bare address instead of a list would iterate as characters and
+          produce one finding per letter, so it is caught as its own case. -#}
+      {%- if syslog is string -%}
+      {%-   set _ = bad.append('syslog_server must be a LIST of collectors, not a'
+                               ~ ' single string -- write it as "- ' ~ syslog ~ '"') -%}
+      {%- else -%}
+      {#-   Strict equality, not merely "does ipv4() return something": the
+            filter accepts 10.66.119.56/24 and hands back the host part, and
+            'logging host 10.66.119.56/24' is a device error. Only a bare
+            dotted quad survives comparing the result with the input. -#}
+      {%-   for s in syslog
+              if ((s | string) | ansible.utils.ipv4('address')) != (s | string) -%}
+      {%-     set _ = bad.append('syslog_server: "' ~ s ~ '" is not a bare IPv4'
+                                 ~ ' address -- one address per list entry, no mask') -%}
+      {%-   endfor -%}
+      {%- endif -%}
       {{ bad | to_json }}
   run_once: true
   delegate_to: localhost

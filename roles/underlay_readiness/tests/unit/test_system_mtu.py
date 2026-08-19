@@ -413,11 +413,18 @@ def render_baseline(mtu):
     env = jinja2.Environment(undefined=jinja2.ChainableUndefined,
                              keep_trailing_newline=True)
     # The template is rendered by Ansible, which has filters bare Jinja does
-    # not. Only 'bool' is used here.
+    # not. 'bool' for the routing conditionals, 'from_json' for the optional
+    # syslog block -- and 'from_json' is not optional to register: Jinja
+    # resolves filters when it COMPILES, so an unknown one raises here rather
+    # than at render time, whatever context is passed.
     env.filters["bool"] = lambda v: str(v).lower() in ("true", "yes", "1", "on")
+    env.filters["from_json"] = json.loads
     with open(BASELINE) as fh:
         template = env.from_string(fh.read())
-    ctx = {"readiness_system_mtu_min": FLOOR}
+    # An empty list is a deployment that has not enrolled syslog, which is the
+    # right neutral for an MTU test. The enrolled case is covered in
+    # test_optional_enrolment.py.
+    ctx = {"readiness_system_mtu_min": FLOOR, "readiness_syslog_lines": "[]"}
     if mtu is not None:
         ctx["_readiness_system_mtu"] = mtu
     return template.render(**ctx)
