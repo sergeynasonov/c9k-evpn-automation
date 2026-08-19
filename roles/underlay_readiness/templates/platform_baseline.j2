@@ -75,12 +75,12 @@ service timestamps log datetime msec localtime
 
   It belongs in the BASELINE, not beside SNMPv3 in 03_apply_snmp.yml, on the
   rule stated at the top of this file: all three lines are rendered back into
-  'show running-config', so ios_config converges on them. Severity
-  'notifications' is not the IOS-XE default (informational) and facility
-  'syslog' is not the default (local7), so neither is a silent default that
-  would be re-pushed forever -- the trap that removed 'ip ftp passive' and
+  'show running-config', so ios_config converges on them. Verified on core2,
+  which reports all three after the push -- neither is a silent default that
+  would be re-pushed forever, the trap that removed 'ip ftp passive' and
   'hidekeys' from this file. 'snmp-server user' is the opposite case and is why
-  it needs a task of its own.
+  it needs a task of its own. See readiness_syslog_lines in defaults/main.yml
+  for what that verification does and does not cover.
 
   'logging source-interface' is already unconditional above; it is
   source-interface hygiene rather than part of a syslog enrolment, and applies

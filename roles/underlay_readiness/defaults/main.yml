@@ -167,11 +167,25 @@ readiness_syslog_enrolled: >-
 # that verifies it cannot drift apart. JSON because an Ansible variable
 # templates to a string; both consumers pipe it back through 'from_json'.
 #
-# All three lines ARE rendered into 'show running-config' -- severity
-# 'notifications' is not the default (informational), and facility 'syslog' is
-# not the default (local7) -- so ios_config converges on them normally. That is
-# the whole reason syslog lives in platform_baseline.j2 while SNMPv3 needs a
-# task of its own: 'snmp-server user' is never read back, and this is.
+# All three lines ARE rendered into 'show running-config' -- VERIFIED on core2,
+# which reports all of them back after the push:
+#
+#     logging trap notifications
+#     logging facility syslog
+#     logging host 10.66.119.56
+#
+# which is what the defaults predict (severity 'notifications' is not the
+# default, informational, and facility 'syslog' is not the default, local7) but
+# is not something this project takes on prediction any more. So ios_config
+# converges on them and the baseline count settles. That is the whole reason
+# syslog lives in platform_baseline.j2 while SNMPv3 needs a task of its own:
+# 'snmp-server user' is never read back, and these are.
+#
+# Measured on ONE platform. The failure mode if another platform in the fabric
+# defaults differently is the familiar one -- the line would not render there,
+# so it would be re-pushed and re-reported forever, exactly as 'ip ftp passive'
+# was before it was removed from the baseline. Worth one
+# 'show run | include ^logging' on a switch of each model in the fabric.
 #
 # 'logging source-interface' is not here. It is unconditional in the baseline
 # already, and it is source-interface hygiene along with the ip http / ip radius
