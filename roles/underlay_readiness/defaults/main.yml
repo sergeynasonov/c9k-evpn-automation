@@ -172,24 +172,26 @@ readiness_syslog_enrolled: >-
 # reason syslog lives in platform_baseline.j2 while SNMPv3 needs a task of its
 # own: 'snmp-server user' is never read back, and these are.
 #
-# VERIFIED ON THE C9400, both halves, because presence is not convergence:
+# VERIFIED ON THE C9300, THE C9400 AND THE c9kv, both halves, because presence
+# is not convergence:
 #
 #   push      a switch without them was given exactly these three lines and
 #             nothing else, and passed the check on the same run
 #   converge  a switch that already had them reported NO baseline change at
 #             all, which is what proves the device reads them back
 #
+# The c9kv is the one that matters most here, and is the reason all three were
+# checked rather than one. It is the platform that does NOT render 'ip tcp
+# window-size', 'ip ftp passive', 'ip tftp blocksize' or interface
+# 'ip proxy-arp' -- every line this baseline has had to drop for churning
+# forever was found by it disagreeing with the physical switches. These three
+# render everywhere, so syslog is genuinely class 1 across the fabric rather
+# than class 1 on the hardware and an invisible default in the lab.
+#
 # The defaults predict this -- severity 'notifications' is not the default
 # (informational) and facility 'syslog' is not the default (local7) -- but the
 # prediction is not what it rests on. This project has been wrong about a
-# platform default three times ('ip tcp window-size', 'ip ftp passive',
-# 'hidekeys'), every time by reasoning instead of looking.
-#
-# NOT verified on the C9300 or the c9kv. The failure mode there is the familiar
-# one: if a line is that platform's default it is never rendered back, so it is
-# re-pushed and re-reported on every run forever. One
-# 'show run | include ^logging' after a readiness run on a switch of each
-# remaining model settles it.
+# platform default three times, every time by reasoning instead of looking.
 #
 # 'logging source-interface' is not here. It is unconditional in the baseline
 # already, and it is source-interface hygiene along with the ip http / ip radius

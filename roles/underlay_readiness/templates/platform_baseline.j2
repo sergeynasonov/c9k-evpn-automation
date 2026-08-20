@@ -75,12 +75,12 @@ service timestamps log datetime msec localtime
 
   It belongs in the BASELINE, not beside SNMPv3 in 03_apply_snmp.yml, on the
   rule stated at the top of this file: all three lines are rendered back into
-  'show running-config', so ios_config converges on them. Verified on the C9400,
-  push and convergence both -- none of the three is a silent default that would
-  be re-pushed forever, the trap that removed 'ip ftp passive' and 'hidekeys'
-  from this file. 'snmp-server user' is the opposite case and is why it needs a
-  task of its own. See readiness_syslog_lines in defaults/main.yml for which
-  platforms that covers.
+  'show running-config', so ios_config converges on them. Verified on the C9300,
+  the C9400 and the c9kv, push and convergence both -- none of the three is a
+  silent default that would be re-pushed forever, the trap that removed 'ip ftp
+  passive' and 'hidekeys' from this file, and the c9kv is precisely the platform
+  that exposed those. 'snmp-server user' is the opposite case and is why it
+  needs a task of its own. See readiness_syslog_lines in defaults/main.yml.
 
   'logging source-interface' is already unconditional above; it is
   source-interface hygiene rather than part of a syslog enrolment, and applies
