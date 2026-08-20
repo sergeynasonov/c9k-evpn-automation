@@ -402,9 +402,9 @@ an SNMP triple does.
 
 Unlike SNMPv3 this rides in the platform baseline rather than a task of its own,
 because all three lines *are* rendered back into `show running-config` —
-verified on a C9K after a push, and consistent with `notifications` not being
-the default severity and `syslog` not being the default facility — so
-`ios_config` converges on them and the baseline settles at no change. The CLI is defined once,
+verified on the C9400, both that a switch without them is given exactly those
+three and that a switch with them reports no change — so `ios_config` converges
+and the baseline settles at no change. Not yet verified on the C9300. The CLI is defined once,
 in `readiness_syslog_lines`, and both the push and the check read that same
 variable — so a switch cannot pass the check against a different set of
 collectors than the baseline was told to install.
