@@ -63,7 +63,11 @@ ANSIBLE = shutil.which("ansible-playbook")
 HOST = "core1"
 USER = "example-snmpv3"
 GROUP = "AuthPrivGroup"
-COLLECTOR = "10.66.119.56"
+# RFC 5737 documentation range, matching deployment.yml.example. A test that
+# hard-codes a real collector reads as one, and this file is the worked
+# example an operator copies from.
+COLLECTOR = "198.51.100.30"
+COLLECTOR_2 = "198.51.100.31"
 
 # A deployment.yml with SNMPv3 enrolled and syslog not.
 SNMP_ONLY = {"snmp_v3_user": USER, "snmp_v3_group": GROUP,
@@ -294,7 +298,7 @@ class TestSyslogDeclared(unittest.TestCase):
             stanzas={"logging trap notifications": [],
                      "logging facility syslog": [],
                      "logging host " + COLLECTOR: []})
-        cls.two = run({"syslog_hosts": [COLLECTOR, "10.66.119.57"]})
+        cls.two = run({"syslog_hosts": [COLLECTOR, COLLECTOR_2]})
 
     def test_declaring_a_collector_enrols_it(self):
         self.assertTrue(self.fresh["syslog_enrolled"])
@@ -320,7 +324,7 @@ class TestSyslogDeclared(unittest.TestCase):
     def test_a_second_collector_needs_no_second_variable(self):
         self.assertEqual(self.two["syslog_cli"][2:],
                          ["logging host " + COLLECTOR,
-                          "logging host 10.66.119.57"])
+                          "logging host " + COLLECTOR_2])
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
@@ -372,7 +376,7 @@ class TestPushAndCheckAgree(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.result = run({"syslog_hosts": [COLLECTOR, "10.66.119.57"]})
+        cls.result = run({"syslog_hosts": [COLLECTOR, COLLECTOR_2]})
 
     def test_the_baseline_pushes_exactly_what_the_check_demands(self):
         pushed = baseline_logging(json.dumps(self.result["syslog_cli"]))
@@ -381,7 +385,7 @@ class TestPushAndCheckAgree(unittest.TestCase):
 
     def test_and_a_switch_carrying_them_passes(self):
         pushed = baseline_logging(json.dumps(self.result["syslog_cli"]))
-        configured = run({"syslog_hosts": [COLLECTOR, "10.66.119.57"]},
+        configured = run({"syslog_hosts": [COLLECTOR, COLLECTOR_2]},
                          stanzas={line: [] for line in pushed})
         self.assertEqual(configured["syslog_msgs"], [])
 

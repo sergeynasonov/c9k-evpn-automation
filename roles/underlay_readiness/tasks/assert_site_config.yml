@@ -87,8 +87,8 @@
                                ~ ' single string -- write it as "- ' ~ syslog ~ '"') -%}
       {%- else -%}
       {#-   Strict equality, not merely "does ipv4() return something": the
-            filter accepts 10.66.119.56/24 and hands back the host part, and
-            'logging host 10.66.119.56/24' is a device error. Only a bare
+            filter accepts 198.51.100.30/24 and hands back the host part,
+            and 'logging host 198.51.100.30/24' is a device error. Only a bare
             dotted quad survives comparing the result with the input. -#}
       {%-   for s in syslog
               if ((s | string) | ansible.utils.ipv4('address')) != (s | string) -%}
