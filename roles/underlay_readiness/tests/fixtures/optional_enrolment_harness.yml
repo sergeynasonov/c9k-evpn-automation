@@ -1,0 +1,108 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# Drives the REAL enrolment logic for the two optional blocks -- SNMPv3 and
+# syslog -- against a deployment.yml that declares them, half-declares them, or
+# does not mention them at all. Driven by tests/unit/test_optional_enrolment.py,
+# which writes these next to this file:
+#
+#   defaults.yml     the shipped roles/underlay_readiness/defaults/main.yml,
+#                    copied verbatim, so 'readiness_snmp_enrolled',
+#                    'readiness_syslog_enrolled' and 'readiness_syslog_lines'
+#                    are the real expressions rather than restatements of them
+#   site_assert.yml  the assert task from assert_site_config.yml
+#   snmp_check.yml   the '_snmp' expression from 02_check.yml
+#   syslog_check.yml the '_syslog' expression from 02_check.yml
+#   ntp_check.yml    the '_ntp' expression from 02_check.yml
+#
+# The deployment's own keys arrive as extra vars, which outrank vars_files --
+# so each case supplies exactly the deployment.yml it is testing, including the
+# case where a key is absent entirely.
+#
+# No device: the SNMPv3 operational read and the indexed running config are
+# supplied as data, in the shape 01_gather.yml leaves them.
+
+- name: Optional SNMPv3 and syslog enrolment
+  hosts: all
+  gather_facts: false
+  strategy: linear
+  vars_files:
+    - defaults.yml
+  vars:
+    vtep_source_intf: Loopback0
+    deploy_target: all
+  tasks:
+    # Lifted verbatim except for 'register' and 'ignore_errors', which the test
+    # adds so a rejected deployment is a RESULT to assert on rather than an
+    # aborted play. Both halves matter: the message an operator is shown is as
+    # much the behaviour under test as the pass/fail.
+    - name: Verify deployment configuration
+      ansible.builtin.import_tasks: site_assert.yml
+
+    - name: Stand in for the indexed running configuration
+      ansible.builtin.set_fact:
+        _stanzas: "{{ stanzas | default({}) }}"
+
+    # What 01_gather.yml derives from 'show snmp user' / 'show snmp group'.
+    # Empty strings are what an unconfigured switch -- or a read that produced
+    # nothing at all -- normalises to; see test_snmp_state.py.
+    - name: Stand in for the SNMPv3 operational-state read
+      ansible.builtin.set_fact:
+        _readiness_snmp_users: "{{ snmp_users | default('') }}"
+        _readiness_snmp_groups: "{{ snmp_groups | default('') }}"
+
+    - name: Check SNMPv3
+      ansible.builtin.import_tasks: snmp_check.yml
+
+    - name: Check syslog
+      ansible.builtin.import_tasks: syslog_check.yml
+
+    - name: Check NTP
+      ansible.builtin.import_tasks: ntp_check.yml
+
+    # Materialised as a fact only so the reporting task below can read it back
+    # out of hostvars: play vars and role defaults are resolved in the scope of
+    # the task that uses them and are NOT in hostvars, which is where a
+    # cross-host summary has to look. The expressions are still the shipped
+    # ones -- this evaluates them, it does not restate them.
+    - name: Publish the derived enrolment for the test to read
+      ansible.builtin.set_fact:
+        enrolment:
+          snmp: "{{ readiness_snmp_enrolled | bool }}"
+          syslog: "{{ readiness_syslog_enrolled | bool }}"
+          cli: "{{ readiness_syslog_lines | from_json }}"
+          ntp_cli: "{{ readiness_ntp_lines | from_json }}"
+
+    - name: Write the findings for the test to read
+      ansible.builtin.copy:
+        content: "{{ _out | to_nice_json }}"
+        dest: "{{ result_file }}"
+        mode: "0644"
+      vars:
+        _findings: >-
+          {%- set out = {} -%}
+          {%- for host in ansible_play_hosts | sort -%}
+          {%-   set hv = hostvars[host] -%}
+          {%-   set _ = out.update({host: {
+                  'snmp_enrolled': hv.enrolment.snmp,
+                  'syslog_enrolled': hv.enrolment.syslog,
+                  'syslog_cli': hv.enrolment.cli,
+                  'snmp_msgs': (hv.snmp_findings | default([]))
+                                | map(attribute='msg') | list,
+                  'syslog_msgs': (hv.syslog_findings | default([]))
+                                  | map(attribute='msg') | list,
+                  'syslog_lines': (hv.syslog_findings | default([]))
+                                   | map(attribute='lines') | flatten | list,
+                  'ntp_cli': hv.enrolment.ntp_cli,
+                  'ntp_msgs': (hv.ntp_findings | default([]))
+                               | map(attribute='msg') | list,
+                  'ntp_lines': (hv.ntp_findings | default([]))
+                                | map(attribute='lines') | flatten | list,
+                  'assert_failed': hv.site_assert.failed | default(false),
+                  'assert_msg': hv.site_assert.msg | default('')}}) -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+        _out: "{{ _findings | from_json }}"
+      run_once: true
+      delegate_to: localhost

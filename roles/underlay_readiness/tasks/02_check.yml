@@ -20,7 +20,8 @@
     readiness_failures: >-
       {{ (_global | from_json) + (_routing | from_json) + (_defaults | from_json)
          + (_mtu | from_json) + (_loopback | from_json) + (_ospf | from_json)
-         + (_uplinks | from_json) + (_snmp | from_json) + (_spine | from_json) }}
+         + (_uplinks | from_json) + (_snmp | from_json) + (_syslog | from_json)
+         + (_ntp | from_json) + (_spine | from_json) }}
     readiness_ospf_area_routers: "{{ _readiness_ospf_routers | int }}"
   vars:
     # --- global single-line settings -------------------------------------
@@ -228,19 +229,80 @@
     # IOS-XE hides snmp-server credentials from the running config. Presence
     # only; neither command reveals a password, and no command is emitted here
     # because that would put credentials in a file on disk.
+    #
+    # ENROLMENT-GATED. A deployment with no SNMP collector declares none in
+    # deployment.yml, and gets no findings: every switch in such a fabric used
+    # to report two, permanently and unfixably, for a collector that does not
+    # exist -- and two unfixable findings per host is how a summary stops being
+    # read at all. Same reasoning as dropping 'ip tcp window-size' above.
+    #
+    # The gate is the deployment's own identity file, not a run-time flag, so
+    # 'not configured' cannot be produced by forgetting an -e on the command
+    # line. See readiness_snmp_enrolled in defaults/main.yml.
+    #
+    # It is also load-bearing rather than cosmetic: snmp_v3_user and
+    # snmp_v3_group are no longer required keys, so an unenrolled deployment
+    # reaching the body of this block is an undefined-variable crash, not a
+    # spurious finding. Removing the guard is caught by
+    # tests/unit/test_optional_enrolment.py, which is where that was measured.
     _snmp: >-
       {%- set bad = [] -%}
-      {%- if snmp_v3_user not in _readiness_snmp_users -%}
-      {%-   set _ = bad.append({
-              'msg': 'SNMPv3 user "' ~ snmp_v3_user ~ '" not present (show snmp user)'
-                     ~ ' -- run readiness.yml with readiness_apply_snmp=true to configure it',
-              'parents': [], 'lines': []}) -%}
+      {%- if readiness_snmp_enrolled | bool -%}
+      {%-   if snmp_v3_user not in _readiness_snmp_users -%}
+      {%-     set _ = bad.append({
+                'msg': 'SNMPv3 user "' ~ snmp_v3_user ~ '" not present (show snmp user)'
+                       ~ ' -- run readiness.yml with readiness_apply_snmp=true to configure it',
+                'parents': [], 'lines': []}) -%}
+      {%-   endif -%}
+      {%-   if snmp_v3_group not in _readiness_snmp_groups -%}
+      {%-     set _ = bad.append({
+                'msg': 'SNMPv3 group "' ~ snmp_v3_group ~ '" not present (show snmp group)',
+                'parents': [], 'lines': []}) -%}
+      {%-   endif -%}
       {%- endif -%}
-      {%- if snmp_v3_group not in _readiness_snmp_groups -%}
-      {%-   set _ = bad.append({
-              'msg': 'SNMPv3 group "' ~ snmp_v3_group ~ '" not present (show snmp group)',
-              'parents': [], 'lines': []}) -%}
-      {%- endif -%}
+      {{ bad | to_json }}
+
+    # --- syslog ------------------------------------------------------------
+    # Enrolment-gated like SNMPv3, but from the RUNNING CONFIG rather than
+    # operational state: all three lines are rendered back, which is what lets
+    # platform_baseline.j2 push them and lets them be checked as plain
+    # membership. readiness_syslog_lines is empty when the deployment declares
+    # no syslog_hosts, so this loop is the gate and needs no condition of its
+    # own -- and because the SAME variable is both pushed and checked, a switch
+    # cannot pass here against a different set of collectors than it was given.
+    #
+    # These carry commands, unlike the SNMP findings above: there is no
+    # credential in a syslog line, so the remediation file can hold them.
+    _syslog: >-
+      {%- set bad = [] -%}
+      {%- for line in readiness_syslog_lines | from_json if line not in _stanzas -%}
+      {%-   set _ = bad.append({'msg': 'missing global: ' ~ line,
+                                'parents': [], 'lines': [line]}) -%}
+      {%- endfor -%}
+      {{ bad | to_json }}
+
+    # --- NTP ---------------------------------------------------------------
+    # Same shape as syslog, and NOT enrolment-gated: NTP is required, so
+    # readiness_ntp_lines is never empty in a run that got past
+    # assert_site_config.yml.
+    #
+    # New with the move to a list. The two fixed keys were pushed by the
+    # baseline and never checked, so a time source removed from a switch by
+    # hand went unreported -- and 'ntp server' renders back into the running
+    # config, which is what makes checking it honest here rather than needing
+    # operational state the way SNMPv3 does.
+    #
+    # What this canNOT see, for the same reason nothing else here can: a server
+    # the deployment has STOPPED naming. 'ntp server' is list-style and
+    # ios_config merges, so the old address stays on the switch and every check
+    # in this file tests presence rather than absence. See the note on the
+    # three address lists in defaults/main.yml.
+    _ntp: >-
+      {%- set bad = [] -%}
+      {%- for line in readiness_ntp_lines | from_json if line not in _stanzas -%}
+      {%-   set _ = bad.append({'msg': 'missing global: ' ~ line,
+                                'parents': [], 'lines': [line]}) -%}
+      {%- endfor -%}
       {{ bad | to_json }}
 
     # --- spines: anycast RP and the MSDP mesh ------------------------------

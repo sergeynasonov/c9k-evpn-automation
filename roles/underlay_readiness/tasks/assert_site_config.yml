@@ -9,39 +9,137 @@
 # Only THIS role needs it -- it applies the platform baseline. acm_evpn requires
 # nothing of the kind, so generate_evpn.yml and deploy_evpn.yml run on a fresh
 # clone with no configuration at all.
+#
+# FOUR CLASSES OF KEY, not one list:
+#
+#   required     vtp_domain. The platform baseline cannot be rendered without
+#                it, so absence is always an error.
+#   enrolling    the SNMPv3 triple. Absent means "this deployment has no SNMP
+#                collector", a legitimate answer and not an error.
+#   address list ntp_servers and syslog_hosts. Same shape and same validation;
+#                they differ only in whether an empty one is allowed. NTP is
+#                required -- a fabric with no time source is a fault. Syslog is
+#                not.
+#   superseded   ntp_server_1 / ntp_server_2, which became ntp_servers. Named
+#                explicitly so an un-migrated file gets told what to do rather
+#                than "ntp_servers is required" while two NTP servers sit right
+#                there in the file.
+#
+# The partial and invalid cases are what this file exists for now. Once absence
+# is a meaningful answer, a MISTYPED key name reads exactly like a deliberate
+# opt-out -- so 'snmp_v3_gruop' would silently stop configuring SNMP on every
+# switch in the fabric and nothing would ever say so. A partial SNMP triple is
+# therefore an error, and so is an address that is not an address.
 
-- name: Deployment configuration is present
+- name: Deployment configuration is present and consistent
   ansible.builtin.assert:
     that:
-      - _missing | from_json | length == 0
+      - _problems | from_json | length == 0
     fail_msg: |-
-      Deployment configuration is incomplete — {{ _missing | from_json | length }} key(s) missing:
-      {% for k in _missing | from_json %}
-        - {{ k }}
+      Deployment configuration is not usable — {{ _problems | from_json | length }} problem(s):
+      {% for p in _problems | from_json %}
+        - {{ p }}
       {% endfor %}
-      These are THIS deployment's NTP, SNMPv3 and VTP identity — real addresses
-      and names on your network — so the role ships no defaults for them.
-      Create the file and fill it in:
+      These are THIS deployment's NTP, SNMPv3, syslog and VTP identity — real
+      addresses and names on your network — so the role ships no defaults for
+      them. Create the file and fill it in:
 
         cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
         $EDITOR group_vars/all/deployment.yml
+
+      SNMPv3 and syslog are OPTIONAL: comment the keys out and the role skips
+      them entirely, checks included. What it will not accept is half of either,
+      because a mistyped key name is indistinguishable from an opt-out.
 
       deployment.yml is gitignored, so it stays yours and is never published.
     success_msg: "deployment configuration present"
     quiet: true
   vars:
     _required:
-      - ntp_server_1
-      - ntp_server_2
+      - vtp_domain
+    # All three, or none. See readiness_snmp_enrolled in defaults/main.yml.
+    _snmp_keys:
       - snmp_v3_user
       - snmp_v3_group
       - snmp_acl_name
-      - snmp_acl
-      - vtp_domain
-    _missing: >-
+    # Lists of bare IPv4 addresses. Validated identically; 'required' decides
+    # only whether an empty or absent one is a problem.
+    _address_lists:
+      ntp_servers:
+        what: "NTP server"
+        required: true
+      syslog_hosts:
+        what: "syslog collector"
+        required: false
+    _superseded:
+      ntp_server_1: ntp_servers
+      ntp_server_2: ntp_servers
+    _problems: >-
       {%- set bad = [] -%}
-      {%- for k in _required if k not in hostvars[inventory_hostname] -%}
-      {%-   set _ = bad.append(k) -%}
+      {%- set hv = hostvars[inventory_hostname] -%}
+      {#- Set-and-non-empty, not merely present: a key left with no value after
+          the colon parses as None, which 'in hostvars' cannot tell from a real
+          one and which reaches the baseline as the string 'None'. -#}
+      {%- for k in _required
+            if (hv.get(k) | default('', true) | string | trim) == '' -%}
+      {%-   set _ = bad.append(k ~ ' is required and is not set') -%}
+      {%- endfor -%}
+      {#- Migration, checked before the list below so an un-migrated file is
+          told what to rename rather than what is missing. Presence is the
+          test, not emptiness: a commented-out old key is already migrated. -#}
+      {%- for old, new in _superseded | dictsort if old in hv -%}
+      {%-   set _ = bad.append(old ~ ' is no longer read -- NTP servers are now'
+                               ~ ' one list, "' ~ new ~ '", shaped like snmp_acl'
+                               ~ ' and syslog_hosts. Replace every ' ~ old[:-2]
+                               ~ '_N with a single "' ~ new ~ ':" and one'
+                               ~ ' "- <address>" line per server') -%}
+      {%- endfor -%}
+      {%- set snmp_set = [] -%}
+      {%- for k in _snmp_keys
+            if (hv.get(k) | default('', true) | string | trim) != '' -%}
+      {%-   set _ = snmp_set.append(k) -%}
+      {%- endfor -%}
+      {%- if snmp_set and snmp_set | length < _snmp_keys | length -%}
+      {%-   for k in _snmp_keys if k not in snmp_set -%}
+      {#-     'is' or 'are' by how many keys survived. One finding per missing
+              key, so this reads 'snmp_v3_group is not set, but snmp_v3_user
+              and snmp_acl_name are' -- and a bare 'is' there is the kind of
+              thing that makes an operator re-read the sentence instead of
+              the key name it is pointing at. -#}
+      {%-     set _ = bad.append(k ~ ' is not set, but ' ~ snmp_set | join(' and ')
+                                 ~ (' is' if snmp_set | length == 1 else ' are')
+                                 ~ ' -- SNMPv3 needs all three keys or none of them') -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {#- One loop for both address lists: they are the same data shape and the
+          same mistakes, and writing the validation twice is how the two drift
+          into disagreeing about what an address is. -#}
+      {%- for key, spec in _address_lists | dictsort -%}
+      {%-   set raw = hv.get(key) | default([], true) -%}
+      {#-   A bare address instead of a list would iterate as characters and
+            produce one finding per letter, so it is caught as its own case. -#}
+      {%-   if raw is string -%}
+      {%-     set _ = bad.append(key ~ ' must be a LIST of ' ~ spec.what
+                                 ~ 's, not a single string -- write it as'
+                                 ~ ' "- ' ~ raw ~ '"') -%}
+      {%-   elif raw | length == 0 -%}
+      {%-     if spec.required -%}
+      {%-       set _ = bad.append(key ~ ' is required and names no ' ~ spec.what
+                                   ~ ' -- a fabric with no time source cannot be'
+                                   ~ ' troubleshooted from its own logs') -%}
+      {%-     endif -%}
+      {%-   else -%}
+      {#-     Strict equality, not merely "does ipv4() return something": the
+              filter accepts 198.51.100.30/24 and hands back the host part,
+              and 'logging host 198.51.100.30/24' is a device error. Only a
+              bare dotted quad survives comparing the result with the input. -#}
+      {%-     for s in raw
+                if ((s | string) | ansible.utils.ipv4('address')) != (s | string) -%}
+      {%-       set _ = bad.append(key ~ ': "' ~ s ~ '" is not a bare IPv4'
+                                   ~ ' address -- one address per list entry,'
+                                   ~ ' no mask') -%}
+      {%-     endfor -%}
+      {%-   endif -%}
       {%- endfor -%}
       {{ bad | to_json }}
   run_once: true

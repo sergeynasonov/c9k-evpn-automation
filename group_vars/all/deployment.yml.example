@@ -1,5 +1,10 @@
 ---
-# THIS deployment's management identity: NTP, SNMPv3 and VTP.
+# THIS deployment's management identity: NTP, VTP, and optionally SNMPv3 and
+# syslog.
+#
+# NTP and VTP are required. SNMPv3 and syslog are ENROLLED BY PRESENCE: declare
+# the keys and readiness.yml checks and configures them, comment them out and it
+# ignores them completely. Each optional block below says so at its head.
 #
 #   cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
 #   $EDITOR group_vars/all/deployment.yml
@@ -18,16 +23,82 @@
 
 # Addresses use RFC 5737 documentation ranges. Replace all of them.
 
-ntp_server_1: "198.51.100.10"
-ntp_server_2: "198.51.100.11"
+# --- REQUIRED: NTP ----------------------------------------------------------
+#
+# A LIST, shaped like snmp_acl and syslog_hosts below -- one 'ntp server' line
+# per entry. This replaced ntp_server_1 / ntp_server_2, which fixed the count at
+# exactly two: a deployment with three sources had nowhere to put the third, and
+# one with a single source had to name it twice.
+#
+# Required, unlike the two optional blocks below. At least one entry, though two
+# or more is strongly preferable: a single time source cannot be sanity-checked,
+# and the switch will follow it wherever it goes.
+#
+# Bare IPv4 addresses, no masks and no hostnames.
+ntp_servers:
+  - "198.51.100.10"
+  - "198.51.100.11"
 
-# SNMPv3. The passwords come from the environment, never from here --
-# see SETUP.md. Only the identity lives in this file.
+# --- OPTIONAL: SNMPv3 -------------------------------------------------------
+#
+# ENROLLED BY BEING HERE. Leave all three keys below set and readiness.yml
+# reads SNMPv3 state off each switch, configures the group and user, and reports
+# a switch that is missing either. Comment all three out and it does none of
+# those things -- no read, no push, no check, no finding. There is no flag to
+# pass; a deployment that has no SNMP collector says so by not naming one.
+#
+# ALL THREE OR NONE. Half a set fails the run rather than quietly disabling
+# SNMP, because a mistyped key name would otherwise read exactly like a
+# deliberate opt-out and would silently stop configuring every switch.
+#
+# The passwords come from the environment, never from here -- see SETUP.md.
+# Only the identity lives in this file.
 snmp_v3_user: "example-snmpv3"
 snmp_v3_group: "AuthPrivGroup"
 snmp_acl_name: "SNMP-ACL"
+
+# The collectors permitted to poll. OPTIONAL WITHIN the above: an enrolled
+# deployment that leaves this out (or empty) gets the group with no 'access'
+# clause and no ACL, which permits any source.
+#
+# This is the list to check first when a poll times out. A collector that is not
+# named here is dropped by the switch silently -- no auth error, no report PDU,
+# just no answer at all.
 snmp_acl:
   - "198.51.100.20"
+
+# --- OPTIONAL: syslog -------------------------------------------------------
+#
+# ENROLLED BY BEING HERE, exactly like the SNMPv3 keys above. Every collector
+# listed gets a 'logging host' line, and each switch gets the trap level and
+# facility that go with them:
+#
+#     logging trap notifications
+#     logging facility syslog
+#     logging host 198.51.100.30
+#     logging host 198.51.100.31
+#
+# readiness.yml pushes those with the platform baseline and then checks all of
+# them are present. Comment the whole key out -- including its list items --
+# and nothing syslog-related is pushed, checked or reported.
+#
+# A LIST, like snmp_acl and ntp_servers, so two collectors need no second
+# variable. Each entry must be a bare IPv4 address: no mask, no hostname, no
+# port. Anything else fails the run rather than being quietly dropped, because
+# a typo must not be able to masquerade as an opt-out.
+#
+# TRUE OF ALL THREE LISTS HERE: adding an entry works, and CHANGING one does
+# not do what it looks like. These drive list-style IOS commands and the role
+# merges, so the address you replaced stays configured on every switch until
+# somebody removes it by hand -- and nothing here reports it, because every
+# check tests for presence, not absence. Repoint a collector and the switches
+# talk to both.
+#
+# 'logging source-interface Loopback0' is applied either way. It is part of the
+# platform baseline's source-interface hygiene, not part of this enrolment.
+syslog_hosts:
+  - "198.51.100.30"
+  - "198.51.100.31"
 
 # VTP domain. Every switch runs transparent mode, so this is cosmetic; the
 # password and version are deliberately not managed at all (see the role

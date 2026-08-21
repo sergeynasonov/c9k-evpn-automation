@@ -4,7 +4,9 @@
   Fabric-wide switch settings: local user, AAA, logging, timestamps, clock,
   VTY/console, routing and multicast globals, archive, VTP, spanning-tree,
   errdisable, UDLD, CoPP class-maps and policy, licensing, redundancy, Vlan1,
-  the management VRF and port, and NTP.
+  the management VRF and port, and NTP -- plus syslog, which is the one
+  OPTIONAL block here and renders nothing unless deployment.yml declares a
+  collector.
 
   APPLIED, NOT RENDERED. This is pushed once at onboarding by
   tasks/04_apply_baseline.yml via 'ios_config', which merges: it installs what
@@ -60,6 +62,33 @@ ip scp server enable
 logging buffered 1000000
 service timestamps debug datetime msec localtime
 service timestamps log datetime msec localtime
+{#
+  SYSLOG -- OPTIONAL, and enrolled by 'syslog_hosts' in deployment.yml. A
+  deployment that declares no collector renders nothing here at all, because
+  readiness_syslog_lines is empty; there is no flag to remember and no way to
+  disable it by forgetting one.
+
+  The lines come from that single variable rather than being written out here,
+  so the push and the check in 02_check.yml cannot drift apart -- contrast
+  'system mtu 9100' below, which is duplicated between this template and the
+  check and needs test_system_mtu.py to keep the two honest.
+
+  It belongs in the BASELINE, not beside SNMPv3 in 03_apply_snmp.yml, on the
+  rule stated at the top of this file: all three lines are rendered back into
+  'show running-config', so ios_config converges on them. Verified on the C9300,
+  the C9400 and the c9kv, push and convergence both -- none of the three is a
+  silent default that would be re-pushed forever, the trap that removed 'ip ftp
+  passive' and 'hidekeys' from this file, and the c9kv is precisely the platform
+  that exposed those. 'snmp-server user' is the opposite case and is why it
+  needs a task of its own. See readiness_syslog_lines in defaults/main.yml.
+
+  'logging source-interface' is already unconditional above; it is
+  source-interface hygiene rather than part of a syslog enrolment, and applies
+  whether or not a collector is declared.
+#}
+{% for line in readiness_syslog_lines | from_json %}
+{{ line }}
+{% endfor %}
 {# '10 0', not '+10': IOS stores hours and minutes separately and
    re-renders it that way, so '+10' never matches and churns. #}
 clock timezone AEST 10 0
@@ -164,8 +193,18 @@ ip radius source-interface {{ vtep_source_intf }}
 logging source-interface {{ vtep_source_intf }}
 snmp-server trap-source {{ vtep_source_intf }}
 !
-ntp server {{ ntp_server_1 }}
-ntp server {{ ntp_server_2 }}
+{#
+  NTP, from the 'ntp_servers' list rather than two fixed keys. Same single
+  definition as syslog above -- readiness_ntp_lines is what 02_check.yml
+  verifies too, so the push and the check cannot disagree about how many time
+  sources this deployment has or what they are.
+
+  REQUIRED, unlike syslog: assert_site_config.yml refuses a deployment that
+  names none, so this loop is never empty in a run that gets this far.
+#}
+{% for line in readiness_ntp_lines | from_json %}
+{{ line }}
+{% endfor %}
 !
 {#
   SNMPv3 -- the ACL, the group and the user -- moved to roles/underlay_readiness.

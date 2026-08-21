@@ -1,8 +1,13 @@
 ---
 # Underlay readiness: assert a switch is fit for fabric provisioning, and
-# configure the two things this role owns (SNMPv3 and the platform baseline).
-# Run at onboarding, before deploy_evpn.yml ever touches the node. Safe to
-# re-run: it only ever adds, and never removes.
+# configure the things this role owns -- the platform baseline, plus SNMPv3 and
+# syslog where group_vars/all/deployment.yml enrols them. Run at onboarding,
+# before deploy_evpn.yml ever touches the node. Safe to re-run: it only ever
+# adds, and never removes.
+#
+# SNMPv3 and syslog are OPTIONAL and are enrolled by what deployment.yml
+# declares, not by a flag here: comment their keys out and the role does not
+# read, push, check or report on them at all.
 #
 #   deploy_target is REQUIRED -- an unscoped run is refused, naming the fabrics.
 #   one fabric   : ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus

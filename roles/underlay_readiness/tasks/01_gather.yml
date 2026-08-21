@@ -44,6 +44,16 @@
 # us reading SNMP state -- agent off, command unsupported, authorisation --
 # the honest answer downstream is the same: no user and no group were seen, so
 # report them missing and let 03_apply_snmp.yml install them.
+#
+# Skipped entirely on a deployment that has not enrolled SNMPv3: there is no
+# user or group to look for, so the round-trip buys nothing and the check that
+# would read it is skipped too. See readiness_snmp_enrolled in defaults/main.yml.
+#
+# Skipping a task that REGISTERS is safe here, and only because it was made so
+# deliberately: a skipped task overwrites its target with {'skipped': true},
+# which has no 'stdout' -- and the derive task below already treats a result
+# with no stdout as "nothing was seen", because the read is allowed to fail.
+# The unenrolled case therefore lands on the path that already existed.
 - name: Readiness — read SNMPv3 operational state
   cisco.ios.ios_command:
     commands:
@@ -53,7 +63,9 @@
   check_mode: false
   ignore_unreachable: true
   failed_when: false
-  when: current_run_config is defined or _readiness_run.stdout is defined
+  when:
+    - readiness_snmp_enrolled | bool
+    - current_run_config is defined or _readiness_run.stdout is defined
 
 # 'database database-summary' rather than 'database router': a handful of lines
 # instead of one LSA dump per router, and it reports the per-area router count

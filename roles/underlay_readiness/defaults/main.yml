@@ -10,8 +10,9 @@
 # should fix it -- silently remediating would reintroduce exactly the risk that
 # keeping the underlay device-owned was meant to avoid.
 #
-# SNMPv3, at the bottom of this file, is the one exception: it is the only thing
-# this role configures, and only on the standalone path.
+# SNMPv3 and syslog are the exceptions: they are the only device-facing settings
+# this role configures beyond the platform baseline, only on the standalone
+# path, and only when deployment.yml enrols them. See the block further down.
 
 
 # Global single-line settings every fabric switch must carry.
@@ -119,10 +120,164 @@ readiness_uplink_lines:
 readiness_ospf_routers_warn: 200
 readiness_ospf_routers_max: 250
 
+# ---------------------------------------------------------------------------
+# SNMPv3 and syslog: OPTIONAL, and enrolled by what deployment.yml declares
+#
+# Neither is needed to run a fabric, and a deployment that does not use one of
+# them must not be told forever that every switch is unready for a collector it
+# does not have. So enrolment is derived from the deployment's own identity file
+# rather than from a run-time flag: declare the keys and the role reads, checks
+# and configures it; leave them commented out and the role does not read, check,
+# push or report on it at all.
+#
+# Everything in this block except 'readiness_apply_snmp' and the two password
+# lookups is DERIVED. Do not set them -- edit group_vars/all/deployment.yml,
+# which is where the decision belongs.
+#
+# THE UNENROLLED PATH IS VERIFIED ON HARDWARE, over the full cycle: a switch
+# with both configured, run enrolled, then with all four keys commented out,
+# then enrolled again. Every stage reported changed=0, and the middle stage
+# skipped the SNMPv3 operational read, both apply tasks and every SNMPv3 and
+# syslog check, while still reporting the switch ready.
+#
+# The property worth knowing, and the one measured directly rather than argued
+# from ios_config's merge semantics: unenrolling REMOVES NOTHING. 'show run |
+# include ^logging' and 'show snmp user' were byte-identical before and after
+# -- all three logging lines and the SNMPv3 user still on the box. Commenting
+# a key out stops this role managing and checking a thing; it does not
+# unconfigure it. Anyone who actually wants it off the switches has to do that
+# themselves.
+#
+# Worth testing on a device at all because of WHERE the keys come from. The
+# unit tests supply them through vars_files and extra vars; a real run resolves
+# them from group_vars/all, which is a different precedence layer, and that is
+# the one part of this mechanism offline coverage cannot settle.
+# ---------------------------------------------------------------------------
+
+# SNMPv3 is enrolled when all three identity keys carry a value.
+#
+# ALL THREE, because a partial set is a typo rather than a decision.
+# assert_site_config.yml fails on a partial set rather than silently disabling
+# SNMP -- which is the one new failure mode this mechanism could otherwise
+# introduce, and it would be invisible: a mistyped key name reads exactly like
+# a deliberate opt-out.
+#
+# 'snmp_acl' is deliberately NOT part of the test. It is the list of permitted
+# collectors, and an enrolled deployment that leaves it empty gets the group
+# with no 'access' clause -- which was already the behaviour and is unchanged.
+readiness_snmp_enrolled: >-
+  {{ (snmp_v3_user | default('', true) | string | trim) != ''
+     and (snmp_v3_group | default('', true) | string | trim) != ''
+     and (snmp_acl_name | default('', true) | string | trim) != '' }}
+
+# Permitted collectors, normalised. deployment.yml may now omit 'snmp_acl'
+# entirely, so nothing downstream may reference the raw variable.
+readiness_snmp_acl: "{{ snmp_acl | default([], true) }}"
+
+# Syslog is enrolled when 'syslog_hosts' names at least one collector. A LIST,
+# like snmp_acl, so a deployment with two syslog servers needs no second
+# variable. Every entry must be a bare IPv4 address; assert_site_config.yml
+# rejects anything else rather than quietly dropping it, for the same reason the
+# SNMP triple is all-or-none.
+readiness_syslog_enrolled: >-
+  {{ (syslog_hosts | default([], true)) | length > 0 }}
+
+# The syslog CLI, defined ONCE, so the template that pushes it and the check
+# that verifies it cannot drift apart. JSON because an Ansible variable
+# templates to a string; both consumers pipe it back through 'from_json'.
+#
+# All three lines ARE rendered into 'show running-config', so ios_config
+# converges on them and the baseline settles at no change. That is the whole
+# reason syslog lives in platform_baseline.j2 while SNMPv3 needs a task of its
+# own: 'snmp-server user' is never read back, and these are.
+#
+# VERIFIED ON THE C9300, THE C9400 AND THE c9kv, both halves, because presence
+# is not convergence:
+#
+#   push      a switch without them was given exactly these three lines and
+#             nothing else, and passed the check on the same run
+#   converge  a switch that already had them reported NO baseline change at
+#             all, which is what proves the device reads them back
+#
+# The c9kv is the one that matters most here, and is the reason all three were
+# checked rather than one. It is the platform that does NOT render 'ip tcp
+# window-size', 'ip ftp passive', 'ip tftp blocksize' or interface
+# 'ip proxy-arp' -- every line this baseline has had to drop for churning
+# forever was found by it disagreeing with the physical switches. These three
+# render everywhere, so syslog is genuinely class 1 across the fabric rather
+# than class 1 on the hardware and an invisible default in the lab.
+#
+# The defaults predict this -- severity 'notifications' is not the default
+# (informational) and facility 'syslog' is not the default (local7) -- but the
+# prediction is not what it rests on. This project has been wrong about a
+# platform default three times, every time by reasoning instead of looking.
+#
+# 'logging source-interface' is not here. It is unconditional in the baseline
+# already, and it is source-interface hygiene along with the ip http / ip radius
+# lines rather than part of a syslog enrolment.
+readiness_syslog_lines: >-
+  {%- set out = [] -%}
+  {%- if readiness_syslog_enrolled | bool -%}
+  {%-   set _ = out.append('logging trap notifications') -%}
+  {%-   set _ = out.append('logging facility syslog') -%}
+  {%-   for host in syslog_hosts -%}
+  {%-     set _ = out.append('logging host ' ~ host) -%}
+  {%-   endfor -%}
+  {%- endif -%}
+  {{ out | to_json }}
+
+# NTP servers, in the same shape and for the same reasons as syslog_hosts and
+# snmp_acl: 'ntp server' is a list-style command, so a list is what the
+# deployment should be describing. This replaced ntp_server_1 / ntp_server_2,
+# which fixed the number of sources at exactly two -- a deployment with three
+# had nowhere to put the third, and one with a single source had to name it
+# twice or invent one.
+#
+# REQUIRED, unlike the two optional blocks above: a fabric with no time source
+# is a real fault, not a deployment that has opted out. Enforced as "the list
+# names at least one", not two. Two or more is strongly preferable -- a single
+# source cannot be sanity-checked and IOS will follow it wherever it goes --
+# but that is the deployment's call, and this role has a history of asserting
+# fabric-wide policy it has no business holding.
+#
+# 'ntp server' renders back into the running config verbatim, which is not an
+# assumption: the baseline has been pushing these two lines all along and a
+# second run reports no change, which is exactly the proof.
+readiness_ntp_lines: >-
+  {%- set out = [] -%}
+  {%- for server in ntp_servers | default([], true) -%}
+  {%-   set _ = out.append('ntp server ' ~ server) -%}
+  {%- endfor -%}
+  {{ out | to_json }}
+
+# WORTH KNOWING ABOUT ALL THREE LISTS -- ntp_servers, syslog_hosts, snmp_acl.
+# Every one of them drives a list-style IOS command, and ios_config MERGES. So
+# ADDING an entry works and CHANGING one does not do what it looks like: the
+# old address stays configured on the switch, nothing removes it, and no check
+# here reports it, because every check tests for presence rather than absence.
+#
+# Repoint a collector and the switch logs to both, polls both, permits both,
+# until somebody clears the old line by hand. Single-valued commands in this
+# baseline behave the other way ('vtp domain', 'clock timezone', 'system mtu',
+# the source-interface lines all replace themselves), which is what makes this
+# easy to get wrong.
+#
+# Not fixed here, deliberately: removing a line the deployment no longer names
+# means this role deleting device configuration, and it has exactly one
+# mechanism for that today ('acm replace', in the other role) with a whole
+# safety model around it.
+
 snmp_v3_auth_password: "{{ lookup('env', 'ios_snmp_auth') }}"
 snmp_v3_priv_password: "{{ lookup('env', 'ios_snmp_priv') }}"
 
-# Set false to check without configuring anything at all.
+# Push SNMPv3 on a deployment that is enrolled for it. This does NOT decide
+# enrolment: an unenrolled deployment is not checked either, whereas setting
+# this false leaves the check running against something the role was told not to
+# configure. Set false to verify an enrolled deployment without touching the
+# device.
+#
+# Syslog has no equivalent knob. It is part of the platform baseline, so
+# 'readiness_apply_baseline: false' already covers it.
 readiness_apply_snmp: true
 
 # Fail on an unready switch (the deploy path). generate_evpn.yml sets this

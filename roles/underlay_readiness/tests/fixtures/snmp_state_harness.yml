@@ -21,8 +21,15 @@
     deploy_target: all
     readiness_ospf_process: 1
     readiness_ospf_area: 0
+    # A deployment that HAS enrolled SNMPv3 -- all three identity keys, and the
+    # enrolment flag they derive. This file is about surviving a read that
+    # produced nothing, so enrolment is a precondition here rather than the
+    # subject; the enrolment logic itself is tested in
+    # tests/unit/test_optional_enrolment.py, against the shipped defaults.
     snmp_v3_user: example-snmpv3
     snmp_v3_group: AuthPrivGroup
+    snmp_acl_name: SNMP-ACL
+    readiness_snmp_enrolled: true
   tasks:
     # Empty is fine: the SNMP check reads none of it, and the other derivations
     # in the same task have their own coverage elsewhere.

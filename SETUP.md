@@ -95,8 +95,8 @@ environment — a missing one fails at run time, not at start-up:*
 | `NETBOX_TOKEN` | NetBox API token | yes |
 | `ios_username` | Switch login, and the local admin account the baseline installs | yes |
 | `ios_password` | Password for the above | yes |
-| `ios_snmp_auth` | SNMPv3 authentication password | only if `readiness_apply_snmp` |
-| `ios_snmp_priv` | SNMPv3 privacy password | only if `readiness_apply_snmp` |
+| `ios_snmp_auth` | SNMPv3 authentication password | only if SNMPv3 is enrolled |
+| `ios_snmp_priv` | SNMPv3 privacy password | only if SNMPv3 is enrolled |
 | `ios_password_secret_hash` | Pre-hashed (type 9) form of `ios_password` | optional — see below |
 
 `ios_password_secret_hash` is optional but recommended. IOS re-salts a plaintext
@@ -137,9 +137,27 @@ venv/bin/ansible-galaxy collection install -r requirements.yml
 cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
 ```
 
-Then edit `group_vars/all/deployment.yml`: your NTP servers, SNMPv3 identity and
-VTP domain. Every key is documented in the `.example` file, which ships with RFC
-5737 placeholder addresses.
+Then edit `group_vars/all/deployment.yml`: your NTP servers (`ntp_servers`, a
+list) and VTP domain, plus
+— if you use them — your SNMPv3 identity and syslog collectors. Every key is
+documented in the `.example` file, which ships with RFC 5737 placeholder
+addresses.
+
+**SNMPv3 and syslog are enrolled by presence.** Both ship uncommented in the
+`.example` file, with placeholder addresses. Leave their keys set and
+`readiness.yml` configures and checks them on every switch; comment them out —
+list items included — and it ignores them completely: no device read, no push,
+no check, no finding. There is no flag to pass. Replace the placeholders or
+comment the block out before the first run, or the switches are pointed at
+198.51.100.x. What it will not accept is *half* of either: a partial
+SNMPv3 triple, or a `syslog_hosts` entry that is not a bare IPv4 address, fails
+the run rather than being quietly ignored, because a mistyped key name would
+otherwise be indistinguishable from a deliberate opt-out.
+
+`ios_snmp_auth` and `ios_snmp_priv` are needed only when SNMPv3 is enrolled. If
+SNMPv3 is enrolled and they are empty, the user line is pushed with empty
+credentials — the device accepts it in a form that never matches, and the check
+reports the user missing on every run.
 
 **`deployment.yml` is gitignored**, so your real addresses are never committed
 and a `git pull` never overwrites them. Passwords do not go in this file — they

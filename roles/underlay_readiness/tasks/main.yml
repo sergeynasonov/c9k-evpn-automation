@@ -4,6 +4,11 @@
 # role owns -- SNMPv3 and the platform baseline -- in merge mode, so it adds and
 # never removes.
 #
+# SNMPv3 and the baseline's syslog block are OPTIONAL, and enrolled by what
+# group_vars/all/deployment.yml declares rather than by a flag: with the keys
+# commented out neither is read, pushed, checked or reported. See
+# readiness_snmp_enrolled and readiness_syslog_enrolled in defaults/main.yml.
+#
 #   ansible-playbook readiness.yml -e deploy_target=site_group_evpn_campus
 #   ansible-playbook readiness.yml -e deploy_target=access1-1
 #
@@ -27,7 +32,7 @@
 # installs, so checking first would fail a switch that this very run is about to
 # fix -- the same trap that had the checks blocking acm_evpn while acm_evpn
 # still rendered the baseline.
-- name: Configure SNMPv3
+- name: Configure SNMPv3 (when enrolled)
   ansible.builtin.import_tasks: 03_apply_snmp.yml
 
 - name: Apply the platform baseline
