@@ -114,7 +114,19 @@ class TestClassificationOnTheAcmEvpnPath(unittest.TestCase):
         for bucket in ("ready", "unready", "unreachable"):
             self.assertNotIn("rcore1", self.result[bucket], bucket)
 
+    def test_a_server_sharing_a_site_is_not_counted_at_all(self):
+        """The live regression. ubuntu1/2/3 are Linux servers in the same
+        NetBox site as the campus switches, so they have a fabric_id and
+        nothing about the site or the target excludes them. fabric_resolve.yml
+        task 8 dropped and reported them correctly; this summary then called
+        all three UNREACHABLE ninety lines later, sending an operator after a
+        connectivity problem that did not exist."""
+        for bucket in ("ready", "unready", "unreachable"):
+            self.assertNotIn("server1", self.result[bucket], bucket)
+
     def test_the_total_covers_every_evaluated_switch(self):
+        """Four, not five: the server is not a switch this run failed to
+        reach, so 0 unreachable stays achievable on a site that holds one."""
         self.assertEqual(self.result["counted"], 4)
 
 
@@ -136,6 +148,12 @@ class TestClassificationOnTheStandalonePath(unittest.TestCase):
     def test_the_device_with_no_site_is_still_excluded(self):
         for bucket in ("ready", "unready", "unreachable"):
             self.assertNotIn("orphan1", self.result[bucket], bucket)
+
+    def test_the_server_is_still_excluded(self):
+        """Not a property of the acm_evpn path: a standalone readiness run
+        scoped to a site is exactly where this was observed."""
+        for bucket in ("ready", "unready", "unreachable"):
+            self.assertNotIn("server1", self.result[bucket], bucket)
 
 
 if __name__ == "__main__":

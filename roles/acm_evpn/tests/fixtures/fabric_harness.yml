@@ -12,7 +12,12 @@
 # groups, which is the property that makes it testable offline at all.
 
 - name: Fabric resolution and per-fabric peer selection
-  hosts: all
+  # 'all' unless a test says otherwise. The real playbooks put deploy_target in
+  # the host pattern, so a scoped run never has the other fabrics' devices in
+  # the play at all -- and task 13 of the resolver reads exactly that to decide
+  # which fabrics it may refuse. A harness fixed at 'all' cannot express it.
+  # Separate from deploy_target so every existing case keeps the play it had.
+  hosts: "{{ play_pattern | default('all') }}"
   gather_facts: false
   # run_once is ignored under the 'free' strategy that ansible.cfg sets, and the
   # resolver leans on it. Same override as every playbook in the repo.
@@ -86,6 +91,10 @@
           targeted_fabrics: "{{ targeted_fabrics | default([]) }}"
           fabric_map: "{{ fabric_map }}"
           fabric_ids: "{{ fabric_ids }}"
+          # The fabric-node RULE's output, which is a conjunction and therefore
+          # cannot be read off an inventory group. See fabric_node_roles in
+          # underlay_readiness/defaults/main.yml.
+          fabric_nodes: "{{ fabric_nodes }}"
           fabric_asn_map: "{{ fabric_asn_map }}"
           hosts: "{{ _hosts | from_json }}"
       run_once: true

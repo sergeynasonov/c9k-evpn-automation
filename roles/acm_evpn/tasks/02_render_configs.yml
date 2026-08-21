@@ -46,9 +46,13 @@
   run_once: true
   delegate_to: localhost
 
+# 'fabric_nodes', not a group intersection: R1 above already reports from
+# that set, and the two tests being written differently one line apart is
+# how they come to disagree. The rule behind it has a conjunction in it --
+# see fabric_node_roles in underlay_readiness/defaults/main.yml.
 - name: R2. Skip a device this role renders nothing for
   ansible.builtin.meta: end_host
-  when: group_names | intersect(fabric_node_groups) | length == 0
+  when: inventory_hostname not in fabric_nodes
 
 - name: Remove previously rendered candidate configs
   ansible.builtin.file:
@@ -107,11 +111,12 @@
 - name: Refuse to render a device that is not a fabric node
   ansible.builtin.assert:
     that:
-      - group_names | intersect(fabric_node_groups) | length > 0
+      - inventory_hostname in fabric_nodes
     fail_msg: >-
-      {{ inventory_hostname }} carries no fabric role and no fabric_spine tag,
-      so this role renders nothing for it — but it reached the render step,
-      which means it was not dropped from the play as it should have been.
+      {{ inventory_hostname }} is not a fabric node — it is not a fabric leaf
+      or border, and not a distribution switch tagged fabric_spine — so this
+      role renders nothing for it, but it reached the render step, which means
+      it was not dropped from the play as it should have been.
       Refusing rather than falling through to the leaf template, which would
       hand it a full EVPN configuration.
     quiet: true

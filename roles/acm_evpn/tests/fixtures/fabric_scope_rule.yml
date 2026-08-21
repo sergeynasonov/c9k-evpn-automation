@@ -1,0 +1,75 @@
+---
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
+#
+# One device per branch of the fabric-node rule:
+#
+#     fabric node = fabric_leaf
+#                OR fabric_border
+#                OR (distribution_switch AND tagged fabric_spine)
+#
+# YAML rather than .ini so test_fabric_resolve.py can mutate it in memory to
+# build the incomplete-fabric cases, keeping those one visible edit away from
+# the working inventory instead of in a near-identical second file.
+#
+#   core1     border, and tagged spine        -> node
+#   leaf1     leaf                            -> node
+#   dspine1   distribution + tagged spine     -> node, and ONLY via the
+#                                                conjunction. This is the case
+#                                                a flat group list gets right
+#                                                by accident and the case that
+#                                                proves the rule is applied.
+#   dist1     distribution, untagged          -> NOT a node; still checked,
+#                                                because it carries fabric
+#                                                traffic between leaf and border
+#   wan1      WAN role, tagged spine          -> NOT a node. Under the old flat
+#                                                list the TAG ALONE qualified it
+#                                                and acm_evpn rendered a full
+#                                                EVPN candidate for a router.
+#   server1   no role at all                  -> not even checked
+all:
+  children:
+    sites_building_a:
+      # The ASN as nb_inventory publishes it, as a GROUP var so every member
+      # carries it. Without this the run dies at task 10 (a fabric needs
+      # exactly one BGP ASN) before ever reaching the checks below, which is
+      # not what this fixture is for.
+      vars:
+        sites:
+          - id: 51
+            slug: building_a
+            asns:
+              - {id: 1, asn: 64513}
+      hosts:
+        core1:
+          ansible_host: 10.0.0.1
+        leaf1:
+          ansible_host: 10.0.0.11
+        dspine1:
+          ansible_host: 10.0.0.21
+        dist1:
+          ansible_host: 10.0.0.31
+        wan1:
+          ansible_host: 10.0.0.41
+        server1:
+          ansible_host: 10.0.0.51
+    device_roles_fabric_border:
+      hosts:
+        core1:
+    device_roles_fabric_leaf:
+      hosts:
+        leaf1:
+    device_roles_distribution_switch:
+      hosts:
+        dspine1:
+        dist1:
+    device_roles_wan:
+      hosts:
+        wan1:
+    tags_fabric_spine:
+      hosts:
+        core1:
+        dspine1:
+        wan1:
+  vars:
+    ansible_connection: local
