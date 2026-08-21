@@ -814,7 +814,7 @@ the evicted files. Set `acm_checkpoint: false` to disable, or point
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
 | Admin or SNMPv3 password | Change it in your secret store — they are read from the environment, never stored here — then re-run `readiness.yml` |
 | SNMP / syslog / NTP / VTP identity | Edit `group_vars/all/deployment.yml`, then re-run `readiness.yml` |
-| Turn SNMPv3 or syslog off entirely | Comment its keys out of `group_vars/all/deployment.yml`. The role then stops checking, pushing and reporting it — it does **not** remove what is already on the switches |
+| Turn SNMPv3 or syslog off entirely | Comment its keys out of `group_vars/all/deployment.yml`. The role then stops checking, pushing and reporting it — it does **not** remove what is already on the switches. Verified on hardware: `show snmp user` and `show run \| include ^logging` are unchanged across an unenrolled run. Taking it off a switch is a manual job |
 | Fabric ASN, anycast RP, upstream ASN | Edit NetBox — see [the data contract](roles/acm_evpn/README.md). Nothing to edit here |
 | What the baseline or the assertions contain | Edit `roles/underlay_readiness/defaults/main.yml` (behaviour, not site values), then re-run `readiness.yml` |
 

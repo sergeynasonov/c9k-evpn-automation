@@ -133,6 +133,25 @@ readiness_ospf_routers_max: 250
 # Everything in this block except 'readiness_apply_snmp' and the two password
 # lookups is DERIVED. Do not set them -- edit group_vars/all/deployment.yml,
 # which is where the decision belongs.
+#
+# THE UNENROLLED PATH IS VERIFIED ON HARDWARE, over the full cycle: a switch
+# with both configured, run enrolled, then with all four keys commented out,
+# then enrolled again. Every stage reported changed=0, and the middle stage
+# skipped the SNMPv3 operational read, both apply tasks and every SNMPv3 and
+# syslog check, while still reporting the switch ready.
+#
+# The property worth knowing, and the one measured directly rather than argued
+# from ios_config's merge semantics: unenrolling REMOVES NOTHING. 'show run |
+# include ^logging' and 'show snmp user' were byte-identical before and after
+# -- all three logging lines and the SNMPv3 user still on the box. Commenting
+# a key out stops this role managing and checking a thing; it does not
+# unconfigure it. Anyone who actually wants it off the switches has to do that
+# themselves.
+#
+# Worth testing on a device at all because of WHERE the keys come from. The
+# unit tests supply them through vars_files and extra vars; a real run resolves
+# them from group_vars/all, which is a different precedence layer, and that is
+# the one part of this mechanism offline coverage cannot settle.
 # ---------------------------------------------------------------------------
 
 # SNMPv3 is enrolled when all three identity keys carry a value.
