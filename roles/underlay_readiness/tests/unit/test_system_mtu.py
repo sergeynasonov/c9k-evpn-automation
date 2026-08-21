@@ -424,7 +424,12 @@ def render_baseline(mtu):
     # An empty list is a deployment that has not enrolled syslog, which is the
     # right neutral for an MTU test. The enrolled case is covered in
     # test_optional_enrolment.py.
-    ctx = {"readiness_system_mtu_min": FLOOR, "readiness_syslog_lines": "[]"}
+    # Empty syslog is a deployment that has not enrolled it, the right neutral
+    # for an MTU test. NTP is required, so it gets a populated list; both are
+    # covered properly in test_optional_enrolment.py.
+    ctx = {"readiness_system_mtu_min": FLOOR,
+           "readiness_syslog_lines": "[]",
+           "readiness_ntp_lines": '["ntp server 198.51.100.10"]'}
     if mtu is not None:
         ctx["_readiness_system_mtu"] = mtu
     return template.render(**ctx)

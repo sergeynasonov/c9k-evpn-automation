@@ -73,7 +73,7 @@ COLLECTOR_2 = "198.51.100.31"
 SNMP_ONLY = {"snmp_v3_user": USER, "snmp_v3_group": GROUP,
              "snmp_acl_name": "SNMP-ACL"}
 # The keys that are required whatever else is or is not declared.
-ALWAYS = {"ntp_server_1": "198.51.100.10", "ntp_server_2": "198.51.100.11",
+ALWAYS = {"ntp_servers": ["198.51.100.10", "198.51.100.11"],
           "vtp_domain": "EXAMPLE"}
 
 
@@ -132,6 +132,8 @@ def run(deployment, stanzas=None, snmp_users="", snmp_groups=""):
                 CHECK, "_snmp", {"snmp_findings": "{{ _snmp | from_json }}"}),
             "syslog_check.yml": _var_task(
                 CHECK, "_syslog", {"syslog_findings": "{{ _syslog | from_json }}"}),
+            "ntp_check.yml": _var_task(
+                CHECK, "_ntp", {"ntp_findings": "{{ _ntp | from_json }}"}),
         }
         for name, tasks in lifted.items():
             with open(os.path.join(workdir, name), "w") as fh:
@@ -162,11 +164,12 @@ def run(deployment, stanzas=None, snmp_users="", snmp_groups=""):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def render_baseline(syslog_cli):
+def render_baseline(syslog_cli, ntp_cli='["ntp server 198.51.100.10"]'):
     """Render the shipped platform baseline for a given syslog enrolment.
 
-    'syslog_cli' is readiness_syslog_lines as Ansible would hand it over: the
-    JSON string the defaults produce.
+    Both arguments are as Ansible hands them over: the JSON strings the
+    defaults produce. NTP is required, so its default here is a populated list
+    rather than an empty one -- an empty one is a deployment the assert refuses.
     """
     env = jinja2.Environment(undefined=jinja2.ChainableUndefined,
                              keep_trailing_newline=True)
@@ -177,9 +180,17 @@ def render_baseline(syslog_cli):
     with open(BASELINE) as fh:
         template = env.from_string(fh.read())
     return template.render(readiness_syslog_lines=syslog_cli,
+                           readiness_ntp_lines=ntp_cli,
                            readiness_system_mtu_min=1550,
                            _readiness_system_mtu=9100,
                            vtep_source_intf="Loopback0")
+
+
+def baseline_ntp(ntp_cli):
+    """The 'ntp server' lines the baseline would push, in order."""
+    return [line.rstrip()
+            for line in render_baseline("[]", ntp_cli).splitlines()
+            if line.startswith("ntp server ")]
 
 
 def baseline_logging(syslog_cli):
@@ -294,15 +305,68 @@ class TestHalfAnSnmpTripleIsRejected(unittest.TestCase):
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
 class TestRequiredKeysAreStillRequired(unittest.TestCase):
     """Optional means SNMPv3 and syslog. NTP and VTP are not negotiable: the
-    platform baseline cannot be rendered without them."""
+    platform baseline cannot be rendered without them, and a fabric with no
+    time source cannot be read from its own logs."""
+
+    def test_a_missing_vtp_domain_fails(self):
+        result = run({"vtp_domain": None})
+        self.assertTrue(result["assert_failed"])
+        self.assertIn("vtp_domain", result["assert_msg"])
+
+    def test_an_absent_ntp_list_fails(self):
+        result = run({"ntp_servers": None})
+        self.assertTrue(result["assert_failed"])
+        self.assertIn("ntp_servers", result["assert_msg"])
+
+    def test_an_empty_ntp_list_fails_where_an_empty_syslog_list_does_not(self):
+        """The one place the two address lists differ. Everything else about
+        them -- shape, validation, error wording -- is one shared loop."""
+        empty_ntp = run({"ntp_servers": []})
+        empty_syslog = run({"syslog_hosts": []})
+        self.assertTrue(empty_ntp["assert_failed"])
+        self.assertFalse(empty_syslog["assert_failed"], empty_syslog["assert_msg"])
+
+    def test_the_ntp_list_is_validated_like_the_syslog_one(self):
+        for bad in ("198.51.100.10/24", "ntp.example.com", "300.1.1.1"):
+            result = run({"ntp_servers": [bad]})
+            self.assertTrue(result["assert_failed"], bad)
+            self.assertIn("bare IPv4", result["assert_msg"])
+
+    def test_one_ntp_server_is_accepted(self):
+        """Two or more is better and the docs say so, but 'at least two' is a
+        fabric-wide policy this role has no business enforcing."""
+        result = run({"ntp_servers": ["198.51.100.10"]})
+        self.assertFalse(result["assert_failed"], result["assert_msg"])
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestSupersededNtpKeysAreNamed(unittest.TestCase):
+    """ntp_server_1 / ntp_server_2 became ntp_servers.
+
+    Without this the un-migrated file gets 'ntp_servers is required and names
+    no NTP server' while two NTP servers sit in plain sight three lines above
+    -- technically true, and useless.
+    """
 
     @classmethod
     def setUpClass(cls):
-        cls.result = run({"ntp_server_1": None})
+        cls.result = run({"ntp_servers": None,
+                          "ntp_server_1": "198.51.100.10",
+                          "ntp_server_2": "198.51.100.11"})
 
-    def test_a_missing_ntp_server_still_fails(self):
+    def test_the_run_is_refused(self):
         self.assertTrue(self.result["assert_failed"])
-        self.assertIn("ntp_server_1", self.result["assert_msg"])
+
+    def test_both_old_keys_are_named(self):
+        self.assertIn("ntp_server_1 is no longer read", self.result["assert_msg"])
+        self.assertIn("ntp_server_2 is no longer read", self.result["assert_msg"])
+
+    def test_the_message_says_what_to_rename_them_to(self):
+        self.assertIn("ntp_servers", self.result["assert_msg"])
+
+    def test_a_migrated_file_says_nothing_about_them(self):
+        clean = run({})
+        self.assertNotIn("no longer read", clean["assert_msg"])
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
@@ -407,6 +471,48 @@ class TestPushAndCheckAgree(unittest.TestCase):
         configured = run({"syslog_hosts": [COLLECTOR, COLLECTOR_2]},
                          stanzas={line: [] for line in pushed})
         self.assertEqual(configured["syslog_msgs"], [])
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestNtpIsAListLikeTheOthers(unittest.TestCase):
+    """ntp_server_1 / ntp_server_2 became one list.
+
+    The two fixed keys were pushed by the baseline and never checked, so a time
+    source removed from a switch by hand went unreported. 'ntp server' renders
+    back into the running config, so checking it is plain membership -- no
+    operational state needed, unlike SNMPv3.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.three = run({"ntp_servers": ["198.51.100.10", "198.51.100.11",
+                                         "198.51.100.12"]})
+        cls.configured = run(
+            {"ntp_servers": ["198.51.100.10", "198.51.100.11"]},
+            stanzas={"ntp server 198.51.100.10": [],
+                     "ntp server 198.51.100.11": []})
+
+    def test_a_third_server_needs_no_third_variable(self):
+        """The reason for the change: ntp_server_1/_2 had nowhere to put it."""
+        self.assertEqual(self.three["ntp_cli"],
+                         ["ntp server 198.51.100.10",
+                          "ntp server 198.51.100.11",
+                          "ntp server 198.51.100.12"])
+
+    def test_a_switch_missing_them_reports_one_finding_each(self):
+        self.assertEqual(len(self.three["ntp_msgs"]), 3, self.three["ntp_msgs"])
+
+    def test_each_finding_carries_its_command(self):
+        self.assertEqual(self.three["ntp_lines"], self.three["ntp_cli"])
+
+    def test_a_switch_carrying_them_is_clean(self):
+        self.assertEqual(self.configured["ntp_msgs"], [])
+
+    def test_the_baseline_pushes_exactly_what_the_check_demands(self):
+        """One definition, two consumers -- the same property syslog has, and
+        the reason neither duplicates its CLI the way 'system mtu 9100' does."""
+        pushed = baseline_ntp(json.dumps(self.three["ntp_cli"]))
+        self.assertEqual(pushed, self.three["ntp_cli"])
 
 
 if __name__ == "__main__":

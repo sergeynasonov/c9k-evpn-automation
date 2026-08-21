@@ -226,6 +226,47 @@ readiness_syslog_lines: >-
   {%- endif -%}
   {{ out | to_json }}
 
+# NTP servers, in the same shape and for the same reasons as syslog_hosts and
+# snmp_acl: 'ntp server' is a list-style command, so a list is what the
+# deployment should be describing. This replaced ntp_server_1 / ntp_server_2,
+# which fixed the number of sources at exactly two -- a deployment with three
+# had nowhere to put the third, and one with a single source had to name it
+# twice or invent one.
+#
+# REQUIRED, unlike the two optional blocks above: a fabric with no time source
+# is a real fault, not a deployment that has opted out. Enforced as "the list
+# names at least one", not two. Two or more is strongly preferable -- a single
+# source cannot be sanity-checked and IOS will follow it wherever it goes --
+# but that is the deployment's call, and this role has a history of asserting
+# fabric-wide policy it has no business holding.
+#
+# 'ntp server' renders back into the running config verbatim, which is not an
+# assumption: the baseline has been pushing these two lines all along and a
+# second run reports no change, which is exactly the proof.
+readiness_ntp_lines: >-
+  {%- set out = [] -%}
+  {%- for server in ntp_servers | default([], true) -%}
+  {%-   set _ = out.append('ntp server ' ~ server) -%}
+  {%- endfor -%}
+  {{ out | to_json }}
+
+# WORTH KNOWING ABOUT ALL THREE LISTS -- ntp_servers, syslog_hosts, snmp_acl.
+# Every one of them drives a list-style IOS command, and ios_config MERGES. So
+# ADDING an entry works and CHANGING one does not do what it looks like: the
+# old address stays configured on the switch, nothing removes it, and no check
+# here reports it, because every check tests for presence rather than absence.
+#
+# Repoint a collector and the switch logs to both, polls both, permits both,
+# until somebody clears the old line by hand. Single-valued commands in this
+# baseline behave the other way ('vtp domain', 'clock timezone', 'system mtu',
+# the source-interface lines all replace themselves), which is what makes this
+# easy to get wrong.
+#
+# Not fixed here, deliberately: removing a line the deployment no longer names
+# means this role deleting device configuration, and it has exactly one
+# mechanism for that today ('acm replace', in the other role) with a whole
+# safety model around it.
+
 snmp_v3_auth_password: "{{ lookup('env', 'ios_snmp_auth') }}"
 snmp_v3_priv_password: "{{ lookup('env', 'ios_snmp_priv') }}"
 

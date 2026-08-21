@@ -193,8 +193,18 @@ ip radius source-interface {{ vtep_source_intf }}
 logging source-interface {{ vtep_source_intf }}
 snmp-server trap-source {{ vtep_source_intf }}
 !
-ntp server {{ ntp_server_1 }}
-ntp server {{ ntp_server_2 }}
+{#
+  NTP, from the 'ntp_servers' list rather than two fixed keys. Same single
+  definition as syslog above -- readiness_ntp_lines is what 02_check.yml
+  verifies too, so the push and the check cannot disagree about how many time
+  sources this deployment has or what they are.
+
+  REQUIRED, unlike syslog: assert_site_config.yml refuses a deployment that
+  names none, so this loop is never empty in a run that gets this far.
+#}
+{% for line in readiness_ntp_lines | from_json %}
+{{ line }}
+{% endfor %}
 !
 {#
   SNMPv3 -- the ACL, the group and the user -- moved to roles/underlay_readiness.

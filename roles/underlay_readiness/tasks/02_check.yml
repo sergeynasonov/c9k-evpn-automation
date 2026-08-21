@@ -21,7 +21,7 @@
       {{ (_global | from_json) + (_routing | from_json) + (_defaults | from_json)
          + (_mtu | from_json) + (_loopback | from_json) + (_ospf | from_json)
          + (_uplinks | from_json) + (_snmp | from_json) + (_syslog | from_json)
-         + (_spine | from_json) }}
+         + (_ntp | from_json) + (_spine | from_json) }}
     readiness_ospf_area_routers: "{{ _readiness_ospf_routers | int }}"
   vars:
     # --- global single-line settings -------------------------------------
@@ -276,6 +276,30 @@
     _syslog: >-
       {%- set bad = [] -%}
       {%- for line in readiness_syslog_lines | from_json if line not in _stanzas -%}
+      {%-   set _ = bad.append({'msg': 'missing global: ' ~ line,
+                                'parents': [], 'lines': [line]}) -%}
+      {%- endfor -%}
+      {{ bad | to_json }}
+
+    # --- NTP ---------------------------------------------------------------
+    # Same shape as syslog, and NOT enrolment-gated: NTP is required, so
+    # readiness_ntp_lines is never empty in a run that got past
+    # assert_site_config.yml.
+    #
+    # New with the move to a list. The two fixed keys were pushed by the
+    # baseline and never checked, so a time source removed from a switch by
+    # hand went unreported -- and 'ntp server' renders back into the running
+    # config, which is what makes checking it honest here rather than needing
+    # operational state the way SNMPv3 does.
+    #
+    # What this canNOT see, for the same reason nothing else here can: a server
+    # the deployment has STOPPED naming. 'ntp server' is list-style and
+    # ios_config merges, so the old address stays on the switch and every check
+    # in this file tests presence rather than absence. See the note on the
+    # three address lists in defaults/main.yml.
+    _ntp: >-
+      {%- set bad = [] -%}
+      {%- for line in readiness_ntp_lines | from_json if line not in _stanzas -%}
       {%-   set _ = bad.append({'msg': 'missing global: ' ~ line,
                                 'parents': [], 'lines': [line]}) -%}
       {%- endfor -%}

@@ -72,7 +72,7 @@ evpn_l3vni_base: 20000
 # The platform baseline -- local admin user, AAA, NTP, VTY hardening, clock,
 # VTP, spanning-tree, errdisable, UDLD, CoPP, and the routing/multicast globals
 # -- moved to roles/underlay_readiness along with its variables (vty_line_max,
-# ntp_server_*, local_admin_*). It is applied once at onboarding with
+# ntp_servers, local_admin_*). It is applied once at onboarding with
 # 'ios_config' instead of being rendered on every overlay change.
 #
 # This role no longer renders any of it. Running switches keep it: it stops

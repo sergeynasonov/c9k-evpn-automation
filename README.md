@@ -132,7 +132,7 @@ role also refuses, for a different reason. See [Deploying](#deploying) for both.
 | `trm_allocate.yml` | Allocate TRM PIM register sources in NetBox — the only playbook that writes to it |
 | `netbox_inv.yml` | NetBox dynamic inventory |
 | `group_vars/all/main.yml` | Connection wiring and the two project-wide conventions. Tracked — describes nobody's network |
-| `group_vars/all/deployment.yml` | **Gitignored.** This deployment's NTP and VTP identity, plus optional SNMPv3 and syslog, from `deployment.yml.example`. Read only by `readiness.yml` |
+| `group_vars/all/deployment.yml` | **Gitignored.** This deployment's NTP (`ntp_servers`) and VTP identity, plus optional SNMPv3 and syslog, from `deployment.yml.example`. Read only by `readiness.yml` |
 | `roles/acm_evpn/` | The fabric role. **[Its README](roles/acm_evpn/README.md) is the NetBox data-model contract** |
 | `roles/underlay_readiness/` | Day-0 assertions, platform baseline, and optional SNMPv3 and syslog. Run at onboarding, and as an `acm_evpn` pre-flight |
 | `scripts/` | One-off NetBox provisioning helpers — `netbox_provision_schema.py` (the schema) and `netbox_multicast_carve.py` (the multicast carve) |
@@ -520,6 +520,7 @@ configures cleanly and then silently fails to forward:
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
 | SNMPv3 user and group present — **only if enrolled** | Checked with `show snmp user` / `show snmp group`, never by reading passwords. `readiness.yml` installs these; the `acm_evpn` pre-flight only checks them. A deployment that declares no SNMP identity is not checked, and the device read is skipped too |
 | `logging trap` / `logging facility` / `logging host` — **only if enrolled** | Present only when `syslog_hosts` is declared. Read from the running config, unlike SNMPv3, because all three lines are rendered back |
+| `ntp server` for every address in `ntp_servers` | Read from the running config. New with the move to a list — the two old fixed keys were pushed and never checked, so a time source removed by hand went unreported |
 | No `no hidekeys` under `archive log config` | Checked *negatively* — a platform default is never rendered, so a value that is rendered was set deliberately |
 | **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch **in the same fabric** | A one-way MSDP mesh looks complete on each switch individually |
 
@@ -813,7 +814,7 @@ the evicted files. Set `acm_checkpoint: false` to disable, or point
 | Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a scoped `trm_allocate.yml` run |
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
 | Admin or SNMPv3 password | Change it in your secret store — they are read from the environment, never stored here — then re-run `readiness.yml` |
-| SNMP / syslog / NTP / VTP identity | Edit `group_vars/all/deployment.yml`, then re-run `readiness.yml` |
+| SNMP / syslog / NTP / VTP identity | Edit `group_vars/all/deployment.yml`, then re-run `readiness.yml`. `ntp_servers`, `syslog_hosts` and `snmp_acl` are all lists — but note that **changing** an entry leaves the old address configured on the switch, because these are list-style commands and the role merges. Removing it is a manual job |
 | Turn SNMPv3 or syslog off entirely | Comment its keys out of `group_vars/all/deployment.yml`. The role then stops checking, pushing and reporting it — it does **not** remove what is already on the switches. Verified on hardware: `show snmp user` and `show run \| include ^logging` are unchanged across an unenrolled run. Taking it off a switch is a manual job |
 | Fabric ASN, anycast RP, upstream ASN | Edit NetBox — see [the data contract](roles/acm_evpn/README.md). Nothing to edit here |
 | What the baseline or the assertions contain | Edit `roles/underlay_readiness/defaults/main.yml` (behaviour, not site values), then re-run `readiness.yml` |

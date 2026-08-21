@@ -23,8 +23,21 @@
 
 # Addresses use RFC 5737 documentation ranges. Replace all of them.
 
-ntp_server_1: "198.51.100.10"
-ntp_server_2: "198.51.100.11"
+# --- REQUIRED: NTP ----------------------------------------------------------
+#
+# A LIST, shaped like snmp_acl and syslog_hosts below -- one 'ntp server' line
+# per entry. This replaced ntp_server_1 / ntp_server_2, which fixed the count at
+# exactly two: a deployment with three sources had nowhere to put the third, and
+# one with a single source had to name it twice.
+#
+# Required, unlike the two optional blocks below. At least one entry, though two
+# or more is strongly preferable: a single time source cannot be sanity-checked,
+# and the switch will follow it wherever it goes.
+#
+# Bare IPv4 addresses, no masks and no hostnames.
+ntp_servers:
+  - "198.51.100.10"
+  - "198.51.100.11"
 
 # --- OPTIONAL: SNMPv3 -------------------------------------------------------
 #
@@ -69,10 +82,17 @@ snmp_acl:
 # them are present. Comment the whole key out -- including its list items --
 # and nothing syslog-related is pushed, checked or reported.
 #
-# A LIST, like snmp_acl above, so two collectors need no second variable. Each
-# entry must be a bare IPv4 address: no mask, no hostname, no port. Anything
-# else fails the run rather than being quietly dropped, because a typo must not
-# be able to masquerade as an opt-out.
+# A LIST, like snmp_acl and ntp_servers, so two collectors need no second
+# variable. Each entry must be a bare IPv4 address: no mask, no hostname, no
+# port. Anything else fails the run rather than being quietly dropped, because
+# a typo must not be able to masquerade as an opt-out.
+#
+# TRUE OF ALL THREE LISTS HERE: adding an entry works, and CHANGING one does
+# not do what it looks like. These drive list-style IOS commands and the role
+# merges, so the address you replaced stays configured on every switch until
+# somebody removes it by hand -- and nothing here reports it, because every
+# check tests for presence, not absence. Repoint a collector and the switches
+# talk to both.
 #
 # 'logging source-interface Loopback0' is applied either way. It is part of the
 # platform baseline's source-interface hygiene, not part of this enrolment.

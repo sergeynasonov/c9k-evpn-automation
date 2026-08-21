@@ -137,7 +137,8 @@ venv/bin/ansible-galaxy collection install -r requirements.yml
 cp group_vars/all/deployment.yml.example group_vars/all/deployment.yml
 ```
 
-Then edit `group_vars/all/deployment.yml`: your NTP servers and VTP domain, plus
+Then edit `group_vars/all/deployment.yml`: your NTP servers (`ntp_servers`, a
+list) and VTP domain, plus
 — if you use them — your SNMPv3 identity and syslog collectors. Every key is
 documented in the `.example` file, which ships with RFC 5737 placeholder
 addresses.
