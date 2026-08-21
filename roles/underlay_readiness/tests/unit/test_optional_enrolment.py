@@ -261,6 +261,8 @@ class TestHalfAnSnmpTripleIsRejected(unittest.TestCase):
         partial = dict(SNMP_ONLY)
         del partial["snmp_acl_name"]
         cls.result = run(partial)
+        # Only one key left set, which is the other half of the sentence below.
+        cls.lonely = run({"snmp_v3_user": USER})
 
     def test_the_run_is_refused(self):
         self.assertTrue(self.result["assert_failed"])
@@ -270,6 +272,23 @@ class TestHalfAnSnmpTripleIsRejected(unittest.TestCase):
 
     def test_and_says_it_is_all_or_none(self):
         self.assertIn("all three", self.result["assert_msg"])
+
+    def test_the_sentence_agrees_with_how_many_keys_are_set(self):
+        """Two survivors take 'are', one takes 'is'. Petty on its own, except
+        that this message is the entire user interface of the all-or-none rule
+        -- an operator who stumbles on the grammar re-reads the sentence
+        instead of the key name it is pointing at."""
+        self.assertIn("snmp_v3_user and snmp_v3_group are", self.result["assert_msg"])
+        self.assertNotIn("snmp_v3_group is --", self.result["assert_msg"])
+
+    def test_and_reads_correctly_with_a_single_survivor(self):
+        self.assertIn("snmp_v3_user is --", self.lonely["assert_msg"])
+
+    def test_every_missing_key_gets_its_own_line(self):
+        """Two keys missing, two findings -- not one naming both, which is
+        harder to scan and harder to grep for."""
+        self.assertIn("snmp_v3_group is not set", self.lonely["assert_msg"])
+        self.assertIn("snmp_acl_name is not set", self.lonely["assert_msg"])
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")

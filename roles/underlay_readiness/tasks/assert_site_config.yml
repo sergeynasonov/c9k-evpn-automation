@@ -75,8 +75,14 @@
       {%- endfor -%}
       {%- if snmp_set and snmp_set | length < _snmp_keys | length -%}
       {%-   for k in _snmp_keys if k not in snmp_set -%}
+      {#-     'is' or 'are' by how many keys survived. One finding per missing
+                key, so this reads 'snmp_v3_group is not set, but snmp_v3_user
+                and snmp_acl_name are' -- and a bare 'is' there is the kind of
+                thing that makes an operator re-read the sentence instead of
+                the key name it is pointing at. -#}
       {%-     set _ = bad.append(k ~ ' is not set, but ' ~ snmp_set | join(' and ')
-                                 ~ ' is -- SNMPv3 needs all three keys or none of them') -%}
+                                 ~ (' is' if snmp_set | length == 1 else ' are')
+                                 ~ ' -- SNMPv3 needs all three keys or none of them') -%}
       {%-   endfor -%}
       {%- endif -%}
       {%- set syslog = syslog_hosts | default([], true) -%}
