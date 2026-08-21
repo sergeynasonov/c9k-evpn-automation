@@ -515,5 +515,145 @@ class TestNtpIsAListLikeTheOthers(unittest.TestCase):
         self.assertEqual(pushed, self.three["ntp_cli"])
 
 
+_ABSENT = object()
+
+# The eight IOS-XE severities in order. Restated here ON PURPOSE, as the thing
+# the shipped list is checked against -- lifting it from defaults/main.yml would
+# make test_the_list_in_the_defaults_is_the_ios_order compare the file with
+# itself and pass whatever the file said.
+SEVERITIES = ["emergencies", "alerts", "critical", "errors",
+              "warnings", "notifications", "informational", "debugging"]
+
+
+def resolve_severity(value=_ABSENT):
+    """Resolve syslog_severity through the SHIPPED expression, offline.
+
+    The exhaustive mapping is sixteen inputs, and sixteen ansible-playbook runs
+    would roughly double this file's wall clock to prove something that is pure
+    Jinja with no Ansible in it. The expression is lifted from the defaults
+    rather than restated, and TestSyslogSeverity re-runs a sample through real
+    Ansible and compares, so the two paths cannot quietly disagree -- which is
+    the risk this shortcut buys and the reason that cross-check exists.
+    """
+    with open(DEFAULTS) as fh:
+        defaults = yaml.safe_load(fh)
+    env = jinja2.Environment(undefined=jinja2.ChainableUndefined)
+    template = env.from_string(defaults["readiness_syslog_severity"])
+    context = {
+        "readiness_syslog_severities": defaults["readiness_syslog_severities"],
+    }
+    if value is not _ABSENT:
+        context["syslog_severity"] = value
+    return template.render(**context).strip()
+
+
+class TestSyslogSeverityMapping(unittest.TestCase):
+    """Both forms of syslog_severity, exhaustively, offline."""
+
+    def test_the_list_in_the_defaults_is_the_ios_order(self):
+        """The order IS the mapping, so reordering it silently changes what
+        every numeric deployment renders."""
+        with open(DEFAULTS) as fh:
+            shipped = yaml.safe_load(fh)["readiness_syslog_severities"]
+        self.assertEqual(shipped, SEVERITIES)
+
+    def test_every_keyword_resolves_to_itself(self):
+        for keyword in SEVERITIES:
+            with self.subTest(severity=keyword):
+                self.assertEqual(resolve_severity(keyword), keyword)
+
+    def test_every_number_resolves_to_its_keyword(self):
+        for number, keyword in enumerate(SEVERITIES):
+            with self.subTest(severity=number):
+                self.assertEqual(resolve_severity(number), keyword)
+                self.assertEqual(resolve_severity(str(number)), keyword)
+
+    def test_absent_empty_and_null_all_mean_notifications(self):
+        """Three ways a deployment declines to choose, and the answer has to be
+        what the role pushed when the line was a literal."""
+        self.assertEqual(resolve_severity(), "notifications")
+        self.assertEqual(resolve_severity(""), "notifications")
+        self.assertEqual(resolve_severity(None), "notifications")
+
+    def test_case_and_surrounding_space_are_forgiven(self):
+        """Rejecting 'Notifications' would produce an error message whose list
+        of allowed values contains what the operator just typed."""
+        self.assertEqual(resolve_severity("Notifications"), "notifications")
+        self.assertEqual(resolve_severity("  DEBUGGING  "), "debugging")
+
+    def test_anything_else_resolves_to_nothing(self):
+        """Empty is how an unusable value reaches the assert, which turns it
+        into a named problem instead of a crash on whatever touched it first."""
+        for bad in (8, 99, -1, 1.5, True, "5.0", "warning", "sev5", "trap"):
+            with self.subTest(severity=bad):
+                self.assertEqual(resolve_severity(bad), "")
+
+
+class TestSyslogSeverity(unittest.TestCase):
+    """The same key through real Ansible, and the CLI it ends up producing."""
+
+    def test_the_default_is_unchanged_for_a_file_that_never_heard_of_it(self):
+        result = run({"syslog_hosts": [COLLECTOR]})
+        self.assertIn("logging trap notifications", result["syslog_cli"])
+        self.assertFalse(result["assert_failed"], result["assert_msg"])
+
+    def test_a_keyword_reaches_the_cli(self):
+        result = run({"syslog_hosts": [COLLECTOR],
+                      "syslog_severity": "debugging"})
+        self.assertIn("logging trap debugging", result["syslog_cli"])
+        self.assertFalse(result["assert_failed"], result["assert_msg"])
+
+    def test_zero_is_emergencies_and_not_the_default(self):
+        """0 is FALSY. Written as default('notifications', true) -- the form
+        every other optional key in this role uses -- severity 0 would silently
+        become severity 5, and nothing downstream would look wrong."""
+        result = run({"syslog_hosts": [COLLECTOR], "syslog_severity": 0})
+        self.assertIn("logging trap emergencies", result["syslog_cli"])
+        self.assertNotIn("logging trap notifications", result["syslog_cli"])
+
+    def test_a_number_never_reaches_the_device_as_a_number(self):
+        """The reason the conversion happens in the role at all: this project
+        has no verified answer for how IOS-XE renders 'logging trap 6' back."""
+        result = run({"syslog_hosts": [COLLECTOR], "syslog_severity": 6})
+        self.assertIn("logging trap informational", result["syslog_cli"])
+        self.assertNotIn("logging trap 6", result["syslog_cli"])
+
+    def test_ansible_agrees_with_the_offline_resolver(self):
+        """What licenses TestSyslogSeverityMapping to skip Ansible.
+
+        8 is in the sample deliberately. Bare Jinja resolves an unusable value
+        to '' and Ansible's native templating resolves the same expression to
+        None, and that divergence is exactly what let every invalid severity
+        pass the assert until this cross-check was widened to cover one."""
+        for value in ("debugging", 0, 8):
+            with self.subTest(severity=value):
+                result = run({"syslog_hosts": [COLLECTOR],
+                              "syslog_severity": value})
+                self.assertEqual(result["syslog_severity"],
+                                 resolve_severity(value))
+
+    def test_a_value_that_is_not_a_severity_is_refused(self):
+        result = run({"syslog_hosts": [COLLECTOR], "syslog_severity": 8})
+        self.assertTrue(result["assert_failed"], result["assert_msg"])
+
+    def test_the_refusal_names_both_forms(self):
+        result = run({"syslog_hosts": [COLLECTOR],
+                      "syslog_severity": "verbose"})
+        message = result["assert_msg"]
+        self.assertIn("syslog_severity", message)
+        self.assertIn("0-7", message)
+        for keyword in SEVERITIES:
+            self.assertIn(keyword, message, message)
+
+    def test_the_baseline_pushes_what_the_check_demands(self):
+        """The single-definition property, exercised on a non-default value --
+        the case where a second copy of the CLI would have drifted."""
+        result = run({"syslog_hosts": [COLLECTOR],
+                      "syslog_severity": "critical"})
+        pushed = baseline_logging(json.dumps(result["syslog_cli"]))
+        self.assertIn("logging trap critical", pushed)
+        self.assertEqual(result["syslog_lines"], result["syslog_cli"])
+
+
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False).result.wasSuccessful() else 1)

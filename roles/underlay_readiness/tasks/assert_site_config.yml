@@ -20,6 +20,9 @@
 #                they differ only in whether an empty one is allowed. NTP is
 #                required -- a fabric with no time source is a fault. Syslog is
 #                not.
+#   constrained  syslog_severity. Optional, and unlike the lists above its
+#                problem is never absence -- it defaults. What it rejects is a
+#                value outside the eight IOS severities, in either form.
 #   superseded   ntp_server_1 / ntp_server_2, which became ntp_servers. Named
 #                explicitly so an un-migrated file gets told what to do rather
 #                than "ntp_servers is required" while two NTP servers sit right
@@ -141,6 +144,34 @@
       {%-     endfor -%}
       {%-   endif -%}
       {%- endfor -%}
+      {#- Syslog severity. The RESOLUTION lives in defaults/main.yml, next to the
+          line it renders, so this check cannot drift into disagreeing with what
+          actually gets pushed -- an unresolvable value arrives here as an empty
+          string and that emptiness IS the signal. Re-parsing the input here
+          would be a second opinion about what a severity is, and two opinions
+          is how the SNMP triple's rules would have rotted if they were stated
+          twice. Only reached when the key is set: absent means the default.
+
+          'default('', true)' and NOT 'default('')', which is belt to the
+          defaults file's braces. The expression there now assigns '' to the
+          unusable case explicitly, but an earlier version let that case simply
+          emit nothing -- and under Ansible's native templating a template that
+          produces no output comes back as None, not ''. The one-argument form
+          substitutes only on UNDEFINED, so None survived it and 'None | trim'
+          is the four-letter string 'None', which compares unequal to '': every
+          invalid severity sailed through. Bare Jinja returns '' from the
+          identical expression, so the offline tests could not see it. The
+          two-argument form is correct for either shape. -#}
+      {%- set sev = hv.get('syslog_severity') | default(none) -%}
+      {%- if sev is not none and (sev | string | trim) != ''
+            and (readiness_syslog_severity | default('', true) | trim) == '' -%}
+      {%-   set _ = bad.append('syslog_severity: "' ~ sev ~ '" is not a severity'
+                               ~ ' -- give it a number 0-7 or one of: '
+                               ~ readiness_syslog_severities | join(', ')
+                               ~ '. The two forms are order-matched, so 0 is '
+                               ~ readiness_syslog_severities[0] ~ ' and 7 is '
+                               ~ readiness_syslog_severities[-1]) -%}
+      {%- endif -%}
       {{ bad | to_json }}
   run_once: true
   delegate_to: localhost
