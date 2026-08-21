@@ -471,6 +471,40 @@ that fails it is never deployed to. `generate_evpn.yml` reports the same
 findings without failing, so you can still inspect a candidate for an unready
 switch.
 
+#### Which devices each playbook acts on
+
+Two different questions with two different answers, decided from NetBox roles
+and tags alone:
+
+```
+readiness.yml — checks the underlay of
+    fabric_leaf  OR  fabric_border  OR  distribution_switch
+
+generate_evpn.yml / deploy_evpn.yml — render and deploy for
+    fabric_leaf  OR  fabric_border  OR  (distribution_switch AND tagged fabric_spine)
+```
+
+Anything matching neither — a server, a WAN router, a printer that happens to
+share a site — is **never** in either run. A `deploy_target` naming a site does
+select them, because `:` is a union; they are then dropped and *named* in the
+output rather than silently ignored, and they are not counted as unreachable.
+
+The third branch is an **and**, not a third role. Tagging a WAN router
+`fabric_spine` does not make it a fabric node, and nothing is rendered for it.
+The tag has a second, unrelated job: it selects the spine-only underlay checks
+(anycast RP carried, `ip msdp originator-id`, the MSDP mesh). A campus spine
+that is also its border is a fabric node through the **border role**; the tag
+still earns it the spine checks.
+
+**Every fabric must hold at least one `fabric_spine` and one `fabric_border`.**
+A fabric with no spine has no anycast RP to replicate BUM traffic from; one with
+no border has no path out of itself. Either is refused before any device is
+contacted, named by fabric rather than once per member, and scoped to the
+fabrics the run actually reaches — so an incomplete lab fabric never blocks a
+campus run. A *building* inside a campus fabric may hold only access switches:
+the requirement is per fabric, and a fabric is a site group, or a site that has
+no site group.
+
 **It checks every switch in the fabric's transit path, not only the VTEPs.** A
 distribution switch between a fabric leaf and a fabric border carries fabric
 traffic, so its underlay has to be right even though `acm_evpn` renders nothing
@@ -547,6 +581,13 @@ failing per-host would drop switches out of the play and under-report exactly
 the ones you care about. An unreachable switch is neither ready nor unready: it
 gets its own line and does not abort the run.
 
+**`unreachable` means a switch that was meant to be checked and did not
+answer** — nothing else. A device deliberately dropped for its role, its site,
+or belonging to another fabric is reported where it was dropped and left out of
+the count entirely. It used to be counted, which meant a site holding three
+servers reported three unreachable switches on every run, `0 unreachable` was
+unachievable, and the number stopped being worth reading.
+
 #### What it changes
 
 Unlike everything else here, this role does configure two things — applied with
@@ -591,8 +632,12 @@ Create the device in NetBox with:
 - its **name**, matching the configured hostname;
 - its **primary IPv4 address**, which **must be the `Loopback0` address** — EVPN
   peers are addressed from it, and the role asserts the two agree on every run;
-- its **device role** (`fabric_leaf`, `fabric_border`) and, for spines, the
-  `fabric_spine` tag;
+- its **device role** — `fabric_leaf`, `fabric_border`, or
+  `distribution_switch`;
+- for a spine, the `fabric_spine` **tag** *on top of that role*. The tag alone
+  makes nothing a fabric node: a spine is either a `fabric_border` that also
+  carries the tag (the usual campus shape) or a `distribution_switch` that
+  does. Either way the tag is what earns it the spine-only checks;
 - its **site**, inside the fabric's site group.
 
 ### Doing it by CSV

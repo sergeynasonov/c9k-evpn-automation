@@ -87,13 +87,31 @@ used for scoping.
 A device with a fabric role but **no site** belongs to no fabric: it is reported
 and skipped, never rendered.
 
-**A site is a fabric because it holds a fabric node** — a `fabric_border`,
-`fabric_leaf`, or a device tagged `fabric_spine`. Note the two questions are
-separate, and the answers differ:
+**A site is a fabric because it holds a fabric node.** A fabric node is:
+
+```
+  fabric_leaf
+  OR fabric_border
+  OR (distribution_switch AND tagged fabric_spine)
+```
+
+The third branch is a **conjunction**, and that matters more than it looks. The
+tag on its own qualifies nothing: a WAN router or a printer carrying
+`fabric_spine` is not a fabric node, and this role renders nothing for it. That
+was not always true — the rule used to be a flat list of groups, which cannot
+express an *and*, so the tag alone was enough and a mis-tagged device would have
+had its entire configuration replaced by `acm replace`.
+
+Because it is a conjunction it is **derived once**, in
+`underlay_readiness/tasks/fabric_resolve.yml`, and published as `fabric_nodes`
+for every call site to read. There is no group list to intersect with, and
+adding one back would reintroduce the same defect.
+
+Note the two questions are separate, and the answers differ:
 
 | Question | Answer |
 |---|---|
-| Which devices does this role **render** for? | Fabric nodes only. |
+| Which devices does this role **render** for? | Fabric nodes only — the rule above. |
 | Which devices does `underlay_readiness` **check**? | Everything in the fabric's transit path, distribution switches included. A distribution switch between a leaf and a border carries fabric traffic, so a wrong MTU or a missing PIM on it breaks the overlay exactly as it would on a leaf — it simply has no overlay configuration of its own. The `Loopback0`, `ip pim register-source` and `ip pim rp-address` checks all apply to it: the loopback is its OSPF router-id and management address, and PIM transits it. See the root README. |
  A NetBox holds plenty of
 ordinary sites (WAN kit, servers, campuses this automation does not manage);
@@ -164,11 +182,16 @@ looks provisioned and is not.
 |---|---|---|---|
 | Border | Device role | `fabric_border` | Renders the handoff SVIs, the eBGP handoff, the border-to-border iBGP mesh, and a `network` statement per edge subnet — all scoped to its own fabric. Allocated first by `trm_allocate.yml`. |
 | Leaf | Device role | `fabric_leaf` | Renders tenant SVIs, EVPN instances and the NVE interface. |
-| Spine | **Tag** | `fabric_spine` | Route reflector: EVPN and MVPN clients, anycast RP. |
+| Spine | **Tag**, on a `distribution_switch` | `fabric_spine` | Route reflector: EVPN and MVPN clients, anycast RP. The tag is only half of it — see below. |
 
-A device carrying none of these is **not a fabric node**. It still belongs to a
+A device matching none of these is **not a fabric node**. It still belongs to a
 fabric (it has a site) but nothing is rendered or deployed for it, even when a
 host pattern selects it — see [Running it](#running-it).
+
+**Every fabric needs at least one of each.** A fabric with no `fabric_spine`
+tag has no anycast RP to replicate BUM traffic from; one with no `fabric_border`
+has no path out of itself. Both are refused before any device is contacted —
+see [What it refuses](#what-it-refuses).
 
 **Underscores, not hyphens.** Ansible's `TRANSFORM_INVALID_GROUP_CHARS`
 defaults to `never`, so the inventory plugin does not rewrite a hyphen: a slug
@@ -177,11 +200,18 @@ playbooks look for `device_roles_fabric_border`. The two never meet, and the
 symptom is silence. Every slug in this contract uses underscores.
 
 Note the asymmetry: border and leaf switches are identified by **device roles**,
-spine switches by a **tag**. A spine switch is a role a device plays in the
-control plane rather than a distinct hardware class — often the same platform
-as a distribution switch — and a tag composes with whatever device role the
-site's own conventions already use. It is deliberate, and it is not guessable,
-hence this table.
+spine switches by a **tag on top of the `distribution_switch` role**. A spine is
+a role a device plays in the control plane rather than a distinct hardware class
+— often literally the same platform as a distribution switch — so it is
+expressed as a tag composing with the role the site's own conventions already
+use. It is deliberate, and it is not guessable, hence this table.
+
+**The tag composes with `distribution_switch`, and only with it.** Tagging any
+other role does not create a fabric node. A campus spine that is also its border
+is a fabric node through the *border role*, not through the tag; the tag still
+matters there, because it is what selects the spine-only underlay checks
+(anycast RP address carried, `ip msdp originator-id`, the MSDP mesh) in
+`underlay_readiness`. One tag, two jobs, and they are independent.
 
 Every managed device additionally needs:
 
@@ -654,6 +684,21 @@ buying time to fix the data, not as a durable state.
 
 Set `acm_checkpoint: false` to disable, or point `acm_checkpoint_dir` elsewhere.
 
+## What it refuses
+
+Two refusals stop the whole run rather than one device, both decided from
+inventory before anything is contacted. They are data faults — the fabric is
+described wrongly in NetBox — not a switch being unfit, and a render built on
+either would be wrong for every member.
+
+| Refusal | Why it is fabric-wide |
+|---|---|
+| A fabric with no `fabric_spine` **and/or** no `fabric_border` | No spine means no anycast RP to replicate BUM traffic from and no route reflector to peer with; no border means no path out of the fabric. Reported once per fabric, naming what it does have, rather than once per member — a thirty-switch fabric would otherwise produce thirty copies of one NetBox mistake. |
+| A site tree that does not partition into fabrics | Nested site groups make every peer list suspect, not only the ambiguous device's. |
+
+Both are scoped to the fabrics a run actually reaches, so a broken fabric
+elsewhere in the estate never blocks a run aimed at a healthy one.
+
 ## Safety guards
 
 Because `acm replace` deletes anything absent from the candidate config, several
@@ -666,7 +711,8 @@ checks run before a switch is touched:
 | Anycast RP assertions | The RP loopback must match the fabric's anycast RP, every spine switch must carry it, and every spine switch in a fabric must carry the **same** address — differing addresses configure cleanly and then silently fail to forward. |
 | Peer addressing assertion | `Loopback0` must equal the device's NetBox primary IP. |
 | Fabric partition | Refuses the whole run if the NetBox site tree does not partition into fabrics — today, if any device sits under nested site groups. Fabric-wide: an ambiguous tree makes every peer list suspect, not just the ambiguous device's. |
-| Route reflector assertion | Fails a device whose fabric contains no `fabric_spine`. It would otherwise render a `router bgp` with no overlay neighbours, which `acm replace` applies as a teardown of every EVPN session on the switch. Per device, so one mis-sited leaf does not stop a healthy fabric. |
+| Incomplete fabric | Refuses a run reaching a fabric with no `fabric_spine` tag or no `fabric_border`. Without a spine there is no route reflector, so the render is a `router bgp` with no overlay neighbours — which `acm replace` applies as a teardown of every EVPN session on the switch; without a border the fabric has no path out of itself. Refused in the resolver, before any device is contacted, and named by fabric rather than once per stranded member. **Scoped to the fabrics the run actually reaches**, so an incomplete lab fabric cannot block a campus deploy. |
+| Route reflector assertion | The same spine requirement, per device, on the render path. Superseded by the refusal above and kept as a second line of defence: it can no longer fire from a missing tag. |
 | Blast-radius guard | Blocks a deploy removing >`acm_safety_max_removal_pct` of any tracked object class, and **any** underlay removal (zero tolerance). **Strictly** greater, so a single removal blocks only when it was the last member of its class — the reasoning is in `defaults/main.yml`. Override with `-e acm_safety_force=true`. Generate runs warn instead of failing. |
 
 ## Tests
