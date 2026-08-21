@@ -192,7 +192,7 @@
 # 02_render_configs.yml, after the pre-flight and before anything is rendered,
 # and nothing between here and there reads these facts.
 - name: 7. Transform NetBox data and assign the facts the templates read
-  when: group_names | intersect(fabric_node_groups) | length > 0
+  when: inventory_hostname in fabric_nodes
   ansible.builtin.set_fact:
     netbox_vlan_groups: "{{ {'vrfs': _processed_data.vrfs,
                           'l2_vlans': _processed_data.l2_vlans,

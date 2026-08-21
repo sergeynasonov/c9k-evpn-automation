@@ -101,7 +101,7 @@ UNSCOPED = object()
 
 
 def run_fabric(inventory, reentry=False, mutate=None, deploy_target="all",
-               render_gate=False, target_scoping=True):
+               render_gate=False, target_scoping=True, play_pattern=None):
     """Run the harness against a fixture inventory.
 
     ``reentry`` imports the resolver a second time, the way acm_evpn does when
@@ -155,6 +155,8 @@ def run_fabric(inventory, reentry=False, mutate=None, deploy_target="all",
              "-e", "reentry=" + ("true" if reentry else "false"),
              "-e", "render_gate=" + ("true" if render_gate else "false"),
              "-e", "target_scoping=" + ("true" if target_scoping else "false")]
+            + ([] if play_pattern is None
+               else ["-e", "play_pattern=" + play_pattern])
             + ([] if deploy_target is UNSCOPED
                else ["-e", "deploy_target=" + deploy_target]),
             cwd=workdir, env=env, capture_output=True, text=True,
@@ -480,6 +482,25 @@ class TestNestedSiteGroups(unittest.TestCase):
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
 class TestFabricWithNoReflector(unittest.TestCase):
+    """A leaf alone in its own site: a fabric with neither a spine nor a border.
+
+    THIS NOW FAILS EARLIER THAN IT USED TO, and the change is deliberate. The
+    fixture was written for acm_evpn task 17, which asserted the spine half PER
+    DEVICE on the render path -- so the stranded leaf dropped out and the
+    healthy campus in the same inventory carried on. Task 13 of the resolver
+    now refuses the whole run instead, before any device is contacted, because
+    an incomplete fabric is a NetBox data problem like a missing ASN (task 10)
+    rather than one switch being unfit.
+
+    The isolation that behaviour bought is not lost, it moved: task 13 only
+    considers fabrics this run actually reaches, so a scoped run against a
+    healthy fabric is unaffected by a broken one elsewhere in the estate. That
+    is the case test_a_scoped_run_is_not_blocked_by_another_fabric covers. What
+    no longer happens is a run that INCLUDES the broken fabric proceeding for
+    the others -- deliberately, since the render it would produce was never
+    going to be applied.
+    """
+
     @classmethod
     def setUpClass(cls):
         cls.rc, cls.out, cls.result = run_fabric("fabric_no_reflector.ini")
@@ -487,17 +508,27 @@ class TestFabricWithNoReflector(unittest.TestCase):
     def test_run_fails(self):
         self.assertNotEqual(self.rc, 0, self.out)
 
-    def test_the_stranded_leaf_is_named(self):
-        self.assertIn("stranded1", self.out)
-        self.assertIn("route reflector", self.out)
+    def test_the_incomplete_fabric_is_named(self):
+        """The fabric, not each stranded switch in turn. One line for one
+        NetBox fault beats one per member once a fabric has thirty of them."""
+        self.assertIn("sites_evpn_lonely", self.out)
+        self.assertIn("no spine and no border", self.out)
 
-    def test_a_healthy_fabric_in_the_same_run_is_unaffected(self):
-        """Per device, not fabric-wide: one mis-sited leaf must not stop the
-        buildings that are fine."""
-        self.assertIsNotNone(self.result, self.out)
-        self.assertEqual(self.result["hosts"]["access1-1"]["peer_ips"], ["10.0.0.1"])
-        self.assertEqual(self.result["hosts"]["core1"]["peer_ips"], ["10.0.0.11"])
-        self.assertNotIn("stranded1", self.result["survivors"])
+    def test_it_fails_before_any_device_is_contacted(self):
+        """The resolver runs entirely on inventory. Failing here rather than on
+        the render path means nothing has opened an SSH session yet."""
+        self.assertIn("13. Refuse a fabric without a spine and a border", self.out)
+        self.assertNotIn("Fetch current running configuration", self.out)
+
+    def test_a_scoped_run_is_not_blocked_by_another_fabric(self):
+        """Where the old per-device isolation went. The campus is healthy, so a
+        run scoped to it must not care that sites_evpn_lonely is broken."""
+        rc, out, result = run_fabric("fabric_no_reflector.ini",
+                                     deploy_target="site_group_evpn_campus",
+                                     play_pattern="site_group_evpn_campus")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(result["hosts"]["access1-1"]["peer_ips"], ["10.0.0.1"])
+        self.assertEqual(result["hosts"]["core1"]["peer_ips"], ["10.0.0.11"])
 
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
@@ -723,3 +754,109 @@ class TestAnUnscopedRunIsRefused(unittest.TestCase):
 
 if __name__ == "__main__":
     sys.exit(0 if unittest.main(exit=False).result.wasSuccessful() else 1)
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestTheFabricNodeRule(unittest.TestCase):
+    """fabric node = leaf OR border OR (distribution_switch AND tagged spine).
+
+    It used to be a flat list -- leaf, border, tags_fabric_spine -- intersected
+    with group_names at five call sites. That made the TAG ALONE sufficient, so
+    tagging a WAN router 'fabric_spine' got a full EVPN candidate rendered for
+    it. The rule has a conjunction in it, which no list of groups can express,
+    so the set is derived once in fabric_resolve.yml task 1 and read everywhere.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rc, cls.out, cls.result = run_fabric("fabric_scope_rule.yml",
+                                                 target_scoping=False)
+
+    def test_the_run_succeeds(self):
+        self.assertEqual(self.rc, 0, self.out)
+
+    def test_a_leaf_and_a_border_are_nodes_on_their_own(self):
+        self.assertIn("core1", self.result["fabric_nodes"])
+        self.assertIn("leaf1", self.result["fabric_nodes"])
+
+    def test_a_tagged_distribution_switch_is_a_node(self):
+        """The conjunction's positive half. dspine1 has no fabric role -- it
+        qualifies only by being a distribution switch that is also tagged."""
+        self.assertIn("dspine1", self.result["fabric_nodes"])
+
+    def test_an_untagged_distribution_switch_is_not_a_node(self):
+        """Still in the fabric and still checked -- it carries traffic between
+        a leaf and a border -- but acm_evpn renders nothing for it."""
+        self.assertNotIn("dist1", self.result["fabric_nodes"])
+        self.assertEqual(self.result["hosts"]["dist1"]["fabric_id"],
+                         "sites_building_a")
+
+    def test_the_tag_alone_does_not_make_a_node(self):
+        """The defect the rule closes. wan1 is tagged fabric_spine and carries
+        the WAN role; under the old flat list it was a fabric node and this
+        role would have replaced its entire configuration."""
+        self.assertNotIn("wan1", self.result["fabric_nodes"])
+
+    def test_a_device_with_no_role_is_not_a_node(self):
+        self.assertNotIn("server1", self.result["fabric_nodes"])
+
+    def test_the_exact_set(self):
+        """Spelled out, because every assertion above is a membership test and
+        a rule that admitted something extra would pass all of them."""
+        self.assertEqual(sorted(self.result["fabric_nodes"]),
+                         ["core1", "dspine1", "leaf1"])
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestAFabricNeedsASpineAndABorder(unittest.TestCase):
+    """Task 13. Both halves are needed and neither implies the other.
+
+    A fabric with no spine has no anycast RP to replicate BUM traffic from; one
+    with no border has no path out of itself. Neither is a switch being
+    unready -- it is the fabric being incompletely described in NetBox -- so it
+    is refused for the whole run rather than reported per device.
+    """
+
+    @staticmethod
+    def _drop(group, host):
+        def mutate(data):
+            del data["all"]["children"][group]["hosts"][host]
+        return mutate
+
+    def test_a_complete_fabric_is_accepted(self):
+        rc, out, _ = run_fabric("fabric_scope_rule.yml", target_scoping=False)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_fabric_with_no_spine_is_refused(self):
+        """core1 and dspine1 both lose the tag, so nothing is left tagged.
+        core1 keeps the border role, which is what makes this the no-SPINE
+        case rather than the no-anything case."""
+        def mutate(data):
+            data["all"]["children"]["tags_fabric_spine"]["hosts"] = {}
+        rc, out, _ = run_fabric("fabric_scope_rule.yml", target_scoping=False,
+                                mutate=mutate)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no switch is tagged fabric_spine", out)
+        self.assertIn("sites_building_a", out)
+
+    def test_a_fabric_with_no_border_is_refused(self):
+        rc, out, _ = run_fabric("fabric_scope_rule.yml", target_scoping=False,
+                                mutate=self._drop("device_roles_fabric_border",
+                                                  "core1"))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no switch has the fabric border role", out)
+
+    def test_the_message_names_what_the_fabric_does_have(self):
+        """So the operator can see it is a gap rather than an empty site."""
+        rc, out, _ = run_fabric("fabric_scope_rule.yml", target_scoping=False,
+                                mutate=self._drop("device_roles_fabric_border",
+                                                  "core1"))
+        self.assertIn("spine(s): core1", out)
+
+    def test_a_site_holding_no_fabric_node_is_not_asked_for_either(self):
+        """An ordinary NetBox site -- WAN kit, servers -- is not a candidate
+        fabric waiting to be built, so it must not be refused for lacking a
+        spine. fabric_multi.ini carries exactly that case in sites_wan_edge."""
+        rc, out, _ = run_fabric("fabric_multi.ini")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("sites_wan_edge", out)

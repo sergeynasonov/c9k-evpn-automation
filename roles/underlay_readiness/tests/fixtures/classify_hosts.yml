@@ -2,6 +2,12 @@
 # One host per case the readiness summary has to tell apart. 'readiness_failures'
 # is what 02_check.yml sets: an empty list means ready, a non-empty one means
 # not. A host that never got the fact was not evaluated.
+#
+# ROLE GROUPS ARE PART OF THE FIXTURE, not decoration. Classification asks three
+# questions about a host -- does it have a fabric, is that fabric targeted, and
+# does it carry a role this automation acts on -- and the third was added after
+# a live run reported three Linux servers as UNREACHABLE. A fixture with no
+# groups cannot tell a server from a switch, so it could not have caught that.
 all:
   hosts:
     core1:
@@ -21,12 +27,36 @@ all:
     downswitch:
       fabric_id: site_group_evpn_campus
     # Dropped by the resolver for having no site at all. Already reported there.
+    # It carries a fabric role, so the SITE is unambiguously why it was dropped.
     orphan1:
       fabric_id: ""
+    # A server sharing a site with the fabric switches: it has a fabric_id, so
+    # nothing about the site or the target excludes it, and it carries no role
+    # this automation acts on. Dropped and reported by fabric_resolve.yml task
+    # 8. This is ubuntu1/2/3 from the campus run that reported them unreachable.
+    server1:
+      fabric_id: site_group_evpn_campus
     # A spine unioned into the host pattern from a fabric this run is not
     # targeting, and dropped for it. Already reported there.
     rcore1:
       fabric_id: sites_evpn_remote
       readiness_failures: []
+  children:
+    device_roles_fabric_border:
+      hosts:
+        core1:
+        rcore1:
+    device_roles_fabric_leaf:
+      hosts:
+        access1-1:
+        downswitch:
+        orphan1:
+    device_roles_distribution_switch:
+      hosts:
+        dist1-1:
+    tags_fabric_spine:
+      hosts:
+        core1:
+        rcore1:
   vars:
     ansible_connection: local

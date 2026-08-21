@@ -68,19 +68,37 @@
     # unready switches as "0 NOT ready" while writing remediation files for
     # them.
     #
-    # The rule is the two ways a host is deliberately dropped BEFORE this role
-    # runs, and nothing else. A host that is left after those is one we meant to
-    # check, so no result means it really was unreachable.
+    # The rule is the THREE ways a host is deliberately dropped BEFORE this
+    # role runs, and nothing else. A host that is left after those is one we
+    # meant to check, so no result means it really was unreachable.
+    #
+    # It listed TWO for a long time, and the third is the one that bites in
+    # practice. Seen on a campus run: ubuntu1/2/3, Linux servers sharing a site
+    # with the fabric switches, were correctly identified and reported by
+    # fabric_resolve.yml task 5 -- and then contradicted ninety lines later by
+    # this summary, which called all three UNREACHABLE. That sends an operator
+    # after a connectivity problem that does not exist, and it means
+    # "0 unreachable" is unachievable on any site holding a non-switch, so the
+    # number stops being a signal. It is written into the fabric CSV too, where
+    # a remediation campaign then tracks servers forever as switches it cannot
+    # reach.
     _candidates: >-
       {%- set out = [] -%}
       {%- for h in ansible_play_hosts_all -%}
-      {#-   Dropped for having no site at all (fabric_resolve.yml). -#}
+      {#-   1. Dropped for having no site at all (fabric_resolve.yml task 7). -#}
       {%-   set fabric = hostvars[h].fabric_id | default('') -%}
-      {#-   Dropped as a spine unioned in from a fabric this run does not
+      {#-   2. Dropped as a spine unioned in from a fabric this run does not
             target (acm_evpn 01_gather_data.yml). targeted_fabrics exists only
             on that path; readiness.yml standalone unions nothing. -#}
       {%-   set targeted = targeted_fabrics | default([]) -%}
-      {%-   if fabric and (not targeted or fabric in targeted) -%}
+      {#-   3. Dropped for carrying no role this automation acts on
+            (fabric_resolve.yml task 8). These DO have a fabric_id -- they are
+            in a site -- so nothing above excludes them. Tested exactly as task
+            8 tests it, against the same list, because the two disagreeing is
+            precisely the bug this branch exists to fix. -#}
+      {%-   set managed = hostvars[h].group_names | default([])
+                          | intersect(fabric_managed_groups) | length > 0 -%}
+      {%-   if fabric and managed and (not targeted or fabric in targeted) -%}
       {%-     set _ = out.append(h) -%}
       {%-   endif -%}
       {%- endfor -%}

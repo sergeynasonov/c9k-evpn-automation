@@ -328,13 +328,38 @@ readiness_show_baseline_lines: false
 # Named here rather than hardcoded per call site because three places need the
 # same answer, and a device silently missing from one of them is the single most
 # expensive kind of mistake this project can make.
-fabric_node_groups:
+#
+# NOT A FLAT LIST, and it used to be -- leaf, border, tags_fabric_spine, tested
+# everywhere as 'group_names | intersect(...)'. That made the TAG ALONE enough:
+# tag a WAN router or a printer 'fabric_spine' and this role rendered a full
+# EVPN candidate for it. The rule the estate actually runs on has a conjunction
+# in it, which no list of groups can express:
+#
+#     fabric node  =  fabric_leaf
+#                  OR fabric_border
+#                  OR (distribution_switch AND tagged fabric_spine)
+#
+# So the ROLES that qualify on their own are named here, the promotion pair is
+# named below, and the set itself -- 'fabric_nodes' -- is derived ONCE in
+# fabric_resolve.yml task 1 and read by every call site. Do not reintroduce a
+# per-call-site membership test; five copies of a conjunction is five chances to
+# get one wrong, and the symptom is a device that silently renders nothing.
+fabric_node_roles:
   - device_roles_fabric_leaf
   - device_roles_fabric_border
-  - tags_fabric_spine
 
-# Every device role this automation acts on AT ALL. Wider than
-# fabric_node_groups by exactly the transit path: nothing is rendered for a
+# The promotion pair. A distribution switch carrying the fabric_spine tag IS a
+# fabric node; the same tag on anything else promotes nothing.
+#
+# 'tags_fabric_spine' is the only tag in the inventory that modifies a role's
+# behaviour, and it does two unrelated jobs -- this promotion, and marking which
+# devices get the spine-only checks (anycast RP, MSDP mesh) in 02_check.yml.
+# The second job is independent of scope and is unaffected by any of this.
+fabric_distribution_group: device_roles_distribution_switch
+fabric_spine_tag_group: tags_fabric_spine
+
+# Every device role this automation acts on AT ALL. Wider than the fabric-node
+# rule above by exactly the transit path: nothing is rendered for a
 # distribution switch, but its underlay is checked, because a wrong MTU or a
 # missing PIM on a switch between a leaf and a border breaks the overlay exactly
 # as it would on a leaf.
@@ -352,10 +377,15 @@ fabric_node_groups:
 # role this list does not name. A device dropped for being out of scope is
 # REPORTED, so that case is visible rather than silent -- which is the whole
 # reason the report exists.
+# THREE ROLES, and 'tags_fabric_spine' is deliberately not among them. It was,
+# and it was always redundant: a spine is a border or a distribution switch,
+# both of which are here, so the tag never admitted a device the roles did not
+# already admit. Listing it invited the reading that a tag can put a device in
+# scope, which is exactly the confusion the fabric-node rule above exists to
+# remove.
 fabric_managed_groups:
   - device_roles_fabric_leaf
   - device_roles_fabric_border
-  - tags_fabric_spine
   - device_roles_distribution_switch
 
 # Tag(s) marking an IPAddress as a fabric's UNDERLAY anycast RP. One object per

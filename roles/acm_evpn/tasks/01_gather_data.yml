@@ -188,7 +188,7 @@
           in the play so its underlay can be checked, and its Loopback0 is not
           this role's business. -#}
       {%- if (fabric_verify_peer_addressing | bool)
-             and group_names | intersect(fabric_node_groups) | length > 0
+             and inventory_hostname in fabric_nodes
              and loopback0_ip != ansible_host -%}
       {%-   set _ = bad.append(vtep_source_intf ~ ' is ' ~ loopback0_ip
                                ~ ' but the NetBox primary IP is ' ~ ansible_host

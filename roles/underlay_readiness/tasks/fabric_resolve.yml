@@ -95,13 +95,33 @@
       {%-   endif -%}
       {%- endfor -%}
 
-      {#- Every device that is expected to be in a fabric, so that one which
-          cannot be placed is reported rather than dropped in silence. -#}
+      {#- THE FABRIC-NODE RULE, evaluated once for the whole inventory. Every
+          device acm_evpn renders for, and therefore every device expected to
+          be placeable in a fabric, so that one which cannot be placed is
+          reported rather than dropped in silence.
+
+              fabric node = fabric_leaf
+                         OR fabric_border
+                         OR (distribution_switch AND tagged fabric_spine)
+
+          The conjunction is why this is derived here instead of being a list
+          of groups intersected at each call site: no flat list can express it,
+          and the old list could not, so the TAG ALONE qualified a device. A
+          WAN router tagged 'fabric_spine' got a full EVPN candidate rendered
+          for it. See fabric_node_roles in defaults/main.yml.
+
+          Read from 'groups', like everything else here, so the answer covers
+          the whole inventory rather than the current play -- a device's fabric
+          membership must not depend on whether it was targeted. -#}
       {%- set fabric_nodes = [] -%}
-      {%- for group in fabric_node_groups -%}
+      {%- for group in fabric_node_roles -%}
       {%-   for host in groups.get(group, []) -%}
       {%-     set _ = fabric_nodes.append(host) -%}
       {%-   endfor -%}
+      {%- endfor -%}
+      {%- for host in groups.get(fabric_distribution_group, [])
+            | intersect(groups.get(fabric_spine_tag_group, [])) -%}
+      {%-   set _ = fabric_nodes.append(host) -%}
       {%- endfor -%}
 
       {%- set out = {} -%}
@@ -397,5 +417,102 @@
       {%- endfor -%}
       {{ out | to_json }}
   when: fabric_scope_map is not defined
+  run_once: true
+  delegate_to: localhost
+
+# Fatal, and fatal for the whole run: a fabric with no spine has no anycast RP
+# to originate BUM replication from, and a fabric with no border has no path out
+# of itself. Neither is a switch being unready -- it is the FABRIC being
+# incompletely described in NetBox, so it belongs here with the other
+# fabric-level refusals rather than in 02_check.yml, which judges one device at
+# a time and would report the same fault on every member.
+#
+# Both halves are needed and neither implies the other. In this estate the two
+# roles usually land on the same devices -- a campus spine is also its border --
+# but that is a property of these fabrics, not of the design: the CML lab
+# separates them (spine1/spine2 tagged, border1/border2 roled), which is exactly
+# the shape that would let one of the two go missing unnoticed.
+#
+# SCOPED TO THE FABRICS THIS RUN REACHES, and per fabric rather than per site. A fabric is a site group or, where a site has
+# no site group, the site itself (see the header of this file), and a building
+# inside a campus fabric legitimately holds only access switches --
+# sites_evpn_building_c is two leaves and nothing else. Asserting this per site
+# would fail a correctly-built campus.
+#
+# It SUPERSEDES acm_evpn's task 17, which asserted the spine half per device.
+# A fabric with no spine is now refused here, before any device is contacted and
+# with a message naming the fabric rather than each stranded switch in turn, so
+# task 17 can no longer fire from a missing tag. It is kept as a belt-and-braces
+# assertion rather than deleted -- it costs nothing and guards the render path
+# directly.
+#
+# LAST rather than beside tasks 2, 3 and 10 where it belongs logically. Inserting
+# it there means renumbering nine tasks and the eight comments across two roles
+# that name them by number, for no behavioural gain: everything in this file runs
+# before any device is contacted and before fabric_anycast_rp.yml, so a fabric
+# that fails here fails before the RP resolution it would also have failed, and
+# with the better message.
+- name: 13. Refuse a fabric without a spine and a border
+  ansible.builtin.assert:
+    that:
+      - _incomplete | from_json | length == 0
+    fail_msg: |-
+      {{ _incomplete | from_json | length }} fabric(s) are incompletely built:
+      {% for f in _incomplete | from_json %}
+        - {{ f }}
+      {% endfor %}
+      A fabric needs at least one switch tagged '{{ fabric_spine_tag_group | replace('tags_', '') }}'
+      and at least one switch with the fabric border role. The spine carries the
+      underlay anycast RP that BUM traffic is replicated from; the border is the
+      fabric's only path out of itself. Fix this in NetBox — add the tag or the
+      device role — rather than here.
+    success_msg: "every fabric has a spine and a border"
+    quiet: true
+  vars:
+    _incomplete: >-
+      {%- set bad = [] -%}
+      {#- Only fabrics this run actually reaches. fabric_ids is inventory-wide,
+          and refusing on all of it would let an incomplete lab fabric block a
+          campus deploy that has nothing to do with it -- the estate-wide
+          version of exactly the mistake task 2 exists to prevent. A run that
+          does include the broken fabric still fails. -#}
+      {%- set in_play = [] -%}
+      {%- for h in ansible_play_hosts_all -%}
+      {%-   set f = fabric_map.get(h, '') -%}
+      {%-   if f and f not in in_play -%}
+      {%-     set _ = in_play.append(f) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- for fabric in fabric_ids if fabric in in_play -%}
+      {#-   Members from fabric_map rather than the inventory group, so this
+            reads the same boundary every other fabric-scoped lookup does. -#}
+      {%-   set members = [] -%}
+      {%-   for host, f in fabric_map | dictsort if f == fabric -%}
+      {%-     set _ = members.append(host) -%}
+      {%-   endfor -%}
+      {#- 'sort' is not decoration: Ansible's 'intersect' returns set order,
+          which varies run to run, and this text goes into an operator-facing
+          refusal. An unstable message is one nobody can grep a runbook for. -#}
+      {%-   set spines = members
+                        | intersect(groups.get(fabric_spine_tag_group, [])) | sort -%}
+      {%-   set borders = members
+                         | intersect(groups.get('device_roles_fabric_border', [])) | sort -%}
+      {%-   if not spines and not borders -%}
+      {%-     set _ = bad.append(fabric ~ ': no spine and no border') -%}
+      {%-   elif not spines -%}
+      {%-     set _ = bad.append(fabric ~ ': no switch is tagged fabric_spine (border(s): '
+                                 ~ borders | join(', ') ~ ')') -%}
+      {%-   elif not borders -%}
+      {%-     set _ = bad.append(fabric ~ ': no switch has the fabric border role (spine(s): '
+                                 ~ spines | join(', ') ~ ')') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ bad | to_json }}
+  # UNGUARDED, unlike tasks 1-5. Their guard is 'fabric_id is not defined',
+  # which task 6 sets -- so the same guard here, after task 6, is false on the
+  # first pass and the assertion would never fire at all. Re-entry is already
+  # prevented one level up: assert_only.yml imports this whole file only when
+  # fabric_id is undefined. It reads facts task 1 published, which survive a
+  # skipped task 1, so it is correct on a re-entry too.
   run_once: true
   delegate_to: localhost
