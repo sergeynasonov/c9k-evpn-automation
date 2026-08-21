@@ -69,7 +69,7 @@ logic lives in Jinja — in task files and templates — where `--syntax-check`
 evaluates nothing at all. That is covered by running the **real task files under
 real Ansible** with only the device calls removed.
 
-This is no longer a manual exercise: five committed tests already do it, and CI
+This is no longer a manual exercise: eight committed tests already do it, and CI
 runs them. Copy whichever is closest rather than starting from scratch.
 
 | Test | What it drives | How the device is removed |
@@ -79,6 +79,9 @@ runs them. Copy whichever is closest rather than starting from scratch.
 | `underlay_readiness/tests/unit/test_anycast_rp.py` | The real anycast-RP resolution | The one `uri` task is stripped; a fixture stands in for the GraphQL result |
 | `acm_evpn/tests/unit/test_inventory_config.py` | `netbox_inv.yml`'s variable renames | Drives the inventory plugin's own methods with a stub inventory |
 | `underlay_readiness/tests/unit/test_optional_enrolment.py` | Whether SNMPv3 and syslog are enrolled at all, from the real `defaults/main.yml`, the real `assert_site_config.yml` and the real `_snmp` / `_syslog` checks | The whole defaults file is copied in as `vars_files` and each case's `deployment.yml` supplied as extra vars, which outrank it — so "this key is commented out" is expressible |
+| `underlay_readiness/tests/unit/test_snmp_state.py` | The real derive task from `01_gather.yml` and the real `_snmp` check, over an operational read that produced nothing | The two `ios_command` reads are supplied as data in the exact shape the module registers them — **including the shape it registers when the command errored**, which is a result with no `stdout` key at all |
+| `underlay_readiness/tests/unit/test_system_mtu.py` | The real MTU parse, the real cross-device consensus task and the real `_mtu` check, plus the shipped `platform_baseline.j2` rendered offline | Running configs are supplied as the stanza dict `01_gather.yml`'s indexer would have produced; the template is rendered with plain Jinja2 and filter shims |
+| `underlay_readiness/tests/unit/test_readiness_summary.py` | The real classify task from `05_report.yml` — ready / unready / unreachable, and the three ways a host is deliberately dropped | Pure set arithmetic over facts `02_check.yml` would have produced, supplied directly by a fixture inventory that also carries the **role groups**, without which a server cannot be told from a switch |
 
 The mechanics worth reusing:
 

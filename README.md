@@ -341,9 +341,11 @@ honour.
 
 ### Every node — SNMPv3 *(optional)*
 
-The one block on this page you do **not** paste: `readiness.yml` configures it
-for you, in merge mode. It is here because it is *checked*, and because it is
-the only check a switch built exactly to this page can still fail.
+One of three blocks on this page you do **not** paste: `readiness.yml`
+configures it for you, in merge mode, along with syslog and NTP. All three are
+here because they are *checked*, and because they are the checks a switch built
+exactly to this page can still fail — the paste blocks above cover everything
+else.
 
 ```
 ip access-list standard SNMP-ACL
@@ -416,7 +418,8 @@ baseline's source-interface hygiene, not part of this enrolment.
 `deploy_evpn.yml`.** The readiness role also runs as a pre-flight inside
 `acm_evpn`, but that path only *checks* — it never configures. So a switch that
 has never had a standalone readiness run reports its SNMPv3 user and group
-missing, which looks like a Day-0 mistake and is really just an ordering one:
+missing, and its `logging` and `ntp server` lines with them. That looks like a
+Day-0 mistake and is really just an ordering one:
 
 ```bash
 ansible-playbook readiness.yml -e deploy_target=<new switch>   # configures, then checks
@@ -471,6 +474,40 @@ that fails it is never deployed to. `generate_evpn.yml` reports the same
 findings without failing, so you can still inspect a candidate for an unready
 switch.
 
+#### Which devices each playbook acts on
+
+Two different questions with two different answers, decided from NetBox roles
+and tags alone:
+
+```
+readiness.yml — checks the underlay of
+    fabric_leaf  OR  fabric_border  OR  distribution_switch
+
+generate_evpn.yml / deploy_evpn.yml — render and deploy for
+    fabric_leaf  OR  fabric_border  OR  (distribution_switch AND tagged fabric_spine)
+```
+
+Anything matching neither — a server, a WAN router, a printer that happens to
+share a site — is **never** in either run. A `deploy_target` naming a site does
+select them, because `:` is a union; they are then dropped and *named* in the
+output rather than silently ignored, and they are not counted as unreachable.
+
+The third branch is an **and**, not a third role. Tagging a WAN router
+`fabric_spine` does not make it a fabric node, and nothing is rendered for it.
+The tag has a second, unrelated job: it selects the spine-only underlay checks
+(anycast RP carried, `ip msdp originator-id`, the MSDP mesh). A campus spine
+that is also its border is a fabric node through the **border role**; the tag
+still earns it the spine checks.
+
+**Every fabric must hold at least one `fabric_spine` and one `fabric_border`.**
+A fabric with no spine has no anycast RP to replicate BUM traffic from; one with
+no border has no path out of itself. Either is refused before any device is
+contacted, named by fabric rather than once per member, and scoped to the
+fabrics the run actually reaches — so an incomplete lab fabric never blocks a
+campus run. A *building* inside a campus fabric may hold only access switches:
+the requirement is per fabric, and a fabric is a site group, or a site that has
+no site group.
+
 **It checks every switch in the fabric's transit path, not only the VTEPs.** A
 distribution switch between a fabric leaf and a fabric border carries fabric
 traffic, so its underlay has to be right even though `acm_evpn` renders nothing
@@ -482,13 +519,14 @@ for it. The three checks that look VTEP-specific all still apply to one:
 | `ip pim register-source Loopback0` | PIM transits the switch, so it still registers |
 | `ip pim rp-address <anycast RP>` | Same reason — it needs to know the fabric's RP to forward multicast |
 
-**And nothing else.** Fabric leaves, fabric borders, spines and distribution
-switches are the whole of what this project contacts. A run scoped by site or
-site group selects everything in that site — servers, printers, wireless
-controllers — because `deploy_target` replaces the playbook's role-scoped
-default pattern rather than intersecting with it. Anything outside those roles
-is dropped before a single device is contacted, and **named while it is
-dropped**:
+**And nothing else.** Three device roles — `fabric_leaf`, `fabric_border` and
+`distribution_switch` — are the whole of what this project contacts. A spine is
+not a fourth: it is one of those three carrying the `fabric_spine` tag, which is
+why the tag never appears in this list. A run scoped by site or site group
+selects everything in that site — servers, printers, wireless controllers —
+because `deploy_target` replaces the playbook's role-scoped default pattern
+rather than intersecting with it. Anything outside those roles is dropped before
+a single device is contacted, and **named while it is dropped**:
 
 ```
 scope: 2 device(s) selected by the target but skipped — not a fabric role:
@@ -547,6 +585,13 @@ failing per-host would drop switches out of the play and under-report exactly
 the ones you care about. An unreachable switch is neither ready nor unready: it
 gets its own line and does not abort the run.
 
+**`unreachable` means a switch that was meant to be checked and did not
+answer** — nothing else. A device deliberately dropped for its role, its site,
+or belonging to another fabric is reported where it was dropped and left out of
+the count entirely. It used to be counted, which meant a site holding three
+servers reported three unreachable switches on every run, `0 unreachable` was
+unachievable, and the number stopped being worth reading.
+
 #### What it changes
 
 Unlike everything else here, this role does configure two things — applied with
@@ -591,8 +636,12 @@ Create the device in NetBox with:
 - its **name**, matching the configured hostname;
 - its **primary IPv4 address**, which **must be the `Loopback0` address** — EVPN
   peers are addressed from it, and the role asserts the two agree on every run;
-- its **device role** (`fabric_leaf`, `fabric_border`) and, for spines, the
-  `fabric_spine` tag;
+- its **device role** — `fabric_leaf`, `fabric_border`, or
+  `distribution_switch`;
+- for a spine, the `fabric_spine` **tag** *on top of that role*. The tag alone
+  makes nothing a fabric node: a spine is either a `fabric_border` that also
+  carries the tag (the usual campus shape) or a `distribution_switch` that
+  does. Either way the tag is what earns it the spine-only checks;
 - its **site**, inside the fabric's site group.
 
 ### Doing it by CSV
@@ -829,6 +878,7 @@ front-loads its checks. All of these run **before a switch is touched**:
 | Guard | Blocks on |
 |---|---|
 | Underlay readiness | A hand-built underlay that cannot carry the overlay — see [Phase 1](#checking-day-0-the-underlay_readiness-role) |
+| Incomplete fabric | A fabric with no switch tagged `fabric_spine`, or none with the `fabric_border` role. No spine means no anycast RP and no route reflector; no border means no path out of the fabric. Decided from inventory, so it fails before anything is contacted, and scoped to the fabrics the run actually reaches |
 | VNI validation | Out-of-range, duplicate or L2/L3-colliding VNIs — across the whole of one fabric, not just the switch being rendered |
 | Multicast validation | A missing, malformed or out-of-carve replication group; two segments of one fabric claiming the same group |
 | Anycast RP assertions | RP loopback disagreeing with the fabric's anycast RP, a spine switch missing it, or two spine switches in one fabric carrying **different** addresses |
@@ -873,10 +923,13 @@ Before changing anything, read **[CONTRIBUTING.md](CONTRIBUTING.md)** — it lis
 the failure modes that have actually cost outages here, and the Ansible
 mechanics that behave differently from how they read.
 
-Stdlib `unittest` only: no pytest, no live NetBox, no devices. One test
-(`test_fabric_resolve.py`) drives the real fabric-resolution tasks under
-`ansible-playbook` against static inventories, because that logic is Jinja
-rather than Python; it skips itself if `ansible-playbook` is not on `PATH`.
+Stdlib `unittest` only: no pytest, no live NetBox, no devices. Several of them
+drive **real task files** under `ansible-playbook` against static inventories,
+because much of this logic is Jinja rather than Python and `--syntax-check`
+evaluates none of it — fabric resolution and scope, the readiness summary, the
+MSDP and MTU checks, and optional SNMPv3/syslog enrolment. Each skips itself if
+`ansible-playbook` is not on `PATH`. See
+[CONTRIBUTING.md](CONTRIBUTING.md#testing-task-layer-logic-offline).
 The dense logic — the NetBox transform, underlay extraction, VNI and multicast
 allocation, peer selection, the deploy guard — lives in
 `roles/acm_evpn/filter_plugins/` as plain Python precisely so it can be tested
