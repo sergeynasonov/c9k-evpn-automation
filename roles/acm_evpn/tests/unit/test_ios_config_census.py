@@ -157,7 +157,8 @@ class TestCensusDelta(unittest.TestCase):
         delta = ios_config_census_delta(FABRIC, EMPTY)
         self.assertEqual(
             set(delta),
-            {"vrfs", "svis", "evpn_instances", "vni_members", *UNDERLAY_CLASSES},
+            {"vrfs", "svis", "evpn_instances", "vni_members", "other_interfaces",
+             *UNDERLAY_CLASSES},
         )
         for d in delta.values():
             self.assertEqual(
@@ -266,13 +267,74 @@ class TestUnderlayZeroTolerance(unittest.TestCase):
         self.assertEqual(entry["removed"], ["Loopback60000"])
         self.assertTrue(entry["underlay"])
 
-    def test_switchports_are_tracked_too(self):
-        """Previously underlay_interfaces meant 'global table + addressed', so
-        an access port vanishing was invisible to the guard."""
+    def test_a_switchport_is_tracked_but_is_not_underlay(self):
+        """An access port vanishing must still be caught -- that is why the
+        underlay class was once widened to every interface. But it is not an
+        underlay interface, and treating it as one applied management-plane
+        severity to something that cannot cost the management plane. It belongs
+        to 'other_interfaces', judged by proportion.
+        """
         running = UNDERLAY_RUNNING + "interface GigabitEthernet1/0/5\n switchport mode access\n!\n"
+        census = ios_config_census(running)
+        self.assertIn("GigabitEthernet1/0/5", census["other_interfaces"])
+        self.assertNotIn("GigabitEthernet1/0/5", census["underlay_interfaces"])
+
+        # Sole member of its class, so removing it is 100% and still blocks --
+        # by proportion rather than by zero tolerance.
         v = ios_config_census_violations(running, UNDERLAY_RUNNING)
-        entry = next(x for x in v if x["klass"] == "underlay_interfaces")
+        entry = next(x for x in v if x["klass"] == "other_interfaces")
         self.assertIn("GigabitEthernet1/0/5", entry["removed"])
+        self.assertFalse(entry["underlay"])
+
+    def test_a_vrf_bound_svi_is_not_underlay(self):
+        """The case that blocked five switches. Vlan106 was a tenant SVI inside
+        VRF MEDICAL; it cannot carry the management session, because the session
+        does not live in that VRF."""
+        running = (UNDERLAY_RUNNING + "interface Vlan106\n vrf forwarding MEDICAL\n"
+                   " ip address 10.67.119.161 255.255.255.224\n!\n")
+        census = ios_config_census(running)
+        self.assertIn("Vlan106", census["other_interfaces"])
+        self.assertNotIn("Vlan106", census["underlay_interfaces"])
+
+    def test_an_unaddressed_interface_is_not_underlay(self):
+        running = UNDERLAY_RUNNING + "interface Vlan999\n no ip address\n shutdown\n!\n"
+        census = ios_config_census(running)
+        self.assertIn("Vlan999", census["other_interfaces"])
+        self.assertNotIn("Vlan999", census["underlay_interfaces"])
+
+    def test_ip_unnumbered_in_the_global_table_is_underlay(self):
+        """A routed uplink borrowing a loopback address is as load-bearing as
+        one with its own. The original rule matched only 'ip address ' and would
+        have missed it."""
+        running = (UNDERLAY_RUNNING + "interface TenGigabitEthernet1/1/3\n"
+                   " ip unnumbered Loopback0\n!\n")
+        census = ios_config_census(running)
+        self.assertIn("TenGigabitEthernet1/1/3", census["underlay_interfaces"])
+
+    def test_excluded_interfaces_are_not_scored_as_a_loss(self):
+        """The parameter was declared and silently ignored, so both callers were
+        passing values into a function that discarded them. A deliberately
+        pruned SVI must be exempt from EVERY class that names it -- including
+        'svis', or it is merely moved from one guard to another."""
+        running = (UNDERLAY_RUNNING + "interface Vlan106\n vrf forwarding MEDICAL\n"
+                   " ip address 10.67.119.161 255.255.255.224\n!\n")
+        pruned = ["interface Vlan106"]          # the form stale_headers uses
+
+        self.assertIn("Vlan106", ios_config_census(running)["other_interfaces"])
+        exempt = ios_config_census(running, pruned)
+        self.assertNotIn("Vlan106", exempt["other_interfaces"])
+        self.assertNotIn("Vlan106", exempt["svis"])
+
+        v = ios_config_census_violations(running, UNDERLAY_RUNNING,
+                                         exclude_interfaces=pruned)
+        self.assertEqual(v, [])
+
+    def test_a_bare_interface_name_is_accepted_too(self):
+        """underlay_excluded_interfaces lists bare names; stale_headers carries
+        the keyword. Both callers feed the same argument."""
+        running = UNDERLAY_RUNNING + "interface GigabitEthernet0/0\n ip address 10.66.117.9 255.255.255.192\n!\n"
+        census = ios_config_census(running, ["GigabitEthernet0/0"])
+        self.assertNotIn("GigabitEthernet0/0", census["underlay_interfaces"])
 
     def test_overlay_loss_still_uses_percentage(self):
         v = ios_config_census_violations(FABRIC, EMPTY)
