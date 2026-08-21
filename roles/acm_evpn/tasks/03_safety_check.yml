@@ -24,7 +24,7 @@
       {{ current_run_config.stdout[0]
          | ios_config_census_violations(_candidate,
                                         acm_safety_max_removal_pct,
-                                        underlay_excluded_interfaces) }}
+                                        _acm_not_a_loss) }}
     # The full object delta, not just the violations: 03b_predeploy_summary.yml
     # reports what this deploy adds and removes per switch, and recomputing it
     # there would mean reading the candidate off disk a second time.
@@ -33,6 +33,21 @@
   vars:
     _acm_candidate_file: "{{ playbook_dir }}/switch-configuration/{{ inventory_hostname }}-candidate-config.cfg"
     _candidate: "{{ lookup('file', _acm_candidate_file) }}"
+    # Interfaces whose absence from the candidate is NOT a loss, from two
+    # sources that mean the same thing to the guard:
+    #
+    #   underlay_excluded_interfaces  a template renders these itself
+    #   stale_headers                 THIS deploy prunes these on purpose,
+    #                                 because NetBox no longer has the VLAN
+    #
+    # The second is why a decommissioned tenant VLAN used to block the deploy.
+    # 02_render_configs.yml had already decided 'interface Vlan106' was a stale
+    # fabric SVI and put it in the prune list; the guard then saw the same
+    # interface missing from the candidate with no way to know that was the
+    # intent, and every switch carrying it refused.
+    _acm_not_a_loss: >-
+      {{ (underlay_excluded_interfaces | default([]))
+         + (stale_headers | default([]) | select('match', '^interface ') | list) }}
 
 # BGP ownership is by ASN: a neighbour in the fabric ASN is stripped from the
 # preserved config because the templates are expected to render it. If one is

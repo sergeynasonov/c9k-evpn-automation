@@ -12,10 +12,21 @@
           removed: {{ v.removed | join(', ') }}
       {% endfor %}
       {% if _acm_violations | selectattr('underlay') | list | length > 0 %}
-      An UNDERLAY object is among these. That is the management plane: if this
-      were applied and the extraction was wrong, the switch would be reachable
-      only by console. Check the running config against the extraction rules in
-      filter_plugins/ios_underlay.py before overriding.
+      A ZERO-TOLERANCE class is among these: an interface forwarding in the
+      GLOBAL table with an address, or an OSPF process. Those carry the
+      management plane, so if this were applied and the render were wrong the
+      switch would be reachable only by console, and no later run could repair
+      it. Any removal there blocks regardless of proportion.
+
+      A VRF-bound SVI, a switchport, or an unaddressed interface is NOT in that
+      class. Those appear under 'other_interfaces' and are judged by proportion,
+      because a later run can rebuild them. An interface this deploy prunes
+      deliberately -- a VLAN NetBox no longer has -- is not counted as a loss at
+      all.
+
+      Compare the running config against the candidate in
+      switch-configuration/{{ inventory_hostname }}-candidate-config.cfg before
+      overriding.
       {% else %}
       Check first that NetBox returned the data you expect -- in particular that
       every fabric VRF still has its 'l3vni' custom field set, since a VRF
