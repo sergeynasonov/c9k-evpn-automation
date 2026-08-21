@@ -43,7 +43,7 @@ enforced as tasks, before anything touches a device:
 
 | What the pattern selects | What happens |
 |---|---|
-| `deploy_target=<site>` also selects that site's **distribution switches**, which have the site like any other device | Their underlay **is** checked — see below — but nothing is rendered for them, and they are named in the output. The render step picks its template as border / spine / *else leaf*, so without this they would be handed a full EVPN **leaf** configuration |
+| `deploy_target=<site>` also selects that site's **distribution switches**, which have the site like any other device | Their underlay **is** checked — see below. Whether anything is *rendered* depends on the `fabric_spine` tag: an untagged one gets nothing and is named in the output, a tagged one is a fabric node and is rendered as a spine. The render step picks its template as border / spine / *else leaf*, so without this an untagged distribution switch would be handed a full EVPN **leaf** configuration |
 | The spine union is estate-wide, so it also pulls in **other fabrics' spines** | Dropped. The run works out which fabrics `deploy_target` actually names; the targeted fabric's own spines always stay, which is the whole point of the union |
 
 ---
@@ -112,16 +112,17 @@ Note the two questions are separate, and the answers differ:
 | Question | Answer |
 |---|---|
 | Which devices does this role **render** for? | Fabric nodes only — the rule above. |
-| Which devices does `underlay_readiness` **check**? | Everything in the fabric's transit path, distribution switches included. A distribution switch between a leaf and a border carries fabric traffic, so a wrong MTU or a missing PIM on it breaks the overlay exactly as it would on a leaf — it simply has no overlay configuration of its own. The `Loopback0`, `ip pim register-source` and `ip pim rp-address` checks all apply to it: the loopback is its OSPF router-id and management address, and PIM transits it. See the root README. |
- A NetBox holds plenty of
-ordinary sites (WAN kit, servers, campuses this automation does not manage);
-they are not candidate fabrics waiting to be configured, so they are passed over
-in silence rather than asked for an ASN and an anycast RP they will never
+| Which devices does `underlay_readiness` **check**? | `fabric_leaf`, `fabric_border` or `distribution_switch` — the whole transit path, tag or no tag. A distribution switch between a leaf and a border carries fabric traffic, so a wrong MTU or a missing PIM on it breaks the overlay exactly as it would on a leaf; it simply has no overlay configuration of its own. The `Loopback0`, `ip pim register-source` and `ip pim rp-address` checks all apply to it. See the root README. |
+
+A site holding **no** fabric node is not a fabric. A NetBox holds plenty of
+ordinary sites — WAN kit, servers, campuses this automation does not manage —
+and they are not candidate fabrics waiting to be configured, so they are passed
+over in silence rather than asked for an ASN and an anycast RP they will never
 have.
 
 #### What a fabric owns in NetBox
 
-**NetBox is the only source for all three. There is no global fallback** —
+**NetBox is the only source for all of these. There is no global fallback** —
 a single global value cannot describe more than one fabric, which is the whole
 point. A fabric missing any of them fails the run and names what is missing.
 
@@ -130,6 +131,7 @@ point. A fabric missing any of them fails the run and names what is missing.
 | **iBGP ASN** | One NetBox **ASN object on every site** in the fabric — the same one on all of them. Exactly one per site is definitional, not policy: every EVPN session in the fabric is iBGP inside it, so a site carrying two, or two sites disagreeing, is refused rather than resolved by picking a winner. Needs no GraphQL query — the inventory plugin fetches sites with the full serializer, so it already rides along in each device's `sites` hostvar. | The run is refused, naming the fabric. |
 | **Underlay anycast RP** | One **IPAddress per spine**, all the same address, each with NetBox's built-in **Anycast** role — which is what permits the duplicate — each tagged `underlay_anycast_rp`, and each assigned to that spine's RP loopback. The tag selects; the role permits. Scoping is free: IPAddress → Interface → Device → its fabric. | The run is refused — for a fabric with none at all, and for any single spine missing its own object, since the interface name comes from it. |
 | **Upstream ASN** | `upstream_asn` on each `vrf_l3_handoff_vlan` — per handoff, since a border can face a different upstream per tenant. | The render is refused, naming every offending VLAN. Rendering `remote-as` with nothing after it is a parser error on the switch, after the candidate has reached every border. |
+| **A spine and a border** | At least one device tagged `fabric_spine`, and at least one with the `fabric_border` role. Not a separate object to create — a property of the devices already modelled. | The run is refused, naming the fabric and what it does have. No spine means no anycast RP and no route reflector; no border means no path out of the fabric. |
 
 Because the RP interface comes from the same object as the address, the two can
 no longer drift apart — which is what two independent global values allowed. Within a fabric every spine's RP address must be **identical**;

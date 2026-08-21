@@ -341,9 +341,11 @@ honour.
 
 ### Every node — SNMPv3 *(optional)*
 
-The one block on this page you do **not** paste: `readiness.yml` configures it
-for you, in merge mode. It is here because it is *checked*, and because it is
-the only check a switch built exactly to this page can still fail.
+One of three blocks on this page you do **not** paste: `readiness.yml`
+configures it for you, in merge mode, along with syslog and NTP. All three are
+here because they are *checked*, and because they are the checks a switch built
+exactly to this page can still fail — the paste blocks above cover everything
+else.
 
 ```
 ip access-list standard SNMP-ACL
@@ -416,7 +418,8 @@ baseline's source-interface hygiene, not part of this enrolment.
 `deploy_evpn.yml`.** The readiness role also runs as a pre-flight inside
 `acm_evpn`, but that path only *checks* — it never configures. So a switch that
 has never had a standalone readiness run reports its SNMPv3 user and group
-missing, which looks like a Day-0 mistake and is really just an ordering one:
+missing, and its `logging` and `ntp server` lines with them. That looks like a
+Day-0 mistake and is really just an ordering one:
 
 ```bash
 ansible-playbook readiness.yml -e deploy_target=<new switch>   # configures, then checks
@@ -516,13 +519,14 @@ for it. The three checks that look VTEP-specific all still apply to one:
 | `ip pim register-source Loopback0` | PIM transits the switch, so it still registers |
 | `ip pim rp-address <anycast RP>` | Same reason — it needs to know the fabric's RP to forward multicast |
 
-**And nothing else.** Fabric leaves, fabric borders, spines and distribution
-switches are the whole of what this project contacts. A run scoped by site or
-site group selects everything in that site — servers, printers, wireless
-controllers — because `deploy_target` replaces the playbook's role-scoped
-default pattern rather than intersecting with it. Anything outside those roles
-is dropped before a single device is contacted, and **named while it is
-dropped**:
+**And nothing else.** Three device roles — `fabric_leaf`, `fabric_border` and
+`distribution_switch` — are the whole of what this project contacts. A spine is
+not a fourth: it is one of those three carrying the `fabric_spine` tag, which is
+why the tag never appears in this list. A run scoped by site or site group
+selects everything in that site — servers, printers, wireless controllers —
+because `deploy_target` replaces the playbook's role-scoped default pattern
+rather than intersecting with it. Anything outside those roles is dropped before
+a single device is contacted, and **named while it is dropped**:
 
 ```
 scope: 2 device(s) selected by the target but skipped — not a fabric role:
@@ -874,6 +878,7 @@ front-loads its checks. All of these run **before a switch is touched**:
 | Guard | Blocks on |
 |---|---|
 | Underlay readiness | A hand-built underlay that cannot carry the overlay — see [Phase 1](#checking-day-0-the-underlay_readiness-role) |
+| Incomplete fabric | A fabric with no switch tagged `fabric_spine`, or none with the `fabric_border` role. No spine means no anycast RP and no route reflector; no border means no path out of the fabric. Decided from inventory, so it fails before anything is contacted, and scoped to the fabrics the run actually reaches |
 | VNI validation | Out-of-range, duplicate or L2/L3-colliding VNIs — across the whole of one fabric, not just the switch being rendered |
 | Multicast validation | A missing, malformed or out-of-carve replication group; two segments of one fabric claiming the same group |
 | Anycast RP assertions | RP loopback disagreeing with the fabric's anycast RP, a spine switch missing it, or two spine switches in one fabric carrying **different** addresses |
@@ -918,10 +923,13 @@ Before changing anything, read **[CONTRIBUTING.md](CONTRIBUTING.md)** — it lis
 the failure modes that have actually cost outages here, and the Ansible
 mechanics that behave differently from how they read.
 
-Stdlib `unittest` only: no pytest, no live NetBox, no devices. One test
-(`test_fabric_resolve.py`) drives the real fabric-resolution tasks under
-`ansible-playbook` against static inventories, because that logic is Jinja
-rather than Python; it skips itself if `ansible-playbook` is not on `PATH`.
+Stdlib `unittest` only: no pytest, no live NetBox, no devices. Several of them
+drive **real task files** under `ansible-playbook` against static inventories,
+because much of this logic is Jinja rather than Python and `--syntax-check`
+evaluates none of it — fabric resolution and scope, the readiness summary, the
+MSDP and MTU checks, and optional SNMPv3/syslog enrolment. Each skips itself if
+`ansible-playbook` is not on `PATH`. See
+[CONTRIBUTING.md](CONTRIBUTING.md#testing-task-layer-logic-offline).
 The dense logic — the NetBox transform, underlay extraction, VNI and multicast
 allocation, peer selection, the deploy guard — lives in
 `roles/acm_evpn/filter_plugins/` as plain Python precisely so it can be tested
