@@ -273,12 +273,33 @@
     #
     # These carry commands, unlike the SNMP findings above: there is no
     # credential in a syslog line, so the remediation file can hold them.
+    #
+    # THE TRAP LEVEL IS NOT IN readiness_syslog_lines and is not checked against
+    # the running config, because on a live fabric it was not THERE: IOS-XE
+    # omits 'logging trap' whenever it matches the platform default, so a
+    # deployment asking for 'informational' had all eleven switches report it
+    # missing while 'show logging' confirmed it set. Compared against
+    # operational state instead. See defaults/main.yml.
+    #
+    # An empty reading is reported as "not readable" rather than folded into the
+    # mismatch text: the read is allowed to fail, and 'expected informational,
+    # got nothing' and 'expected informational, got warnings' send an operator
+    # to two different places.
     _syslog: >-
       {%- set bad = [] -%}
       {%- for line in readiness_syslog_lines | from_json if line not in _stanzas -%}
       {%-   set _ = bad.append({'msg': 'missing global: ' ~ line,
                                 'parents': [], 'lines': [line]}) -%}
       {%- endfor -%}
+      {%- set seen = _readiness_syslog_trap | default('', true) -%}
+      {%- if readiness_syslog_enrolled | bool
+             and seen != readiness_syslog_severity -%}
+      {%-   set _ = bad.append({
+              'msg': 'syslog trap level is '
+                     ~ (seen if seen else 'not readable')
+                     ~ ', expected ' ~ readiness_syslog_severity,
+              'parents': [], 'lines': [readiness_syslog_trap_line]}) -%}
+      {%- endif -%}
       {{ bad | to_json }}
 
     # --- NTP ---------------------------------------------------------------

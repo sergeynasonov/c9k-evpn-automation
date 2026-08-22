@@ -35,6 +35,11 @@
 - name: Configure SNMPv3 (when enrolled)
   ansible.builtin.import_tasks: 03_apply_snmp.yml
 
+# Not part of the baseline, because the line it sets is invisible to the
+# running config the baseline converges against. See 03b_apply_syslog.yml.
+- name: Set the syslog trap level (when enrolled)
+  ansible.builtin.import_tasks: 03b_apply_syslog.yml
+
 - name: Apply the platform baseline
   ansible.builtin.import_tasks: 04_apply_baseline.yml
 
