@@ -26,6 +26,7 @@ import sys
 import unittest
 
 import jinja2
+import yaml
 
 _ROLE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(_ROLE, "filter_plugins"))
@@ -278,6 +279,160 @@ class TestBorderMeshIsFabricScoped(unittest.TestCase):
         """A single-border fabric is legitimate and must not render a mesh to
         borders it does not have."""
         self.assertEqual(self.mesh_neighbours(self.render("rcore1", ["rcore1"])), [])
+
+
+class TestDhcpSnoopingVlanList(unittest.TestCase):
+    """A VLAN is snooped if and only if its SVI got a relay.
+
+    Both come from the same field -- 'ip helper-address global' from
+    dhcp_servers_ipv4 on the VLAN, and the snooping list from the presence of
+    that same key -- so the two cannot drift. Asserted rather than assumed,
+    because the pair is what makes snooping correct: snooping a VLAN with no
+    relay inspects traffic that will never carry a reply, and NOT snooping one
+    that has a relay drops the binding table the fabric relies on.
+    """
+
+    VLANS = {
+        100: {"name": "CORP_DATA", "prefix_ipv4": "10.67.118.128/27",
+              "vrf": "CORP", "dhcp_servers_ipv4": ["10.66.119.56", "10.66.119.57"]},
+        105: {"name": "L2-TestACM", "vrf": None},          # L2-only: no relay
+        200: {"name": "MEDICAL_DATA", "prefix_ipv4": "10.67.119.128/27",
+              "vrf": "MEDICAL", "dhcp_servers_ipv4": ["10.66.119.56"]},
+    }
+
+    # The SVIs are rendered from netbox_vlan_groups.vrfs, the snooping list from
+    # all_edge_vlans. Both are supplied here from the SAME dicts, so the test
+    # sees the pair the way a real render does.
+    VRFS = {
+        "CORP": {"l3vni": 20003, "core_vlans": {},
+                 "edge_vlans": {100: VLANS[100]}},
+        "MEDICAL": {"l3vni": 20004, "core_vlans": {},
+                    "edge_vlans": {200: VLANS[200]}},
+    }
+
+    def out(self, vlans=None, vrfs=None):
+        return _render("leaf_config.j2",
+                       self.VLANS if vlans is None else vlans,
+                       vrfs=self.VRFS if vrfs is None else vrfs)
+
+    def snooping_line(self, text):
+        for line in text.splitlines():
+            if line.startswith("ip dhcp snooping vlan "):
+                return line
+        return None
+
+    def test_only_vlans_with_a_relay_are_snooped(self):
+        self.assertEqual(self.snooping_line(self.out()),
+                         "ip dhcp snooping vlan 100,200")
+
+    def test_an_l2_only_vlan_is_never_snooped(self):
+        """It has no SVI and therefore no relay, so there is nothing to snoop."""
+        self.assertNotIn("105", self.snooping_line(self.out()))
+
+    def test_every_snooped_vlan_also_rendered_a_helper_address(self):
+        """The pair is the point: a snooped VLAN whose SVI has no relay is
+        inspecting traffic that can never carry a reply, and a relayed VLAN
+        left unsnooped loses the binding table."""
+        text = self.out()
+        listed = self.snooping_line(text).split("vlan ")[1]
+        for vid, vlan in self.VLANS.items():
+            has_relay = bool(vlan.get("dhcp_servers_ipv4"))
+            self.assertEqual(str(vid) in listed, has_relay, "vlan %d" % vid)
+            for ip in vlan.get("dhcp_servers_ipv4", []):
+                self.assertIn("ip helper-address global %s" % ip, text)
+
+    def test_no_relay_anywhere_renders_no_snooping_list(self):
+        """An empty list would render 'ip dhcp snooping vlan ' with no argument,
+        which IOS rejects."""
+        self.assertIsNone(
+            self.snooping_line(self.out({105: self.VLANS[105]}, vrfs={})))
+
+
+class TestCandidateOwnsTheSnoopingList(unittest.TestCase):
+    """The candidate must never carry two 'ip dhcp snooping vlan' lines.
+
+    Ownership of a preserved line is decided by an exact match against what the
+    render emits. That can never work for this one, because the VLAN list IS the
+    value: the render says '100-101,200,300' while a device that has since lost
+    a VLAN still says '100-101,106,200,300', so the device's copy is preserved
+    ALONGSIDE ours and IOS applies whichever comes last.
+
+    Measured on access1-1 on 2026-08-22 after VLAN 106 was deleted from NetBox:
+    the device kept 106 in its snooping list through two consecutive deploys,
+    and every run reported a change that never converged. The per-VLAN stanzas
+    pruned correctly -- this is a GLOBAL line that merely names VLAN ids, so no
+    VLAN 106 prune matched it.
+
+    The default is loaded from defaults/main.yml rather than restated here, so
+    this fails if the entry is removed, not merely if the mechanism breaks.
+    """
+
+    DEVICE = "\n".join([
+        "hostname access1-1",
+        "ip dhcp snooping",
+        "ip dhcp snooping vlan 100-101,106,200,300",
+        "interface GigabitEthernet1/0/5",
+        " switchport mode access",
+        "!",
+        "end",
+    ])
+    RENDERED = "\n".join([
+        "hostname access1-1",
+        "ip dhcp snooping",
+        "ip dhcp snooping vlan 100-101,200,300",
+    ])
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(_ROLE, "defaults", "main.yml")) as fh:
+            cls.defaults = yaml.safe_load(fh)
+
+    def candidate(self, prefixes=None):
+        env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(os.path.join(_ROLE, "templates")),
+            undefined=jinja2.ChainableUndefined,
+            trim_blocks=True, lstrip_blocks=True,
+        )
+        # Ansible's, not jinja2's, and implemented rather than stubbed: the
+        # ownership decision IS these three, so a stub would test nothing.
+        env.filters["regex_findall"] = lambda v, p: re.findall(p, v or "")
+        env.filters["regex_search"] = lambda v, p: (
+            (re.search(p, v or "") or [None]) and
+            (re.search(p, v or "").group(0) if re.search(p, v or "") else None))
+        env.tests["match"] = lambda v, p: bool(re.match(p, v or ""))
+        env.filters["ios_vlan_range"] = render_vlan_spec
+        return env.get_template("candidate_config.j2").render(
+            fabric_config=self.RENDERED,
+            current_run_config={"stdout": [self.DEVICE]},
+            candidate_prefix_managed=(self.defaults["candidate_prefix_managed"]
+                                      if prefixes is None else prefixes),
+            candidate_omit_regex=self.defaults.get("candidate_omit_regex", ""),
+            stale_headers=[], trunk_vlan_additions={},
+        )
+
+    def test_the_shipped_default_owns_the_line(self):
+        self.assertIn("ip dhcp snooping vlan ",
+                      "\n".join(self.defaults["candidate_prefix_managed"]))
+
+    def test_only_one_snooping_list_survives(self):
+        lines = [ln for ln in self.candidate().splitlines()
+                 if ln.startswith("ip dhcp snooping vlan ")]
+        self.assertEqual(lines, ["ip dhcp snooping vlan 100-101,200,300"])
+
+    def test_the_stale_vlan_does_not_come_back(self):
+        self.assertNotIn("106", self.candidate())
+
+    def test_without_the_prefix_rule_both_lines_survive(self):
+        """The failure this prevents, demonstrated rather than described."""
+        lines = [ln for ln in self.candidate(prefixes=[]).splitlines()
+                 if ln.startswith("ip dhcp snooping vlan ")]
+        self.assertEqual(len(lines), 2)
+
+    def test_unrelated_device_config_is_still_preserved(self):
+        """Owning the line must not widen into owning the interface below it."""
+        out = self.candidate()
+        self.assertIn("interface GigabitEthernet1/0/5", out)
+        self.assertIn(" switchport mode access", out)
 
 
 if __name__ == "__main__":
