@@ -279,7 +279,6 @@ readiness_syslog_severity: >-
 readiness_syslog_lines: >-
   {%- set out = [] -%}
   {%- if readiness_syslog_enrolled | bool -%}
-  {%-   set _ = out.append('logging trap ' ~ readiness_syslog_severity) -%}
   {%-   set _ = out.append('logging facility syslog') -%}
   {%-   for host in syslog_hosts -%}
   {%-     set _ = out.append('logging host ' ~ host) -%}
@@ -287,6 +286,34 @@ readiness_syslog_lines: >-
   {%- endif -%}
   {{ out | to_json }}
 
+# 'logging trap <severity>' is NOT in readiness_syslog_lines, and that is the
+# whole lesson of this variable existing.
+#
+# MEASURED ON HARDWARE 2026-08-22, on a C9300, a C9400 and a c9kv: with the
+# severity set to 'informational' the command takes effect -- 'show logging'
+# reports "Trap logging: level informational" -- and 'show running-config |
+# include ^logging' does not contain a 'logging trap' line at ALL. IOS-XE omits
+# it when it matches the platform default, and informational IS the platform
+# default. Every other severity renders normally.
+#
+# That makes this line CLASS 2 in the sense the role README uses: set, effective
+# and invisible to the running config, exactly like 'snmp-server user'. Leaving
+# it in the baseline produced the worst possible outcome, which is what a live
+# fabric showed: the push succeeded, the running-config check could not find it,
+# all eleven switches reported 'missing global: logging trap informational', the
+# run failed, and the next run pushed the same line again. Permanently.
+#
+# So it is verified from OPERATIONAL STATE and pushed only when that disagrees,
+# the same treatment and for the same reason as SNMPv3. See 01_gather.yml for
+# the read, 02_check.yml for the comparison and 03b_apply_syslog.yml for the
+# push.
+readiness_syslog_trap_line: >-
+  {%- if readiness_syslog_enrolled | bool -%}
+  {%-   set out = 'logging trap ' ~ readiness_syslog_severity -%}
+  {%- else -%}
+  {%-   set out = '' -%}
+  {%- endif -%}
+  {{ out }}
 # NTP servers, in the same shape and for the same reasons as syslog_hosts and
 # snmp_acl: 'ntp server' is a list-style command, so a list is what the
 # deployment should be describing. This replaced ntp_server_1 / ntp_server_2,

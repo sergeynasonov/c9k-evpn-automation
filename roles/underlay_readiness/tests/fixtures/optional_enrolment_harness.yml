@@ -52,6 +52,14 @@
         _readiness_snmp_users: "{{ snmp_users | default('') }}"
         _readiness_snmp_groups: "{{ snmp_groups | default('') }}"
 
+    # What 01_gather.yml derives from 'show logging'. An empty string is what a
+    # read that produced nothing normalises to, and it is also what an
+    # unenrolled deployment leaves behind -- the check tells the two apart by
+    # readiness_syslog_enrolled, not by this.
+    - name: Stand in for the syslog trap-level read
+      ansible.builtin.set_fact:
+        _readiness_syslog_trap: "{{ trap_seen | default('') }}"
+
     - name: Check SNMPv3
       ansible.builtin.import_tasks: snmp_check.yml
 
@@ -73,6 +81,7 @@
           syslog: "{{ readiness_syslog_enrolled | bool }}"
           cli: "{{ readiness_syslog_lines | from_json }}"
           severity: "{{ readiness_syslog_severity | default('', true) }}"
+          trap_line: "{{ readiness_syslog_trap_line | default('', true) }}"
           ntp_cli: "{{ readiness_ntp_lines | from_json }}"
 
     - name: Write the findings for the test to read
@@ -90,6 +99,7 @@
                   'syslog_enrolled': hv.enrolment.syslog,
                   'syslog_cli': hv.enrolment.cli,
                   'syslog_severity': hv.enrolment.severity,
+                  'syslog_trap_line': hv.enrolment.trap_line,
                   'snmp_msgs': (hv.snmp_findings | default([]))
                                 | map(attribute='msg') | list,
                   'syslog_msgs': (hv.syslog_findings | default([]))

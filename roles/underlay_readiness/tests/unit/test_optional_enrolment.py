@@ -111,7 +111,7 @@ def _site_assert_task():
     return [task]
 
 
-def run(deployment, stanzas=None, snmp_users="", snmp_groups=""):
+def run(deployment, stanzas=None, snmp_users="", snmp_groups="", trap_seen=""):
     """Run the real enrolment logic against one deployment.yml.
 
     'deployment' is the file's contents as a dict: a key absent from it is a
@@ -146,7 +146,8 @@ def run(deployment, stanzas=None, snmp_users="", snmp_groups=""):
         # absence, so the key is dropped instead.
         extra = {k: v for k, v in extra.items() if v is not None}
         extra.update({"stanzas": stanzas or {},
-                      "snmp_users": snmp_users, "snmp_groups": snmp_groups})
+                      "snmp_users": snmp_users, "snmp_groups": snmp_groups,
+                      "trap_seen": trap_seen})
 
         result_file = os.path.join(workdir, "result.json")
         env = dict(os.environ, ANSIBLE_ROLES_PATH=ROLES, ANSIBLE_NOCOLOR="1")
@@ -371,41 +372,52 @@ class TestSupersededNtpKeysAreNamed(unittest.TestCase):
 
 @unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
 class TestSyslogDeclared(unittest.TestCase):
-    """One uncommented variable, and the switch gets the three lines."""
+    """One uncommented variable, and the switch gets the lines."""
 
     @classmethod
     def setUpClass(cls):
         cls.fresh = run({"syslog_hosts": [COLLECTOR]})
+        # A configured switch needs BOTH halves now: the two rendered lines in
+        # its running config, and the trap level in its operational state.
         cls.configured = run(
             {"syslog_hosts": [COLLECTOR]},
-            stanzas={"logging trap notifications": [],
-                     "logging facility syslog": [],
-                     "logging host " + COLLECTOR: []})
+            stanzas={"logging facility syslog": [],
+                     "logging host " + COLLECTOR: []},
+            trap_seen="notifications")
         cls.two = run({"syslog_hosts": [COLLECTOR, COLLECTOR_2]})
 
     def test_declaring_a_collector_enrols_it(self):
         self.assertTrue(self.fresh["syslog_enrolled"])
 
-    def test_the_cli_is_the_three_lines_asked_for(self):
+    def test_the_cli_is_the_rendered_lines_only(self):
+        """'logging trap' is NOT here. It does not render into the running
+        config when it matches the platform default, so it is checked against
+        operational state and pushed by 03b_apply_syslog.yml instead."""
         self.assertEqual(self.fresh["syslog_cli"],
-                         ["logging trap notifications",
-                          "logging facility syslog",
+                         ["logging facility syslog",
                           "logging host " + COLLECTOR])
 
+    def test_the_trap_line_is_carried_separately(self):
+        self.assertEqual(self.fresh["syslog_trap_line"],
+                         "logging trap notifications")
+
     def test_a_switch_without_them_reports_all_three(self):
+        """Two rendered lines missing, plus the unreadable trap level."""
         self.assertEqual(len(self.fresh["syslog_msgs"]), 3,
                          self.fresh["syslog_msgs"])
 
     def test_each_finding_carries_its_command(self):
         """Unlike the SNMP findings, which carry none -- there is no credential
         in a syslog line, so the remediation file can be paste-ready."""
-        self.assertEqual(self.fresh["syslog_lines"], self.fresh["syslog_cli"])
+        self.assertEqual(self.fresh["syslog_lines"],
+                         self.fresh["syslog_cli"]
+                         + [self.fresh["syslog_trap_line"]])
 
     def test_a_switch_with_them_is_clean(self):
         self.assertEqual(self.configured["syslog_msgs"], [])
 
     def test_a_second_collector_needs_no_second_variable(self):
-        self.assertEqual(self.two["syslog_cli"][2:],
+        self.assertEqual(self.two["syslog_cli"][1:],
                          ["logging host " + COLLECTOR,
                           "logging host " + COLLECTOR_2])
 
@@ -469,7 +481,8 @@ class TestPushAndCheckAgree(unittest.TestCase):
     def test_and_a_switch_carrying_them_passes(self):
         pushed = baseline_logging(json.dumps(self.result["syslog_cli"]))
         configured = run({"syslog_hosts": [COLLECTOR, COLLECTOR_2]},
-                         stanzas={line: [] for line in pushed})
+                         stanzas={line: [] for line in pushed},
+                         trap_seen="notifications")
         self.assertEqual(configured["syslog_msgs"], [])
 
 
@@ -594,13 +607,14 @@ class TestSyslogSeverity(unittest.TestCase):
 
     def test_the_default_is_unchanged_for_a_file_that_never_heard_of_it(self):
         result = run({"syslog_hosts": [COLLECTOR]})
-        self.assertIn("logging trap notifications", result["syslog_cli"])
+        self.assertEqual(result["syslog_trap_line"],
+                         "logging trap notifications")
         self.assertFalse(result["assert_failed"], result["assert_msg"])
 
-    def test_a_keyword_reaches_the_cli(self):
+    def test_a_keyword_reaches_the_trap_line(self):
         result = run({"syslog_hosts": [COLLECTOR],
                       "syslog_severity": "debugging"})
-        self.assertIn("logging trap debugging", result["syslog_cli"])
+        self.assertEqual(result["syslog_trap_line"], "logging trap debugging")
         self.assertFalse(result["assert_failed"], result["assert_msg"])
 
     def test_zero_is_emergencies_and_not_the_default(self):
@@ -608,15 +622,14 @@ class TestSyslogSeverity(unittest.TestCase):
         every other optional key in this role uses -- severity 0 would silently
         become severity 5, and nothing downstream would look wrong."""
         result = run({"syslog_hosts": [COLLECTOR], "syslog_severity": 0})
-        self.assertIn("logging trap emergencies", result["syslog_cli"])
-        self.assertNotIn("logging trap notifications", result["syslog_cli"])
+        self.assertEqual(result["syslog_trap_line"], "logging trap emergencies")
 
     def test_a_number_never_reaches_the_device_as_a_number(self):
         """The reason the conversion happens in the role at all: this project
         has no verified answer for how IOS-XE renders 'logging trap 6' back."""
         result = run({"syslog_hosts": [COLLECTOR], "syslog_severity": 6})
-        self.assertIn("logging trap informational", result["syslog_cli"])
-        self.assertNotIn("logging trap 6", result["syslog_cli"])
+        self.assertEqual(result["syslog_trap_line"],
+                         "logging trap informational")
 
     def test_ansible_agrees_with_the_offline_resolver(self):
         """What licenses TestSyslogSeverityMapping to skip Ansible.
@@ -645,14 +658,75 @@ class TestSyslogSeverity(unittest.TestCase):
         for keyword in SEVERITIES:
             self.assertIn(keyword, message, message)
 
-    def test_the_baseline_pushes_what_the_check_demands(self):
-        """The single-definition property, exercised on a non-default value --
-        the case where a second copy of the CLI would have drifted."""
+    def test_the_baseline_does_not_push_the_trap_line(self):
+        """The fix for what a live fabric found on 2026-08-22.
+
+        With syslog_severity 6 the baseline pushed 'logging trap
+        informational', IOS-XE declined to render it back because it is the
+        platform default, and all eleven switches then reported it missing on
+        every run while 'show logging' confirmed it set. The trap line is out
+        of the baseline entirely now; 03b_apply_syslog.yml pushes it against
+        operational state instead."""
         result = run({"syslog_hosts": [COLLECTOR],
                       "syslog_severity": "critical"})
         pushed = baseline_logging(json.dumps(result["syslog_cli"]))
-        self.assertIn("logging trap critical", pushed)
-        self.assertEqual(result["syslog_lines"], result["syslog_cli"])
+        self.assertNotIn("logging trap critical", pushed)
+        for line in ("logging facility syslog", "logging host " + COLLECTOR):
+            self.assertIn(line, pushed)
+
+
+@unittest.skipIf(ANSIBLE is None, "ansible-playbook is not on PATH")
+class TestTheTrapLevelIsCheckedAgainstOperationalState(unittest.TestCase):
+    """Because the running config does not always contain it.
+
+    Measured on a C9300, a C9400 and a c9kv on 2026-08-22: with the severity
+    set to 'informational' -- the IOS-XE default -- 'show running-config |
+    include ^logging' has no 'logging trap' line at all, while 'show logging'
+    reports "Trap logging: level informational". Any check that reads the
+    running config for this is asserting on a line the device chose not to
+    print, and it fails a correctly-configured switch for ever.
+    """
+
+    RENDERED = {"logging facility syslog": [],
+                "logging host " + COLLECTOR: []}
+
+    def _findings(self, severity, seen):
+        return run({"syslog_hosts": [COLLECTOR], "syslog_severity": severity},
+                   stanzas=dict(self.RENDERED), trap_seen=seen)["syslog_msgs"]
+
+    def test_a_matching_level_is_clean(self):
+        self.assertEqual(self._findings("informational", "informational"), [])
+
+    def test_the_default_case_that_broke_the_fabric_is_clean(self):
+        """The exact combination that failed 11/11: severity 6 asked for,
+        nothing in the running config, informational in operational state."""
+        self.assertEqual(self._findings(6, "informational"), [])
+
+    def test_a_different_level_is_one_finding_naming_both(self):
+        findings = self._findings("informational", "warnings")
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("warnings", findings[0])
+        self.assertIn("informational", findings[0])
+
+    def test_an_unreadable_level_says_so_rather_than_guessing(self):
+        """'expected informational, got nothing' and 'expected informational,
+        got warnings' send an operator to two different places."""
+        findings = self._findings("informational", "")
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("not readable", findings[0])
+
+    def test_the_finding_carries_the_command_that_fixes_it(self):
+        result = run({"syslog_hosts": [COLLECTOR], "syslog_severity": 2},
+                     stanzas=dict(self.RENDERED), trap_seen="warnings")
+        self.assertEqual(result["syslog_lines"], ["logging trap critical"])
+
+    def test_an_unenrolled_deployment_is_not_asked_about_its_trap_level(self):
+        """No collector means no trap level to be wrong about, and an empty
+        reading must not become a finding on a fabric that opted out."""
+        result = run({}, trap_seen="")
+        self.assertFalse(result["syslog_enrolled"])
+        self.assertEqual(result["syslog_msgs"], [])
+        self.assertEqual(result["syslog_trap_line"], "")
 
 
 if __name__ == "__main__":

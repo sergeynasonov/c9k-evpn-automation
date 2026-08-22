@@ -421,13 +421,20 @@ a line the baseline re-pushes for ever. Anything outside those eight names and
 0–7 fails the run. Omit the key and it is `notifications`, which is what the
 role pushed when the line was a literal.
 
-Two things to know before raising it. `informational` is the IOS-XE **default**
-for this command, and whether a switch renders the line back when it matches the
-default has **not** been tested here — so after changing this key, run readiness
-twice and confirm the second run reports no baseline change. And severity 6 and
-7 are already on every switch regardless: `logging buffered` runs at level
-`debugging`, so `show logging` has them whatever the trap is set to. This key
-only decides whether they also cross the network to the collector.
+**`logging trap` is the one line here that is not checked against the running
+config**, and that is measured rather than cautious. On a C9300, a C9400 and a
+c9kv, IOS-XE omits the line from `show running-config` altogether when it
+matches the platform default — which `informational` is — while `show logging`
+confirms it in force. A live fabric found this the hard way: the baseline pushed
+it, the check could not see it, all eleven switches reported it missing on every
+run, and the next run pushed it again. It is now read from `show logging`,
+compared against what you asked for, and pushed only when they differ — the same
+treatment `snmp-server user` gets. All eight values work and nothing needs a
+second run to settle.
+
+Severity 6 and 7 are already on every switch regardless: `logging buffered` runs
+at level `debugging`, so `show logging` has them whatever the trap is set to.
+This key only decides whether they also cross the network to the collector.
 
 Unlike SNMPv3 this rides in the platform baseline rather than a task of its own,
 because all three lines *are* rendered back into `show running-config` —

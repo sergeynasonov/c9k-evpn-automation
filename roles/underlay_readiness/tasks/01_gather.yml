@@ -67,6 +67,32 @@
     - readiness_snmp_enrolled | bool
     - current_run_config is defined or _readiness_run.stdout is defined
 
+# The trap severity is invisible to 'show running-config' whenever it matches
+# the platform default, so operational state is the only honest place to read
+# it. See readiness_syslog_trap_line in defaults/main.yml for the measurement
+# that forced this.
+#
+# Its own task, non-fatal and enrolment-gated, for the three reasons the SNMPv3
+# read above is: ios_command raises on the first command that errors and returns
+# no stdout at all, so sharing a task would take an unrelated read down with it;
+# a switch that cannot answer should be REPORTED, not abort a fabric-wide run;
+# and a deployment with no collector has nothing to compare against.
+#
+# Skipping a task that REGISTERS is safe here for the same deliberate reason:
+# the derive step below treats a result with no stdout as "nothing was seen",
+# which is the answer an unenrolled deployment wants anyway.
+- name: Readiness — read the syslog trap level
+  cisco.ios.ios_command:
+    commands:
+      - "show logging"
+  register: _readiness_syslog_show
+  check_mode: false
+  ignore_unreachable: true
+  failed_when: false
+  when:
+    - readiness_syslog_enrolled | bool
+    - current_run_config is defined or _readiness_run.stdout is defined
+
 # 'database database-summary' rather than 'database router': a handful of lines
 # instead of one LSA dump per router, and it reports the per-area router count
 # directly, which is the only thing wanted.
@@ -184,6 +210,36 @@
     _readiness_snmp_groups: >-
       {{ _readiness_snmp.stdout[1]
          if (_readiness_snmp.stdout | default([]) | length) > 1 else '' }}
+    # The severity 'show logging' reports, or '' when nothing was read.
+    #
+    # The COMMA is the whole trick. 'show logging' says
+    #
+    #     Trap logging: level informational, 9819 message lines logged
+    #
+    # in its header, and the buffer underneath it can also hold
+    #
+    #     Aug 20 06:40:35.657: %SYS-4-LOG_CONFIG_CHANGE: Trap logging: level notifications
+    #
+    # every time somebody changed it -- so matching 'Trap logging: level (\w+)'
+    # alone reads a historical value out of the log and reports the switch
+    # misconfigured for something it did months ago. Only the status line has a
+    # trailing comma. Seen on core1, which carries three such messages.
+    # NO CAPTURE GROUP, deliberately. 'regex_search(pattern, '\\1')' does not
+    # return None when the pattern misses -- it raises, inside the filter, with
+    # "'NoneType' object has no attribute 'group'" -- so the unenrolled switch
+    # and the switch that could not be read both took the whole play down
+    # instead of landing on the empty-string path built for them. Matching the
+    # whole phrase and splitting it has no failure mode.
+    _readiness_syslog_trap: >-
+      {%- set raw = (_readiness_syslog_show.stdout | default([''])) | first
+                    | default('', true) -%}
+      {%- set hit = raw | regex_search('Trap logging: level \w+,') -%}
+      {%- if hit -%}
+      {%-   set out = hit.split()[3].rstrip(',') -%}
+      {%- else -%}
+      {%-   set out = '' -%}
+      {%- endif -%}
+      {{ out }}
   vars:
     _uplinks: >-
       {%- set out = [] -%}
