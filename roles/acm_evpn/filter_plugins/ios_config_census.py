@@ -56,24 +56,115 @@ _ALWAYS_PRESENT = {"vrfs": {"Mgmt-vrf"}}
 # automation loses its own way back in and the fix becomes a console cable.
 # A percentage threshold is the wrong instrument for that: one interface out
 # of forty is only 2.5%, and it can still be the one carrying the session.
+#
+# THAT ARGUMENT IS ONLY TRUE OF THE NARROW SET, which is why the set is narrow
+# again. For a while 'underlay_interfaces' meant every 'interface' line on the
+# box, widened so that a vanishing access port would also be caught. The
+# reasoning was that an access port had been invisible to the guard -- true,
+# but it was invisible because an access port is not an underlay interface, so
+# the definition was doing its job rather than failing at it. The cost was
+# real: a tenant SVI inside a VRF then inherited management-plane severity and
+# blocked five switches over a deliberately decommissioned VLAN. The access
+# port concern is legitimate and is kept, in 'other_interfaces', judged by
+# proportion like every other class that can be rebuilt by a later run.
 UNDERLAY_CLASSES = ("underlay_interfaces", "ospf_processes")
+
+# What makes an interface underlay: it forwards in the GLOBAL table and it has
+# an address. A 'vrf forwarding' line disqualifies it -- a tenant SVI cannot
+# carry the management session by definition, because the session does not live
+# in that VRF.
+_VRF_MARKER = "vrf forwarding "
+# 'ip unnumbered' counts. A routed uplink borrowing a loopback address is as
+# load-bearing as one with its own, and the old rule matched only 'ip address ',
+# so it would have missed exactly that case. 'no ip address' does not match:
+# the line starts with 'no '.
+_ADDRESS_MARKERS = ("ip address ", "ip unnumbered ")
+
+
+def _normalise_exclusions(names: Optional[Sequence[str]]) -> set:
+    """Bare interface names from either 'Vlan106' or 'interface Vlan106'.
+
+    Callers supply both forms: the role's own defaults list bare names, while a
+    prune list is built from configuration headers and carries the keyword.
+    """
+    out = set()
+    for raw in names or []:
+        name = str(raw).strip()
+        if name.startswith("interface "):
+            name = name[len("interface "):].strip()
+        if name:
+            out.add(name)
+    return out
+
+
+def _interface_blocks(config_text: str):
+    """(name, body) per 'interface X' block, body stripped of indentation.
+
+    The census used to match only the header line, which is why 'vrf
+    forwarding' was never seen: the classification could not read it. IOS
+    indents children by one space and closes a block with an unindented '!',
+    so an unindented line ends the block.
+    """
+    blocks, name, body = [], None, []
+    for line in (config_text or "").splitlines():
+        if line.startswith("interface "):
+            if name is not None:
+                blocks.append((name, body))
+            name, body = line[len("interface "):].strip(), []
+        elif name is not None:
+            if line.startswith((" ", "\t")):
+                body.append(line.strip())
+            else:
+                blocks.append((name, body))
+                name, body = None, []
+    if name is not None:
+        blocks.append((name, body))
+    return blocks
+
+
+def _is_underlay_interface(body: Sequence[str]) -> bool:
+    if any(line.startswith(_VRF_MARKER) for line in body):
+        return False
+    return any(line.startswith(marker)
+               for line in body for marker in _ADDRESS_MARKERS)
 
 
 def ios_config_census(config_text: str,
                       exclude_interfaces: Optional[Sequence[str]] = None) -> Dict[str, List[str]]:
-    """Identifiers of each tracked object class present in a configuration."""
+    """Identifiers of each tracked object class present in a configuration.
+
+    ``exclude_interfaces`` drops interfaces from every class that counts them.
+    Two callers need it and they mean the same thing by it -- do not score a
+    removal here -- for different reasons: interfaces a template renders itself,
+    and interfaces this deploy prunes ON PURPOSE. Without the second, every
+    routine VLAN decommission reads as an unintended loss. The parameter was
+    declared and silently ignored before, so both callers were passing values
+    into a function that discarded them.
+    """
+    skip = _normalise_exclusions(exclude_interfaces)
+
     census: Dict[str, List[str]] = {}
     for name, pattern in _PATTERNS.items():
         found = set(re.findall(pattern, config_text or ""))
         found -= _ALWAYS_PRESENT.get(name, set())
         census[name] = sorted(found)
+    # svis are named by interface, so an exclusion applies there too. Otherwise
+    # a deliberately pruned SVI is exempt from the interface classes and still
+    # scored as a loss under 'svis'.
+    census["svis"] = [s for s in census["svis"] if s not in skip]
 
-    # Every interface on the box, zero tolerance. Under the inverted ownership
-    # model the candidate contains everything the device has, so an interface
-    # going missing is a bug in the strip rather than an intended change --
-    # previously this reused the extraction rules, which no longer exist.
-    census["underlay_interfaces"] = sorted(
-        set(re.findall(r"(?m)^interface (\S+)", config_text or "")))
+    underlay, other = [], []
+    for name, body in _interface_blocks(config_text):
+        if name in skip:
+            continue
+        (underlay if _is_underlay_interface(body) else other).append(name)
+
+    census["underlay_interfaces"] = sorted(set(underlay))
+    # Switchports, VRF-bound SVIs, unaddressed and shutdown interfaces. Losing
+    # one silently is still worth catching -- that concern is what widened the
+    # underlay class in the first place -- but it cannot strand a switch behind
+    # a console cable, so it is scored by proportion rather than zero tolerance.
+    census["other_interfaces"] = sorted(set(other))
     census["ospf_processes"] = sorted(
         set(re.findall(r"(?m)^router (ospfv?3? \S+)", config_text or ""))
     )
