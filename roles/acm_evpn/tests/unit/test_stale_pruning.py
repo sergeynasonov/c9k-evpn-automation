@@ -132,6 +132,66 @@ class TestStalePruning(unittest.TestCase):
                       prune(trm_stale_loopbacks=["interface Loopback20003"]))
 
 
+class TestAVrfTeardownIsComplete(unittest.TestCase):
+    """Removing a VRF must leave NOTHING behind, and the objects are tested
+    together rather than one at a time.
+
+    Each piece already had a test. What none of them asserted is that a whole
+    VRF leaves cleanly, and "one object left behind" is exactly how the last
+    three defects here escaped: TRM loopbacks that made disabling TRM a one-way
+    door, a DHCP snooping list that kept a deleted VLAN for two days, and a
+    handoff VLAN that stayed permitted on a border trunk forever. Every one was
+    a render that stopped emitting something while preserve-by-default kept it.
+
+    Modelled on VRF SECURITY as actually deployed on 2026-08-22: edge VLAN 300,
+    handoffs 397 and 398, core VLAN 399, and Loopback20005 for TRM.
+    """
+
+    DEV_VLANS = ["300", "397", "398", "399"]
+
+    def teardown(self):
+        return prune(
+            _dev_fabric_vrfs=["CORP", "SECURITY"], _new_fabric_vrfs=["CORP"],
+            _dev_evi_vlans=["300"], _dev_cfg_vlans=["300"],
+            _dev_fabric_svis=self.DEV_VLANS,
+            _new_evi_vlans=[], _new_cfg_vlans=[],
+            trm_stale_loopbacks=["interface Loopback20005"],
+            fabric_config="",
+        )
+
+    def test_the_vrf_definition_goes(self):
+        self.assertIn("vrf definition SECURITY", self.teardown())
+
+    def test_every_svi_goes_edge_handoff_and_core(self):
+        out = self.teardown()
+        for vid in self.DEV_VLANS:
+            self.assertIn("interface Vlan" + vid, out, vid)
+
+    def test_every_vlan_definition_goes(self):
+        out = self.teardown()
+        for vid in self.DEV_VLANS:
+            self.assertIn("vlan " + vid, out, vid)
+
+    def test_the_edge_vlans_evpn_instance_goes(self):
+        """Only the edge VLAN carries one -- a handoff has no VNI and a core
+        VLAN carries the L3VNI rather than an EVI."""
+        out = self.teardown()
+        self.assertIn("l2vpn evpn instance 300 vlan-based", out)
+        self.assertIn("vlan configuration 300", out)
+
+    def test_the_trm_loopback_goes(self):
+        """The documented one-way door: preserve-by-default would keep
+        Loopback20005, 'ip multicast-routing vrf' and 'ip pim vrf' forever."""
+        self.assertIn("interface Loopback20005", self.teardown())
+
+    def test_a_surviving_vrf_loses_nothing(self):
+        """CORP stays enrolled, so nothing of its may appear in the teardown."""
+        out = self.teardown()
+        self.assertNotIn("vrf definition CORP", out)
+        for vid in ("100", "101", "197", "199"):
+            self.assertNotIn("interface Vlan" + vid, out, vid)
+
+
 if __name__ == "__main__":
     unittest.main()
 

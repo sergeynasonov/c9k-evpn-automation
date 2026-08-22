@@ -395,6 +395,48 @@ class TestTrmMdtBlock(unittest.TestCase):
         self.assertNotIn("mdt ", out)
 
 
+class TestARemovedVrfStopsBeingRendered(unittest.TestCase):
+    """The half of a VRF teardown that is NOT a prune.
+
+    stale_headers strips what the device has and the render no longer emits.
+    But 'interface nve1' and 'router bgp' are regenerated wholesale, so a
+    removed VRF leaves them by simply not being rendered -- and nothing checked
+    that. A tenant address-family or an NVE member surviving a decommission
+    would be invisible to any traffic test, which is precisely how the last
+    three defects here went unnoticed.
+    """
+
+    VRFS = {
+        "CORP": {"l3vni": 20003, "core_vlans": {199: {}}, "edge_vlans": {},
+                 "handoff_vlans": {}},
+        "SECURITY": {"l3vni": 20005, "core_vlans": {399: {}}, "edge_vlans": {},
+                     "handoff_vlans": {}},
+    }
+
+    def render(self, vrfs):
+        return _render("leaf_config.j2", {}, vrfs=vrfs)
+
+    def test_both_vrfs_render_while_both_are_enrolled(self):
+        out = self.render(self.VRFS)
+        self.assertIn("address-family ipv4 vrf SECURITY", out)
+        self.assertIn("vrf SECURITY", out)
+
+    def test_a_removed_vrf_renders_no_bgp_address_family(self):
+        out = self.render({"CORP": self.VRFS["CORP"]})
+        self.assertNotIn("address-family ipv4 vrf SECURITY", out)
+        self.assertIn("address-family ipv4 vrf CORP", out)
+
+    def test_a_removed_vrf_renders_no_nve_member(self):
+        """'member vni <l3vni> vrf SECURITY' under interface nve1."""
+        out = self.render({"CORP": self.VRFS["CORP"]})
+        self.assertNotIn("vrf SECURITY", out)
+
+    def test_a_removed_vrf_renders_no_core_vlan_svi(self):
+        out = self.render({"CORP": self.VRFS["CORP"]})
+        self.assertNotIn("interface Vlan399", out)
+        self.assertIn("interface Vlan199", out)
+
+
 class TestCandidateOwnsTheSnoopingList(unittest.TestCase):
     """The candidate must never carry two 'ip dhcp snooping vlan' lines.
 
