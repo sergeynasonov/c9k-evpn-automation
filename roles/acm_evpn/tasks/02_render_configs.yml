@@ -275,57 +275,34 @@
       {%- endfor -%}
       {{ out | unique }}
 
-# The handoff trunk keeps its own allowed-VLAN list; we only add what this
-# border must carry. candidate_config.j2 emits these AFTER the preserved
-# interface, so the 'add' is not overwritten by the base list before it.
-    trunk_vlan_additions: >-
-      {%- set handoff = [] -%}
-      {%- for _vrf, vrf_data in netbox_vlan_groups.vrfs.items() -%}
-      {%-   for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags -%}
-      {%-     set _ = handoff.append(vid | int) -%}
-      {%-   endfor -%}
-      {%- endfor -%}
-      {%- set underlay_svis = (current_run_config.stdout[0]
-            | regex_findall('(?m)^interface Vlan(\\d+)'))
-            | difference(_dev_fabric_svis) | map('int') | list -%}
-      {%- set out = {} -%}
-      {%- set ns = namespace(cur='') -%}
-      {%- for line in current_run_config.stdout[0].splitlines() -%}
-      {%-   if line.startswith('interface ') -%}
-      {%-     set ns.cur = line[10:] | trim -%}
-      {%-   elif not line.startswith(' ') -%}
-      {%-     set ns.cur = '' -%}
-      {%-   elif ns.cur and line.strip().startswith('switchport trunk allowed vlan ') -%}
-      {%-     set spec = line.strip().split('vlan ')[-1] | replace('add ', '') -%}
-      {%-     set on_trunk = spec.split(',') | map('trim') | select('match', '^\\d+$')
-                             | map('int') | list -%}
-      {%-     if on_trunk | intersect(underlay_svis) | length > 0 and handoff | length > 0 -%}
-      {%-       set missing = handoff | difference(on_trunk) -%}
-      {%-       if missing | length > 0 -%}
-      {%-         set _ = out.update({ns.cur: missing}) -%}
-      {%-       endif -%}
-      {%-     endif -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {{ out }}
-
-# ADDING A VRF PUTS ITS HANDOFF VLAN ON THE BORDER TRUNK. Removing one has to
-# take it off again, and until now nothing did: the block above computes only
-# what is MISSING from the trunk, so a decommissioned VRF left its handoff VLAN
-# permitted there forever. Same one-way door as the TRM loopbacks and the DHCP
-# snooping list -- the render stops emitting it, and preserve-by-default keeps
-# what the render does not mention.
+# THE HANDOFF TRUNK'S ALLOWED-VLAN LIST, RENDERED IN FULL.
 #
-# OWNERSHIP IS THE SAME TEST stale_headers uses, and it is what makes this safe
-# to do automatically: a VLAN is removed only if the DEVICE carries it as a
-# fabric SVI and the render no longer emits it. The underlay VLAN has no fabric
-# SVI on a border, so it can never enter this set -- which matters more than
-# usual here, because that trunk is how the automation reaches a border at all.
+# It used to emit 'switchport trunk allowed vlan add <missing>' and, briefly, a
+# matching 'remove'. Both are IMPERATIVE: they describe a transition, so they
+# only do anything if the render happens to be present at the moment the change
+# occurs. Tearing VRF SECURITY down on 2026-08-23 proved the cost -- the
+# teardown was clean everywhere else, 397 stayed permitted on core1's trunk
+# because no removal existed yet, and by the following deploy 'interface
+# Vlan397' was gone, so an SVI-based test could never match it again. The entry
+# was orphaned permanently by a repair that only worked during the event.
 #
-# Ranges: a device rendering '197-198' is not expanded, so a stale VLAN inside a
-# range is missed rather than wrongly removed. Under-parsing is the safe
-# direction for a removal and is left as it is.
-    trunk_vlan_removals: >-
+# A FINAL LIST IS STATE, and ACM is a configuration replacement -- give it the
+# list this trunk should carry and let it work out the delta. Additions and
+# removals both fall out for free, and the result is self-healing: whatever the
+# trunk looks like now, the next deploy reconciles it.
+#
+# desired = (what is on the trunk AND still in the device's VLAN database,
+#            minus fabric VLANs the render has dropped)
+#           + (the handoff VLANs this device renders)
+#
+# Each term earns its place. The database test drops an entry for a VLAN that no
+# longer exists -- which is exactly 397's state now, so it self-repairs without
+# anyone touching the switch. The 'gone' term catches the same VLAN one run
+# EARLIER, while its SVI is still being pruned. And keeping everything else the
+# trunk carries is what protects the underlay VLAN and any hand-configured one:
+# 98 is in the device's database and is not a fabric SVI, so it survives both
+# tests. Nothing is dropped for being unrecognised.
+    _trunk_state: >-
       {%- set handoff = [] -%}
       {%- for _vrf, vrf_data in netbox_vlan_groups.vrfs.items() -%}
       {%-   for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags -%}
@@ -334,9 +311,20 @@
       {%- endfor -%}
       {%- set _new_defs = fabric_config | regex_findall('(?m)^vlan ([0-9]+)$')
                           | map('int') | list -%}
+      {#- IOS writes 'vlan 98 ' with a trailing space on some releases. -#}
+      {%- set _dev_defs = current_run_config.stdout[0]
+                          | regex_findall('(?m)^vlan ([0-9]+)\\s*$')
+                          | map('int') | list -%}
       {%- set gone = _dev_fabric_svis | map('int') | list
                      | difference(handoff) | difference(_new_defs) -%}
-      {%- set out = {} -%}
+      {%- set underlay_svis = (current_run_config.stdout[0]
+            | regex_findall('(?m)^interface Vlan(\\d+)'))
+            | difference(_dev_fabric_svis) | map('int') | list -%}
+      {#- IOS wraps a long allowed list onto continuation lines ('...allowed vlan
+          1,2,3' then '...allowed vlan add 4,5'), so accumulate per interface
+          rather than reading a single line. Taking only the last one would see
+          a fraction of the trunk and delete the rest. -#}
+      {%- set seen = {} -%}
       {%- set ns = namespace(cur='') -%}
       {%- for line in current_run_config.stdout[0].splitlines() -%}
       {%-   if line.startswith('interface ') -%}
@@ -344,14 +332,47 @@
       {%-   elif not line.startswith(' ') -%}
       {%-     set ns.cur = '' -%}
       {%-   elif ns.cur and line.strip().startswith('switchport trunk allowed vlan ') -%}
-      {%-     set spec = line.strip().split('vlan ')[-1] | replace('add ', '') -%}
-      {%-     set on_trunk = spec.split(',') | map('trim') | select('match', '^\\d+$')
-                             | map('int') | list -%}
-      {%-     set stale = on_trunk | intersect(gone) -%}
-      {%-     if stale | length > 0 -%}
-      {%-       set _ = out.update({ns.cur: stale}) -%}
+      {%-     set spec = line.strip()[30:] | replace('add ', '') -%}
+      {%-     set vids = spec.split(',') | map('trim') | select('match', '^\\d+$')
+                         | map('int') | list -%}
+      {%-     set _ = seen.update({ns.cur: seen.get(ns.cur, []) + vids}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set out = {} -%}
+      {%- for intf, on_trunk in seen.items() -%}
+      {#- Only a trunk carrying an underlay SVI's VLAN is a handoff trunk.
+          Without this the render would claim every trunk on the box. -#}
+      {%-   if on_trunk | intersect(underlay_svis) | length > 0 -%}
+      {%-     set keep = on_trunk | intersect(_dev_defs) | difference(gone) -%}
+      {%-     set desired = (keep + handoff) | unique | sort -%}
+      {%-     if desired | length > 0 -%}
+      {%-       set _ = out.update({intf: {
+                    'now': on_trunk | unique | sort,
+                    'desired': desired,
+                    'add': desired | difference(on_trunk) | sort,
+                    'drop': on_trunk | unique | difference(desired) | sort}}) -%}
       {%-     endif -%}
       {%-   endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+# Two views of that one scan: the list the template renders, and -- for the
+# pre-deploy summary -- only the trunks that actually change. The summary used
+# to print the additions, which were empty in the steady state; a full list
+# printed unconditionally would put an identical line on every border on every
+# run and bury the entries that matter.
+- name: Split the trunk state into the render list and the change summary
+  ansible.builtin.set_fact:
+    trunk_vlan_final: >-
+      {%- set out = {} -%}
+      {%- for intf, st in _trunk_state.items() -%}
+      {%-   set _ = out.update({intf: st.desired}) -%}
+      {%- endfor -%}
+      {{ out }}
+    trunk_vlan_delta: >-
+      {%- set out = {} -%}
+      {%- for intf, st in _trunk_state.items() if st.add or st.drop -%}
+      {%-   set _ = out.update({intf: {'add': st.add, 'drop': st.drop}}) -%}
       {%- endfor -%}
       {{ out }}
 

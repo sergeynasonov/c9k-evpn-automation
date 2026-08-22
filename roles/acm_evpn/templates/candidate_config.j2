@@ -16,7 +16,14 @@
       preserve-by-default does not become preserve-forever. Computed in
       tasks/02_render_configs.yml.
     * a trailer for config that must land AFTER the preserved block, currently
-      the handoff trunk's allowed-VLAN additions.
+      the handoff trunk's allowed-VLAN list.
+    * CHILD-line ownership. Everything above decides ownership per STANZA, on
+      the unindented header. That is too coarse for the handoff trunk: we own
+      one line inside an interface whose other lines (mode, description, port
+      security) are the operator's. So a stanza we re-emit into has its owned
+      child lines stripped while the rest of it is preserved -- scoped to the
+      interfaces in trunk_vlan_final, and to nothing else, so an unmanaged
+      trunk elsewhere on the box keeps its allowed list untouched.
     * candidate_omit_regex: stanzas 'acm replace' looks after by itself and
       which therefore only add noise to the candidate -- the Cisco licensing
       trustpoint and its certificate chain. ACM keeps these whether or not the
@@ -59,7 +66,7 @@
 {%   endfor %}
 {% endfor %}
 {% set kept = [] %}
-{% set ns = namespace(skip=false) %}
+{% set ns = namespace(skip=false, intf='') %}
 {% for line in current_run_config.stdout[0].splitlines() %}
 {%   if line == '!' or not line.strip() %}
 {#     stanza separator: keep one, never a run of them #}
@@ -72,6 +79,10 @@
 {#     running-config preamble, comments and trailing 'end': never emitted #}
 {%   else %}
 {%     if not line.startswith(' ') %}
+{#       Track the stanza we are inside, for the child-line test below. Set on
+         every unindented line, so leaving an interface clears it. #}
+{%       set ns.intf = (line | trim)[10:] | trim
+                       if (line | trim).startswith('interface ') else '' %}
 {%       set prefix_hit = [] %}
 {%       for p in managed_prefixes %}
 {%         if (line | trim).startswith(p) %}{% set _ = prefix_hit.append(p) %}{% endif %}
@@ -92,7 +103,13 @@
                         or (candidate_omit_regex | length > 0
                             and line | trim is match(candidate_omit_regex)) %}
 {%     endif %}
-{%     if not ns.skip %}
+{#     A child line we render ourselves. Dropped from the preserved copy so the
+       candidate carries ONE allowed-VLAN statement, not the device's and ours
+       relying on last-one-wins -- the failure 'ip dhcp snooping vlan' hit. #}
+{%     set child_owned = ns.intf in (trunk_vlan_final | default({}))
+                         and line.startswith(' ')
+                         and (line | trim).startswith('switchport trunk allowed vlan ') %}
+{%     if not ns.skip and not child_owned %}
 {%       set _ = kept.append(line) %}
 {%     endif %}
 {%   endif %}
@@ -101,26 +118,22 @@
 {% if kept and kept[-1] != '!' %}
 !
 {% endif %}
-{% if trunk_vlan_additions %}
-! --- handoff trunk: VLANs this border must carry. Emitted after the preserved
-!     interface so the 'add' is not overwritten by the base allowed list ---
-{% for intf, vids in trunk_vlan_additions.items() %}
-interface {{ intf }}
- switchport trunk allowed vlan add {{ vids | ios_vlan_range }}
+{% if trunk_vlan_final %}
+! --- handoff trunk: the full list of VLANs this border's trunk should carry ---
 !
-{% endfor %}
-{% endif %}
-{% if trunk_vlan_removals %}
-! --- handoff trunk: VLANs of VRFs this fabric no longer has. Adding a VRF puts
-!     its handoff VLAN here, so removing one has to take it off again --
-!     otherwise a decommissioned VRF stays permitted on the trunk forever.
+!     A LIST, not 'add'/'remove'. Those are imperative -- they describe a
+!     transition, so they only work if the render is present at the instant the
+!     change happens. A VRF torn down while no removal existed left its handoff
+!     VLAN permitted forever, because by the next deploy the SVI that would have
+!     identified it was already gone. State has no such window: whatever the
+!     trunk carries now, this reconciles it, and ACM computes the delta.
 !
-!     'remove', never a rewritten allowed list: the underlay VLAN shares this
-!     trunk and is how the automation reaches a border at all. Naming only what
-!     goes makes it impossible to drop by accident, which a full list would not.
-{% for intf, vids in trunk_vlan_removals.items() %}
+!     The list is built from the trunk's own contents (see 02_render_configs),
+!     so the underlay VLAN this switch is managed over is carried through by
+!     construction. The preserved copy of this line is stripped above.
+{% for intf, vids in trunk_vlan_final.items() %}
 interface {{ intf }}
- switchport trunk allowed vlan remove {{ vids | ios_vlan_range }}
+ switchport trunk allowed vlan {{ vids | ios_vlan_range }}
 !
 {% endfor %}
 {% endif %}

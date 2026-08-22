@@ -437,6 +437,92 @@ class TestARemovedVrfStopsBeingRendered(unittest.TestCase):
         self.assertIn("interface Vlan199", out)
 
 
+class TestCandidateOwnsTheTrunkAllowedList(unittest.TestCase):
+    """A rendered CHILD line must replace the device's copy, not join it.
+
+    Ownership everywhere else in the candidate is decided per STANZA, on the
+    unindented header, and the whole stanza is then either ours or preserved.
+    The handoff trunk breaks that: we own exactly one line inside an interface
+    whose mode, description and port security belong to the operator.
+
+    Emitting a full allowed list without stripping the device's would put two
+    'switchport trunk allowed vlan' statements in the same interface and leave
+    the result to whichever IOS reads last -- the identical failure mode as the
+    DHCP snooping list above, which took two non-converging deploys to spot.
+
+    The strip is scoped to the interfaces the render actually re-emits into.
+    Any other trunk on the box keeps its allowed list untouched.
+    """
+
+    DEVICE = "\n".join([
+        "hostname core1",
+        "interface GigabitEthernet1/0/1",
+        " description handoff",
+        " switchport trunk allowed vlan 98,197,297,397",
+        " switchport mode trunk",
+        "!",
+        "interface GigabitEthernet1/0/9",
+        " description operator trunk, not ours",
+        " switchport trunk allowed vlan 700,701",
+        " switchport mode trunk",
+        "!",
+        "end",
+    ])
+
+    def candidate(self, final):
+        env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(os.path.join(_ROLE, "templates")),
+            undefined=jinja2.ChainableUndefined,
+            trim_blocks=True, lstrip_blocks=True,
+        )
+        env.filters["regex_findall"] = lambda v, p: re.findall(p, v or "")
+        env.filters["regex_search"] = lambda v, p: (
+            re.search(p, v or "").group(0) if re.search(p, v or "") else None)
+        env.tests["match"] = lambda v, p: bool(re.match(p, v or ""))
+        env.filters["ios_vlan_range"] = render_vlan_spec
+        return env.get_template("candidate_config.j2").render(
+            fabric_config="hostname core1\n",
+            current_run_config={"stdout": [self.DEVICE]},
+            candidate_prefix_managed=[], candidate_omit_regex="",
+            stale_headers=[], trunk_vlan_final=final,
+        )
+
+    def _allowed(self, out, intf):
+        lines, cur = [], ""
+        for ln in out.splitlines():
+            if ln.startswith("interface "):
+                cur = ln[10:].strip()
+            elif not ln.startswith(" "):
+                cur = ""
+            elif cur == intf and ln.strip().startswith(
+                    "switchport trunk allowed vlan "):
+                lines.append(ln.strip())
+        return lines
+
+    def test_exactly_one_allowed_list_survives(self):
+        out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 297]})
+        self.assertEqual(self._allowed(out, "GigabitEthernet1/0/1"),
+                         ["switchport trunk allowed vlan 98,197,297"])
+
+    def test_the_rest_of_the_interface_is_preserved(self):
+        out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 297]})
+        self.assertIn(" description handoff", out)
+        self.assertIn(" switchport mode trunk", out)
+
+    def test_a_trunk_we_do_not_render_keeps_its_list(self):
+        out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 297]})
+        self.assertEqual(self._allowed(out, "GigabitEthernet1/0/9"),
+                         ["switchport trunk allowed vlan 700,701"])
+
+    def test_nothing_is_stripped_when_nothing_is_rendered(self):
+        """If the fact is empty -- a non-border, or a device whose trunk could
+        not be identified -- the device's list must be carried through intact.
+        Stripping without re-emitting would clear the trunk."""
+        out = self.candidate({})
+        self.assertEqual(self._allowed(out, "GigabitEthernet1/0/1"),
+                         ["switchport trunk allowed vlan 98,197,297,397"])
+
+
 class TestCandidateOwnsTheSnoopingList(unittest.TestCase):
     """The candidate must never carry two 'ip dhcp snooping vlan' lines.
 
@@ -496,7 +582,7 @@ class TestCandidateOwnsTheSnoopingList(unittest.TestCase):
             candidate_prefix_managed=(self.defaults["candidate_prefix_managed"]
                                       if prefixes is None else prefixes),
             candidate_omit_regex=self.defaults.get("candidate_omit_regex", ""),
-            stale_headers=[], trunk_vlan_additions={},
+            stale_headers=[], trunk_vlan_final={},
         )
 
     def test_the_shipped_default_owns_the_line(self):

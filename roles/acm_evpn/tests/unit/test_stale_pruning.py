@@ -20,6 +20,7 @@ shimming: 'difference' and 'unique' are pure list operations, and
 Ansible semantics to get wrong.
 """
 
+import ast
 import json
 import os
 import re
@@ -192,22 +193,23 @@ class TestAVrfTeardownIsComplete(unittest.TestCase):
             self.assertNotIn("interface Vlan" + vid, out, vid)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
-def _trunk_removal_expression():
+def _trunk_state_expression():
     with open(_TASKS) as fh:
         tasks = yaml.safe_load(fh)
     for t in tasks:
         if t.get("name", "").startswith("Work out what to prune"):
-            return t["ansible.builtin.set_fact"]["trunk_vlan_removals"]
-    raise AssertionError("trunk_vlan_removals not found in 02_render_configs.yml")
+            return t["ansible.builtin.set_fact"]["_trunk_state"]
+    raise AssertionError("_trunk_state not found in 02_render_configs.yml")
 
 
-def trunk_removals(running, handoff_vids, fabric_svis, fabric_config="",
-                   host="core1"):
-    """What the render would take OFF the handoff trunk."""
+def trunk_state(running, handoff_vids, fabric_svis, fabric_config="",
+                host="core1"):
+    """What the render decides the handoff trunk should carry.
+
+    Returns the parsed per-interface dict: 'now', 'desired', 'add', 'drop'.
+    """
     env = jinja2.Environment()
     env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
     env.filters["intersect"] = lambda a, b: [x for x in a if x in b]
@@ -215,66 +217,128 @@ def trunk_removals(running, handoff_vids, fabric_svis, fabric_config="",
     env.filters["regex_findall"] = lambda s, p: re.findall(p, s, re.M)
     # Ansible provides these; plain jinja2 does not.
     env.tests["match"] = lambda v, p: bool(re.match(p, str(v)))
-    env.filters["map"] = env.filters["map"]
     vrfs = {"CORP": {"handoff_vlans": {
         v: {"tags": [host]} for v in handoff_vids}}}
-    out = env.from_string(_trunk_removal_expression()).render(
+    out = env.from_string(_trunk_state_expression()).render(
         netbox_vlan_groups={"vrfs": vrfs},
         inventory_hostname=host,
         _dev_fabric_svis=fabric_svis,
         fabric_config=fabric_config,
         current_run_config={"stdout": [running]},
     )
-    return out.strip()
+    return ast.literal_eval(out.strip())
 
 
-class TestAVrfsHandoffLeavesTheTrunk(unittest.TestCase):
-    """Adding a VRF puts its handoff VLAN on the border trunk, so removing one
-    has to take it off again.
+def trunk_desired(*a, **kw):
+    """Just the allowed-VLAN list, for the one trunk in these fixtures."""
+    st = trunk_state(*a, **kw)
+    if not st:
+        return []
+    return list(st.values())[0]["desired"]
 
-    Nothing did. The addition logic computes only what is MISSING from the
-    trunk, so a decommissioned VRF left its handoff VLAN permitted there for
-    good -- the same one-way door as the TRM loopbacks and the DHCP snooping
-    list, where the render stops emitting something and preserve-by-default
-    keeps it.
+
+class TestTheHandoffTrunkIsRenderedAsAFinalList(unittest.TestCase):
+    """The trunk carries a computed LIST, not 'add'/'remove'.
+
+    Both of those are imperative -- they describe a transition, so they only do
+    anything if the render happens to be present at the instant the change
+    occurs. Tearing VRF SECURITY down proved the cost: the removal did not exist
+    yet, 397 stayed permitted on core1's trunk, and by the next deploy
+    'interface Vlan397' was gone, so an SVI-based test could never match it
+    again. A full list is state, so it reconciles whatever it finds.
+
+    98 is underlay and shares this trunk. It is the path the automation reaches
+    a border by, and it must survive every one of these.
     """
 
-    # 98 is underlay and shares this trunk. It is the path the automation
-    # reaches a border by, and it must never appear in a removal.
     TRUNK = ("interface GigabitEthernet1/0/1\n"
              " switchport trunk allowed vlan 98,197,297,397\n"
-             " switchport mode trunk\n")
+             " switchport mode trunk\n"
+             "!\n"
+             "interface Vlan98\n"
+             " ip address 10.0.0.1 255.255.255.0\n")
 
-    def test_a_handoff_whose_vrf_is_gone_is_removed(self):
-        out = trunk_removals(self.TRUNK, handoff_vids=[197, 297],
-                             fabric_svis=[197, 297, 397],
-                             fabric_config="vlan 197\nvlan 297\n")
-        self.assertIn("397", out)
+    def _running(self, vlan_db):
+        return "".join("vlan %d\n" % v for v in vlan_db) + "!\n" + self.TRUNK
 
-    def test_a_handoff_still_rendered_is_never_removed(self):
-        out = trunk_removals(self.TRUNK, handoff_vids=[197, 297, 397],
-                             fabric_svis=[197, 297, 397],
-                             fabric_config="vlan 197\nvlan 297\nvlan 397\n")
-        self.assertEqual(out, "{}")
+    def test_a_handoff_whose_vrf_is_gone_is_dropped(self):
+        """The VRF is being torn down in THIS run: 397's SVI is still on the
+        device but the render no longer emits it."""
+        out = trunk_desired(self._running([98, 197, 297, 397]),
+                            handoff_vids=[197, 297],
+                            fabric_svis=[197, 297, 397],
+                            fabric_config="vlan 197\nvlan 297\n")
+        self.assertEqual(out, [98, 197, 297])
 
-    def test_the_underlay_vlan_is_never_removed(self):
-        """98 has no fabric SVI on a border, so it cannot enter the set. This
-        is the assertion that makes automatic removal safe at all: that trunk
-        is how the automation reaches the border."""
-        out = trunk_removals(self.TRUNK, handoff_vids=[],
-                             fabric_svis=[197, 297, 397], fabric_config="")
-        self.assertNotIn("98", out)
+    def test_a_handoff_orphaned_by_an_earlier_run_is_still_dropped(self):
+        """The exact core1 state after the SECURITY teardown: 397 is permitted
+        on the trunk, but its VLAN and SVI are already gone, so nothing about
+        the fabric objects can identify it. This is what 'add'/'remove' could
+        not repair and a final list fixes on the next deploy."""
+        out = trunk_desired(self._running([98, 197, 297]),
+                            handoff_vids=[197, 297],
+                            fabric_svis=[197, 297],
+                            fabric_config="vlan 197\nvlan 297\n")
+        self.assertEqual(out, [98, 197, 297])
 
-    def test_a_vlan_the_fabric_never_owned_is_never_removed(self):
-        """A hand-configured VLAN on the same trunk carries no fabric SVI, so
-        it is outside the ownership test entirely."""
-        running = ("interface GigabitEthernet1/0/1\n"
-                   " switchport trunk allowed vlan 98,150,197\n")
-        out = trunk_removals(running, handoff_vids=[197], fabric_svis=[197],
-                             fabric_config="vlan 197\n")
-        self.assertNotIn("150", out)
+    def test_a_handoff_still_rendered_is_kept(self):
+        out = trunk_desired(self._running([98, 197, 297, 397]),
+                            handoff_vids=[197, 297, 397],
+                            fabric_svis=[197, 297, 397],
+                            fabric_config="vlan 197\nvlan 297\nvlan 397\n")
+        self.assertEqual(out, [98, 197, 297, 397])
 
-    def test_nothing_to_remove_yields_an_empty_map(self):
-        out = trunk_removals("", handoff_vids=[197], fabric_svis=[197],
-                             fabric_config="vlan 197\n")
-        self.assertEqual(out, "{}")
+    def test_a_new_handoff_is_added_without_disturbing_the_rest(self):
+        running = ("vlan 98\nvlan 197\n!\n"
+                   "interface GigabitEthernet1/0/1\n"
+                   " switchport trunk allowed vlan 98,197\n"
+                   "!\n"
+                   "interface Vlan98\n ip address 10.0.0.1 255.255.255.0\n")
+        st = trunk_state(running, handoff_vids=[197, 297],
+                         fabric_svis=[197],
+                         fabric_config="vlan 197\nvlan 297\n")
+        entry = st["GigabitEthernet1/0/1"]
+        self.assertEqual(entry["desired"], [98, 197, 297])
+        self.assertEqual(entry["add"], [297])
+        self.assertEqual(entry["drop"], [])
+
+    def test_an_unrecognised_vlan_on_the_trunk_is_never_dropped(self):
+        """Preserve-by-default applies here too. A VLAN somebody put on this
+        trunk by hand is not a fabric object and must not be swept up."""
+        running = ("vlan 98\nvlan 197\nvlan 800\n!\n"
+                   "interface GigabitEthernet1/0/1\n"
+                   " switchport trunk allowed vlan 98,197,800\n"
+                   "!\n"
+                   "interface Vlan98\n ip address 10.0.0.1 255.255.255.0\n")
+        out = trunk_desired(running, handoff_vids=[197], fabric_svis=[197],
+                            fabric_config="vlan 197\n")
+        self.assertEqual(out, [98, 197, 800])
+
+    def test_a_wrapped_allowed_list_is_read_in_full(self):
+        """IOS splits a long list across continuation lines. Reading only the
+        last one would see a fraction of the trunk and delete the remainder."""
+        running = ("vlan 98\nvlan 197\nvlan 800\nvlan 801\n!\n"
+                   "interface GigabitEthernet1/0/1\n"
+                   " switchport trunk allowed vlan 98,197\n"
+                   " switchport trunk allowed vlan add 800,801\n"
+                   "!\n"
+                   "interface Vlan98\n ip address 10.0.0.1 255.255.255.0\n")
+        out = trunk_desired(running, handoff_vids=[197], fabric_svis=[197],
+                            fabric_config="vlan 197\n")
+        self.assertEqual(out, [98, 197, 800, 801])
+
+    def test_a_trunk_with_no_underlay_vlan_is_left_alone(self):
+        """Only a trunk carrying an underlay SVI's VLAN is a handoff trunk.
+        Every other trunk on the box belongs to the operator."""
+        running = ("vlan 98\nvlan 700\n!\n"
+                   "interface GigabitEthernet1/0/9\n"
+                   " switchport trunk allowed vlan 700\n"
+                   "!\n"
+                   "interface Vlan98\n ip address 10.0.0.1 255.255.255.0\n")
+        self.assertEqual(trunk_state(running, handoff_vids=[197],
+                                     fabric_svis=[197],
+                                     fabric_config="vlan 197\n"), {})
+
+
+if __name__ == "__main__":
+    unittest.main()
