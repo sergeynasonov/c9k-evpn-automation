@@ -73,7 +73,7 @@ snmp_acl:
 # listed gets a 'logging host' line, and each switch gets the trap level and
 # facility that go with them:
 #
-#     logging trap notifications
+#     logging trap notifications          <- syslog_severity, see below
 #     logging facility syslog
 #     logging host 198.51.100.30
 #     logging host 198.51.100.31
@@ -99,6 +99,39 @@ snmp_acl:
 syslog_hosts:
   - "198.51.100.30"
   - "198.51.100.31"
+
+# The trap severity -- how much each switch sends to those collectors. OPTIONAL
+# and meaningful only alongside syslog_hosts. Left out entirely it is
+# 'notifications', which is what this role pushed when the line was a literal,
+# so a deployment.yml written before this key existed behaves exactly as it did.
+#
+# TWO FORMS, ORDER-MATCHED. Give it a number or a name:
+#
+#     0 emergencies     1 alerts        2 critical        3 errors
+#     4 warnings        5 notifications 6 informational   7 debugging
+#
+# A number is converted to its keyword before anything reaches a device, so the
+# switch only ever sees 'logging trap <keyword>'. Anything that is neither one
+# of those eight names nor a number in 0-7 fails the run rather than falling
+# back to a default -- the same rule the address lists follow, and for the same
+# reason: a typo must not be able to look like a decision.
+#
+# RAISING IT IS NOT FREE, in two unrelated ways.
+#
+# 'informational' is the IOS-XE DEFAULT for this command, and this project has
+# NOT verified that a switch renders the line back into 'show running-config'
+# when it matches the default. A line that never renders is a line the baseline
+# re-pushes on every single run, and this baseline has had to drop four other
+# commands for exactly that. After changing this key, run readiness TWICE and
+# check that the second run reports no baseline change.
+#
+# Severity 6 and 7 are also where the volume is, and the collector is the thing
+# that has to hold it. Before raising it fabric-wide, note that 'logging
+# buffered' already runs at level debugging: severity 6 and 7 are ON THE SWITCH
+# either way, reachable with 'show logging', and this key only decides whether
+# they also cross the network. If you need them from one switch during one test,
+# read the buffer instead of raising the trap for eleven of them.
+syslog_severity: notifications
 
 # VTP domain. Every switch runs transparent mode, so this is cosmetic; the
 # password and version are deliberately not managed at all (see the role

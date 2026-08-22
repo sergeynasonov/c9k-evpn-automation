@@ -182,6 +182,60 @@ readiness_snmp_acl: "{{ snmp_acl | default([], true) }}"
 readiness_syslog_enrolled: >-
   {{ (syslog_hosts | default([], true)) | length > 0 }}
 
+# The eight IOS-XE syslog severities, IN ORDER, because the order IS the
+# mapping: index 0 is 'emergencies' and index 7 is 'debugging', which is what
+# lets syslog_severity accept either form. Do not reorder or extend this list.
+readiness_syslog_severities:
+  - emergencies
+  - alerts
+  - critical
+  - errors
+  - warnings
+  - notifications
+  - informational
+  - debugging
+
+# syslog_severity resolved to the KEYWORD, whichever form the deployment used.
+# A number is converted here rather than passed through, so 'logging trap 6' is
+# never emitted: this project has no verified answer for how IOS-XE renders a
+# numeric severity back into 'show running-config', and a line that does not
+# render is a line ios_config re-pushes on every run. Emitting only the keyword
+# means the question never has to be answered.
+#
+# 'default(none)' and NOT 'default(x, true)'. The two-argument form substitutes
+# on any FALSY value, and 0 is both falsy and a legitimate severity -- it is
+# 'emergencies'. Written the obvious way, syslog_severity: 0 would silently
+# become 'notifications', which is the one input where being wrong is quiet.
+#
+# An unresolvable value resolves to the EMPTY STRING on purpose, and the empty
+# string is assigned explicitly rather than left to fall out of a branch that
+# emits nothing -- those are not the same value under Ansible. A template that
+# produces no output at all comes back as None, not '', because Ansible
+# templates natively; the first version of this expression did exactly that and
+# every invalid severity passed the assert, since 'None | trim' is the string
+# 'None' and compares unequal to ''. Bare Jinja returns '' from the identical
+# expression, so the offline tests could not see it either.
+#
+# assert_site_config.yml is what turns that emptiness into a named problem.
+# Failing here instead would surface as a template crash on whichever task
+# happened to touch the variable first.
+#
+# Case is normalised. 'Notifications' is a typo worth forgiving, and rejecting
+# it would produce an error message listing 'notifications' as the fix.
+readiness_syslog_severity: >-
+  {%- set raw = syslog_severity | default(none) -%}
+  {%- set txt = (raw | string | trim | lower) if raw is not none else '' -%}
+  {%- if txt == '' -%}
+  {%-   set out = 'notifications' -%}
+  {%- elif txt.isdigit() and (txt | int) < (readiness_syslog_severities | length) -%}
+  {%-   set out = readiness_syslog_severities[txt | int] -%}
+  {%- elif txt in readiness_syslog_severities -%}
+  {%-   set out = txt -%}
+  {%- else -%}
+  {%-   set out = '' -%}
+  {%- endif -%}
+  {{ out }}
+
 # The syslog CLI, defined ONCE, so the template that pushes it and the check
 # that verifies it cannot drift apart. JSON because an Ansible variable
 # templates to a string; both consumers pipe it back through 'from_json'.
@@ -207,10 +261,17 @@ readiness_syslog_enrolled: >-
 # render everywhere, so syslog is genuinely class 1 across the fabric rather
 # than class 1 on the hardware and an invisible default in the lab.
 #
-# The defaults predict this -- severity 'notifications' is not the default
-# (informational) and facility 'syslog' is not the default (local7) -- but the
-# prediction is not what it rests on. This project has been wrong about a
-# platform default three times, every time by reasoning instead of looking.
+# The defaults predict this -- the shipped severity 'notifications' is not the
+# default (informational) and facility 'syslog' is not the default (local7) --
+# but the prediction is not what it rests on. This project has been wrong about
+# a platform default three times, every time by reasoning instead of looking.
+#
+# THAT VERIFICATION COVERS 'notifications', WHICH IS WHAT THE ROLE SHIPPED WHEN
+# THE LINE WAS A LITERAL. syslog_severity can now name any of the eight, and
+# 'informational' is the platform default -- so it is the one value that may not
+# render back, which would churn the baseline forever instead of converging. It
+# has NOT been tested. After changing syslog_severity, run readiness twice and
+# confirm the second run reports no baseline change.
 #
 # 'logging source-interface' is not here. It is unconditional in the baseline
 # already, and it is source-interface hygiene along with the ip http / ip radius
@@ -218,7 +279,7 @@ readiness_syslog_enrolled: >-
 readiness_syslog_lines: >-
   {%- set out = [] -%}
   {%- if readiness_syslog_enrolled | bool -%}
-  {%-   set _ = out.append('logging trap notifications') -%}
+  {%-   set _ = out.append('logging trap ' ~ readiness_syslog_severity) -%}
   {%-   set _ = out.append('logging facility syslog') -%}
   {%-   for host in syslog_hosts -%}
   {%-     set _ = out.append('logging host ' ~ host) -%}

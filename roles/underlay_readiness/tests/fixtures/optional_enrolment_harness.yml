@@ -72,6 +72,7 @@
           snmp: "{{ readiness_snmp_enrolled | bool }}"
           syslog: "{{ readiness_syslog_enrolled | bool }}"
           cli: "{{ readiness_syslog_lines | from_json }}"
+          severity: "{{ readiness_syslog_severity | default('', true) }}"
           ntp_cli: "{{ readiness_ntp_lines | from_json }}"
 
     - name: Write the findings for the test to read
@@ -88,6 +89,7 @@
                   'snmp_enrolled': hv.enrolment.snmp,
                   'syslog_enrolled': hv.enrolment.syslog,
                   'syslog_cli': hv.enrolment.cli,
+                  'syslog_severity': hv.enrolment.severity,
                   'snmp_msgs': (hv.snmp_findings | default([]))
                                 | map(attribute='msg') | list,
                   'syslog_msgs': (hv.syslog_findings | default([]))

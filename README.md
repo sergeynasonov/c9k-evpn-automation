@@ -402,6 +402,33 @@ Each entry must be a bare IPv4 address: no mask, no hostname, no port. Anything
 else fails the run rather than being quietly dropped, for the same reason half
 an SNMP triple does.
 
+**`syslog_severity`** sets the trap level, and takes either form:
+
+```yaml
+syslog_severity: informational   # or: 6
+```
+
+| | | | |
+|---|---|---|---|
+| 0 `emergencies` | 1 `alerts` | 2 `critical` | 3 `errors` |
+| 4 `warnings` | 5 `notifications` | 6 `informational` | 7 `debugging` |
+
+The two columns are order-matched, and a number is converted to its keyword
+before anything is pushed — the switch only ever receives
+`logging trap <keyword>`, because this project has no verified answer for how
+IOS-XE renders a numeric severity back, and a line that does not render back is
+a line the baseline re-pushes for ever. Anything outside those eight names and
+0–7 fails the run. Omit the key and it is `notifications`, which is what the
+role pushed when the line was a literal.
+
+Two things to know before raising it. `informational` is the IOS-XE **default**
+for this command, and whether a switch renders the line back when it matches the
+default has **not** been tested here — so after changing this key, run readiness
+twice and confirm the second run reports no baseline change. And severity 6 and
+7 are already on every switch regardless: `logging buffered` runs at level
+`debugging`, so `show logging` has them whatever the trap is set to. This key
+only decides whether they also cross the network to the collector.
+
 Unlike SNMPv3 this rides in the platform baseline rather than a task of its own,
 because all three lines *are* rendered back into `show running-config` —
 verified on the C9300, C9400 and c9kv, both that a switch without them is given
@@ -557,7 +584,7 @@ configures cleanly and then silently fails to forward:
 | Border switches additionally originate the default route | `default-information originate` |
 | Every routed uplink carries the full command set, **including `bfd interval 250 min_rx 250 multiplier 3`** | `bfd all-interfaces` does nothing without per-interface timers |
 | SNMPv3 user and group present — **only if enrolled** | Checked with `show snmp user` / `show snmp group`, never by reading passwords. `readiness.yml` installs these; the `acm_evpn` pre-flight only checks them. A deployment that declares no SNMP identity is not checked, and the device read is skipped too |
-| `logging trap` / `logging facility` / `logging host` — **only if enrolled** | Present only when `syslog_hosts` is declared. Read from the running config, unlike SNMPv3, because all three lines are rendered back |
+| `logging trap` / `logging facility` / `logging host` — **only if enrolled** | Present only when `syslog_hosts` is declared; the trap level is `syslog_severity`, default `notifications`. Read from the running config, unlike SNMPv3, because all three lines are rendered back |
 | `ntp server` for every address in `ntp_servers` | Read from the running config. New with the move to a list — the two old fixed keys were pushed and never checked, so a time source removed by hand went unreported |
 | No `no hidekeys` under `archive log config` | Checked *negatively* — a platform default is never rendered, so a value that is rendered was set deliberately |
 | **Spine switches:** anycast RP address carried, `ip msdp originator-id`, and an `ip msdp peer` to *every* other spine switch **in the same fabric** | A one-way MSDP mesh looks complete on each switch individually |
