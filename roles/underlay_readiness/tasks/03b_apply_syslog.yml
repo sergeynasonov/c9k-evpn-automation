@@ -1,0 +1,34 @@
+---
+# The syslog TRAP LEVEL, and nothing else about syslog.
+#
+# 'logging facility' and 'logging host' stay in the platform baseline, where
+# they belong: both render into 'show running-config', so ios_config converges
+# on them and the running-config check can see them. 'logging trap' does not,
+# whenever the severity matches the platform default -- MEASURED on a C9300, a
+# C9400 and a c9kv on 2026-08-22 with 'informational', which IS the default:
+# the command takes effect, 'show logging' reports it, and no 'logging trap'
+# line appears in the running config at all.
+#
+# Left in the baseline that produced the worst of both worlds on a live fabric:
+# the push succeeded, the check could not find what it had just pushed, all
+# eleven switches failed with 'missing global: logging trap informational', and
+# the next run pushed it again. Neither half would ever have settled.
+#
+# So this is the same treatment 'snmp-server user' gets in 03_apply_snmp.yml,
+# for the same reason and gated the same way -- on OPERATIONAL state, not on
+# what the running config shows. _readiness_syslog_trap is what 'show logging'
+# reported; when it already matches, this task does not run and the switch
+# reports no change.
+#
+# Its own file rather than a task inside 03_apply_snmp.yml: that file is about
+# an SNMP credential, is 'no_log' throughout for that reason, and has an apply
+# switch of its own. A syslog severity is neither secret nor SNMP.
+- name: Readiness — set the syslog trap level
+  cisco.ios.ios_config:
+    save_when: changed
+    lines:
+      - "{{ readiness_syslog_trap_line }}"
+  when:
+    - readiness_syslog_enrolled | bool
+    - readiness_apply_baseline | bool
+    - (_readiness_syslog_trap | default('', true)) != readiness_syslog_severity

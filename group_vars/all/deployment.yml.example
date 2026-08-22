@@ -116,21 +116,24 @@ syslog_hosts:
 # back to a default -- the same rule the address lists follow, and for the same
 # reason: a typo must not be able to look like a decision.
 #
-# RAISING IT IS NOT FREE, in two unrelated ways.
+# ALL EIGHT VALUES WORK, including 'informational', and that took a fix rather
+# than luck. MEASURED on a C9300, a C9400 and a c9kv on 2026-08-22: IOS-XE omits
+# 'logging trap' from 'show running-config' entirely when it matches the
+# platform DEFAULT, which informational is. The command is in force -- 'show
+# logging' says so -- but the line is not there to be read back.
 #
-# 'informational' is the IOS-XE DEFAULT for this command, and this project has
-# NOT verified that a switch renders the line back into 'show running-config'
-# when it matches the default. A line that never renders is a line the baseline
-# re-pushes on every single run, and this baseline has had to drop four other
-# commands for exactly that. After changing this key, run readiness TWICE and
-# check that the second run reports no baseline change.
+# So this one line is NOT checked against the running config and is not part of
+# the platform baseline. It is read from 'show logging', compared against what
+# you asked for, and pushed only when the two differ -- the same treatment
+# 'snmp-server user' gets, and for the same reason. Nothing here needs a second
+# run to settle.
 #
-# Severity 6 and 7 are also where the volume is, and the collector is the thing
-# that has to hold it. Before raising it fabric-wide, note that 'logging
-# buffered' already runs at level debugging: severity 6 and 7 are ON THE SWITCH
-# either way, reachable with 'show logging', and this key only decides whether
-# they also cross the network. If you need them from one switch during one test,
-# read the buffer instead of raising the trap for eleven of them.
+# Severity 6 and 7 are where the volume is, and the collector is what has to
+# hold it. Before raising it fabric-wide, note that 'logging buffered' already
+# runs at level debugging: severity 6 and 7 are ON THE SWITCH either way,
+# reachable with 'show logging', and this key only decides whether they also
+# cross the network. If you want them from one switch during one test, read
+# that switch's buffer rather than raising the trap on eleven.
 syslog_severity: notifications
 
 # VTP domain. Every switch runs transparent mode, so this is cosmetic; the
