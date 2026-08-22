@@ -55,115 +55,12 @@
 # use it -- but it validates it, which catches the data error at onboarding
 # rather than on the first render.
 
-# Tasks 1-5 are guarded so that re-entering this file is free. acm_evpn resolves
-# in 01_gather_data.yml and then imports underlay_readiness as a pre-flight,
-# which enters here again; readiness.yml re-gathers after configuring, likewise.
-# Without the guard the orphan report below prints once per entry.
-#
-# The marker is 'fabric_id', which task 6 sets LAST -- not fabric_map, which
-# task 1 sets and which would therefore already be defined by the time tasks 4
-# and 5 tested for it, skipping both reports on the very first pass.
-#
-# Tasks 6, 7 and 8 are deliberately unguarded. They are per host and idempotent,
-# and a condition covering the whole file would disable the end_host in tasks 7
-# and 8 on every re-entry, silently ending the skips.
-- name: 1. Resolve every device's fabric from inventory
-  ansible.builtin.set_fact:
-    fabric_map: "{{ (_resolved | from_json).map }}"
-    fabric_ids: "{{ (_resolved | from_json).fabrics }}"
-    fabric_nodes: "{{ (_resolved | from_json).nodes }}"
-    fabric_ambiguous: "{{ (_resolved | from_json).ambiguous }}"
-    fabric_orphans: "{{ (_resolved | from_json).orphans }}"
-  vars:
-    _resolved: >-
-      {%- set sgs = {} -%}
-      {%- set sites = {} -%}
-      {#- One pass over the inventory, bucketing each device's site-group and
-          site memberships. nb_inventory nests site_group_<parent> above
-          site_group_<child> above sites_<slug>, so a device under a NESTED site
-          group lands in more than one 'site_group_*' -- which is exactly how a
-          nested tree is detected below. -#}
-      {%- for group, members in groups | dictsort -%}
-      {%-   if group.startswith('site_group_') -%}
-      {%-     for host in members -%}
-      {%-       set _ = sgs.update({host: sgs.get(host, []) + [group]}) -%}
-      {%-     endfor -%}
-      {%-   elif group.startswith('sites_') -%}
-      {%-     for host in members -%}
-      {%-       set _ = sites.update({host: sites.get(host, []) + [group]}) -%}
-      {%-     endfor -%}
-      {%-   endif -%}
-      {%- endfor -%}
+# Fabric identity is resolved in its own file: deploy_evpn.yml needs the same
+# answer before its device-facing play forms, to pick the spines that belong in
+# a narrowly scoped run. Imported rather than duplicated.
+- name: Resolve fabric identity from inventory
+  ansible.builtin.import_tasks: fabric_map.yml
 
-      {#- THE FABRIC-NODE RULE, evaluated once for the whole inventory. Every
-          device acm_evpn renders for, and therefore every device expected to
-          be placeable in a fabric, so that one which cannot be placed is
-          reported rather than dropped in silence.
-
-              fabric node = fabric_leaf
-                         OR fabric_border
-                         OR (distribution_switch AND tagged fabric_spine)
-
-          The conjunction is why this is derived here instead of being a list
-          of groups intersected at each call site: no flat list can express it,
-          and the old list could not, so the TAG ALONE qualified a device. A
-          WAN router tagged 'fabric_spine' got a full EVPN candidate rendered
-          for it. See fabric_node_roles in defaults/main.yml.
-
-          Read from 'groups', like everything else here, so the answer covers
-          the whole inventory rather than the current play -- a device's fabric
-          membership must not depend on whether it was targeted. -#}
-      {%- set fabric_nodes = [] -%}
-      {%- for group in fabric_node_roles -%}
-      {%-   for host in groups.get(group, []) -%}
-      {%-     set _ = fabric_nodes.append(host) -%}
-      {%-   endfor -%}
-      {%- endfor -%}
-      {%- for host in groups.get(fabric_distribution_group, [])
-            | intersect(groups.get(fabric_spine_tag_group, [])) -%}
-      {%-   set _ = fabric_nodes.append(host) -%}
-      {%- endfor -%}
-
-      {%- set out = {} -%}
-      {%- set ambiguous = [] -%}
-      {%- set orphans = [] -%}
-      {%- for host in groups['all'] | sort -%}
-      {%-   set host_sgs = sgs.get(host, []) -%}
-      {%-   set host_sites = sites.get(host, []) -%}
-      {%-   if host_sgs | length > 1 -%}
-      {#-     Nested site groups are REFUSED, not resolved to the innermost one.
-              The parent spans buildings that do not share an underlay, and
-              picking a level here would silently decide which. -#}
-      {%-     set _ = ambiguous.append(host ~ ' is in nested site groups ('
-                                       ~ (host_sgs | join(', ')) ~ ')') -%}
-      {%-   elif host_sites | length > 1 -%}
-      {%-     set _ = ambiguous.append(host ~ ' is in more than one site ('
-                                       ~ (host_sites | join(', ')) ~ ')') -%}
-      {%-   elif host_sgs | length == 1 -%}
-      {%-     set _ = out.update({host: host_sgs[0]}) -%}
-      {%-   elif host_sites | length == 1 -%}
-      {%-     set _ = out.update({host: host_sites[0]}) -%}
-      {%-   elif host in fabric_nodes -%}
-      {%-     set _ = orphans.append(host) -%}
-      {%-   endif -%}
-      {%- endfor -%}
-
-      {#- A site or site group is a FABRIC only if it holds a fabric node. A
-          NetBox holds plenty of ordinary sites -- WAN kit, servers, campuses
-          this automation does not manage -- and they are not candidate fabrics
-          waiting to be configured. Without this they are asked for an ASN and
-          an anycast RP and reported for having neither. -#}
-      {%- set fabrics = [] -%}
-      {%- for host in fabric_nodes | unique | sort
-            if out.get(host) and out[host] not in fabrics -%}
-      {%-   set _ = fabrics.append(out[host]) -%}
-      {%- endfor -%}
-      {{ {'map': out, 'fabrics': fabrics | sort,
-          'nodes': fabric_nodes | unique | sort,
-          'ambiguous': ambiguous, 'orphans': orphans} | to_json }}
-  when: fabric_id is not defined
-  run_once: true
-  delegate_to: localhost
 
 # Fatal, and fatal for the whole run rather than per device: an inventory whose
 # EVERY run must name what it is for. Unscoped, the host pattern defaults to

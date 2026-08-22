@@ -43,10 +43,20 @@
     # reported four healthy switches as "failed before a candidate was built",
     # which is alarming and false. Same mistake the readiness summary made; see
     # underlay_readiness/tasks/05_report.yml.
+    #
+    # THE SPINES ARE THE SAME MISTAKE ONE LAYER OUT, and the first fix missed
+    # them because they ARE fabric nodes -- of a fabric this run is not
+    # targeting. deploy_evpn.yml unions tags_fabric_spine in estate-wide on
+    # purpose (a spine left out of the play keeps a stale peer list), so a
+    # campus deploy always selects the CML spines, and 01_gather_data.yml task
+    # 15a always drops them. Reporting that as a failure meant every single
+    # campus run printed two switches as broken when nothing was wrong.
+    # 'acm_fabric_not_targeted' is set by the task that makes the decision.
     _missing: >-
       {%- set out = [] -%}
       {%- for h in ansible_play_hosts_all | sort
-            if h not in ansible_play_hosts and h in fabric_nodes -%}
+            if h not in ansible_play_hosts and h in fabric_nodes
+               and not hostvars[h].acm_fabric_not_targeted | default(false) -%}
       {%-   set _ = out.append(h) -%}
       {%- endfor -%}
       {{ out | to_json }}

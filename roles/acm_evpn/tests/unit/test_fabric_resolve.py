@@ -64,13 +64,19 @@ def _peer_tasks():
 
 
 def _target_tasks():
-    """Tasks 13-15 of 01_gather_data.yml: deploy_target -> targeted fabrics."""
+    """Tasks 13-15a of 01_gather_data.yml: deploy_target -> targeted fabrics.
+
+    Four, not three: the drop of an out-of-fabric spine is now two tasks, one
+    recording WHY and one ending the host, so the pre-deploy summary can tell a
+    deliberate skip from a failure.
+    """
     with open(GATHER) as fh:
         tasks = yaml.safe_load(fh)
-    wanted = [t for t in tasks if t.get("name", "").startswith(("13.", "14.", "15."))]
-    if len(wanted) != 3:
+    wanted = [t for t in tasks
+              if t.get("name", "").startswith(("13.", "14.", "15.", "15a."))]
+    if len(wanted) != 4:
         raise AssertionError(
-            "expected tasks 13-15 of 01_gather_data.yml to be the target-scoping "
+            "expected tasks 13-15a of 01_gather_data.yml to be the target-scoping "
             "tasks, found {}".format([t.get("name") for t in wanted])
         )
     return wanted
