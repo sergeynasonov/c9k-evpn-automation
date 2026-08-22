@@ -179,6 +179,24 @@ candidate_omit_regex: 'crypto pki (trustpoint|certificate chain) '
 # local admin password is now a readiness.yml run, not a deploy.
 candidate_prefix_managed:
   - 'username \S+ '
+  # The VLAN list is the whole value of the line, so an exact match can never
+  # own it: the render emits 'ip dhcp snooping vlan 100-101,200,300' while the
+  # device still says '100-101,106,200,300', the device's copy is preserved
+  # ALONGSIDE ours, and the candidate carries both. IOS takes the last one.
+  #
+  # Measured on access1-1, 2026-08-22, after VLAN 106 was deleted from NetBox:
+  # the candidate held the rendered list at line 189 and the stale one at line
+  # 344, and the device kept 106 through two deploys. The per-VLAN stanzas were
+  # pruned correctly -- this line is a GLOBAL that merely names VLAN ids, so no
+  # VLAN 106 prune ever matched it. The result was a switch that reported a
+  # change on every single run and never converged.
+  #
+  # Safe to own outright: leaf_config.j2 builds the list from edge VLANs that
+  # carry dhcp_servers_ipv4/ipv6, which is the same field that renders each
+  # 'ip helper-address global' line. A VLAN is in the snooping list if and only
+  # if its SVI got a relay, so the two cannot drift, and an L2-only segment --
+  # having no relay -- is never listed.
+  - 'ip dhcp snooping vlan '
 
 # ACM Configuration
 commit_timeout: 120
