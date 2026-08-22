@@ -80,8 +80,7 @@ CARVE = [
 ]
 
 # 397/398 are the handoffs and 399 the core VLAN, following CORP's 197/198/199
-# and MEDICAL's 297/298/299. The core VLAN carries the L3VNI and is deliberately
-# unnumbered -- neither 199 nor 299 has a prefix.
+# and MEDICAL's 297/298/299.
 VLANS = [
     (300, "SECURITY_DATA_CAMPUS", "edge",
      ["dag_routed", "multicast_enabled"]),
@@ -106,6 +105,23 @@ PREFIXES = [
     ("10.67.119.48/31", 397, [], "", False),
     ("10.67.119.50/31", 398, [], "", False),
 ]
+
+# THE CORE VLAN NEEDS A PREFIX, and the first version of this script omitted it
+# on the belief that a core VLAN is unnumbered. It is unnumbered on the SWITCH
+# -- the template renders 'ip unnumbered Loopback0' -- but that is not what this
+# prefix is for. NetBox has no VRF field on a VLAN, so a prefix inside the VRF
+# is the ONLY way to express that VLAN 399 belongs to SECURITY, and the render
+# reads the relationship back through it.
+#
+# Omitting it enrolled a VRF whose core VLAN belonged to nothing, and it had to
+# be added by hand afterwards. Every core VLAN on this fabric carries the same
+# 169.254.255.0/30 in its own VRF: CORP's 199 since 2026-07-18, MEDICAL's 299
+# since 2026-08-02, SECURITY's 399 since 2026-08-21. The same prefix three times
+# is legal and intended -- VRFs are separate address spaces, and the address is
+# never routed.
+CORE_VLAN_BINDING = ("169.254.255.0/30", 399, [],
+                     "binds the core VLAN to VRF %s -- NetBox has no VRF field "
+                     "on a VLAN" % VRF_NAME, False)
 
 # The same relay destination VLAN 200 carries.
 DHCP_SERVER = "10.66.119.56/32"
@@ -299,7 +315,7 @@ def enrol(nb: NetBox, ids: dict, plan: list, apply: bool) -> None:
         vlan_ids[vid] = nb.post("ipam/vlans/", body)["id"] if apply else None
 
     # --- 4. prefixes in the VRF ----------------------------------------------
-    for prefix, vid, tags, descr, dhcp in PREFIXES:
+    for prefix, vid, tags, descr, dhcp in PREFIXES + [CORE_VLAN_BINDING]:
         if nb.one("ipam/prefixes/", prefix=prefix, vrf_id=vrf_id):
             plan.append(("exists", "prefix %s (%s)" % (prefix, VRF_NAME)))
             continue
