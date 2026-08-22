@@ -88,11 +88,28 @@
   run_once: true
   delegate_to: localhost
 
-- name: 15. Skip a spine unioned in from a fabric this run is not targeting
-  ansible.builtin.meta: end_host
+# A BACKSTOP since deploy_evpn.yml started resolving its scope: that playbook
+# now adds only the spines of the fabrics deploy_target names, so nothing from
+# another fabric should reach this point. It stays because a hand-written
+# pattern or a --limit can still put one here, and rendering a foreign spine
+# would give it a peer list from the wrong fabric.
+#
+# Recorded before the skip, not inferred after it. 'meta: end_host' removes the
+# host from ansible_play_hosts and leaves no trace of WHY, so 03b's summary saw
+# a fabric node that vanished before rendering and reported it as "failed before
+# a candidate was built". Re-deriving the condition there would make the
+# reporting a second copy of this decision, free to drift from it. The fact
+# survives end_host in hostvars.
+- name: 15. Note a spine from a fabric this run is not targeting
+  ansible.builtin.set_fact:
+    acm_fabric_not_targeted: true
   when:
     - targeted_fabrics | length > 0
     - fabric_id not in targeted_fabrics
+
+- name: 15a. Skip it, now that the reason is on the record
+  ansible.builtin.meta: end_host
+  when: acm_fabric_not_targeted | default(false) | bool
 
 - name: Gather NetBox facts
   ansible.builtin.import_tasks: netbox_facts.yml

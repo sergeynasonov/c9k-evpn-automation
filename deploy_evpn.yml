@@ -1,37 +1,91 @@
 ---
 # Scope a run with  -e deploy_target=<pattern>  rather than --limit.
 #
-# The spines are unioned into the host pattern unconditionally. Adding or
-# removing a leaf changes the spines' EVPN peer list, so a spine that is not in
-# the play keeps a stale 'router bgp' until someone remembers to run it
-# separately. Peer ADDRESSES come from inventory (see fabric_peers.py), so a
-# narrow deploy_target renders correct configs -- this union is about which
-# devices get updated, not about where the data comes from.
-#
-# Two things the pattern deliberately does NOT do, both handled as tasks instead
-# because Ansible applies ':&' intersections AFTER every union regardless of
-# where they appear -- so intersecting here would also intersect away the very
-# spines this unions in:
-#
-#   * ':' is a UNION, so 'deploy_target=<site>' selects every device in that
-#     site, distribution switches included. They are dropped, and reported, by
-#     fabric_resolve.yml before anything touches a device.
-#   * the union is estate-wide, so it also pulls in other fabrics' spines.
-#     01_gather_data.yml works out which fabrics deploy_target actually names
-#     and drops the rest.
-#
 #   one fabric  : ansible-playbook deploy_evpn.yml -e deploy_target=site_group_evpn_campus
 #   one building: ansible-playbook deploy_evpn.yml -e deploy_target=sites_evpn_building_a
 #   one leaf    : ansible-playbook deploy_evpn.yml -e deploy_target=access1-1
 #   every fabric: ansible-playbook deploy_evpn.yml -e deploy_target=all
 #
+# WHY THE SPINES NEED RESOLVING RATHER THAN PATTERN-MATCHING
+#
+# Adding or removing a leaf changes that fabric's spines' EVPN peer list, so a
+# spine left out of the play keeps a stale 'router bgp' until someone remembers
+# to run it separately. A target naming a whole site or site group already
+# selects its own spines -- every fabric's spines live in its own site -- but
+# 'deploy_target=access1-1' does not, and that is the case this exists for.
+#
+# It used to be handled by unioning ':tags_fabric_spine' onto the pattern, which
+# is ESTATE-WIDE: a campus deploy selected the CML lab's spines on every run and
+# then dropped them in a task. That is selecting devices in order to discard
+# them, and it made two healthy switches appear in every summary as though they
+# had failed. It also could not be narrowed in the pattern, because ':&' applies
+# to everything accumulated to its left -- 'access1-1:site_group_x:&tags_fabric_
+# spine' intersects access1-1 itself away.
+#
+# So the scope is resolved first, from the same inventory-group logic the roles
+# use, and only the spines of the fabrics deploy_target actually names are
+# added. Nothing outside those fabrics is ever contacted.
+#
+# ':' is still a union within the resolved scope, so 'deploy_target=<site>'
+# selects that site's distribution switches too. They are dropped, and reported,
+# by fabric_resolve.yml before anything touches a device.
+#
 # deploy_target is REQUIRED. Omitting it is refused before anything is
-# contacted, because the pattern below would otherwise mean every fabric node in
-# the estate -- see fabric_resolve.yml task 2.
+# contacted -- see fabric_resolve.yml task 2.
+- name: Resolve the deploy scope, including this fabric's spines
+  hosts: localhost
+  gather_facts: false
+  # add_host bypasses the host loop, which the 'free' strategy in ansible.cfg
+  # refuses outright. One host in this play either way.
+  strategy: linear
+  tasks:
+    - name: Resolve fabric identity from inventory
+      ansible.builtin.import_role:
+        name: underlay_readiness
+        tasks_from: fabric_map.yml
+
+    - name: Work out the scope, and which spines belong in it
+      ansible.builtin.set_fact:
+        acm_deploy_scope: >-
+          {%- set targeted = query('ansible.builtin.inventory_hostnames',
+                                   deploy_target | default('all')) -%}
+          {#- fabric_ids is the subset of sites/site groups that actually hold a
+              fabric node, so a target naming a site of WAN kit or servers
+              contributes no fabrics and therefore no spines. -#}
+          {%- set fabrics = targeted | map('extract', fabric_map)
+                            | select('in', fabric_ids) | unique | list -%}
+          {%- set out = targeted | list -%}
+          {%- for s in groups.get('tags_fabric_spine', [])
+                if fabric_map.get(s) in fabrics and s not in out -%}
+          {%-   set _ = out.append(s) -%}
+          {%- endfor -%}
+          {{ out | sort | to_json }}
+
+    # add_host rather than templating the next play's 'hosts:' from a fact:
+    # 'hosts' is validated when the playbook is PARSED, before this play has
+    # run, so a fact-derived pattern is empty at that moment and --syntax-check
+    # refuses the file. A group name is static and survives parsing; the group
+    # is simply empty if nothing resolved.
+    #
+    # These names already exist in inventory, so this adds group membership and
+    # nothing else -- ansible_host and every NetBox-derived var are untouched.
+    - name: Put the resolved scope in a group the deploy play can name
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: acm_deploy_scope
+      loop: "{{ acm_deploy_scope | from_json }}"
+      changed_when: false
+
+    - name: Report the scope this run resolved to
+      ansible.builtin.debug:
+        msg: >-
+          deploy_target={{ deploy_target | default('(unset)') }} resolves to
+          {{ acm_deploy_scope | from_json | length }} device(s) in
+          {{ acm_deploy_scope | from_json | map('extract', fabric_map)
+             | unique | list | sort | join(', ') }}
+
 - name: Deploy EVPN Configurations to Live Fabric
-  hosts: >-
-    {{ deploy_target
-       | default('device_roles_fabric_border:device_roles_fabric_leaf:tags_fabric_spine') }}:tags_fabric_spine
+  hosts: acm_deploy_scope
   gather_facts: false
   strategy: linear
   tasks:
