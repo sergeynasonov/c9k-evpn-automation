@@ -309,6 +309,52 @@
       {%- endfor -%}
       {{ out }}
 
+# ADDING A VRF PUTS ITS HANDOFF VLAN ON THE BORDER TRUNK. Removing one has to
+# take it off again, and until now nothing did: the block above computes only
+# what is MISSING from the trunk, so a decommissioned VRF left its handoff VLAN
+# permitted there forever. Same one-way door as the TRM loopbacks and the DHCP
+# snooping list -- the render stops emitting it, and preserve-by-default keeps
+# what the render does not mention.
+#
+# OWNERSHIP IS THE SAME TEST stale_headers uses, and it is what makes this safe
+# to do automatically: a VLAN is removed only if the DEVICE carries it as a
+# fabric SVI and the render no longer emits it. The underlay VLAN has no fabric
+# SVI on a border, so it can never enter this set -- which matters more than
+# usual here, because that trunk is how the automation reaches a border at all.
+#
+# Ranges: a device rendering '197-198' is not expanded, so a stale VLAN inside a
+# range is missed rather than wrongly removed. Under-parsing is the safe
+# direction for a removal and is left as it is.
+    trunk_vlan_removals: >-
+      {%- set handoff = [] -%}
+      {%- for _vrf, vrf_data in netbox_vlan_groups.vrfs.items() -%}
+      {%-   for vid, vlan in vrf_data.handoff_vlans.items() if inventory_hostname in vlan.tags -%}
+      {%-     set _ = handoff.append(vid | int) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- set _new_defs = fabric_config | regex_findall('(?m)^vlan ([0-9]+)$')
+                          | map('int') | list -%}
+      {%- set gone = _dev_fabric_svis | map('int') | list
+                     | difference(handoff) | difference(_new_defs) -%}
+      {%- set out = {} -%}
+      {%- set ns = namespace(cur='') -%}
+      {%- for line in current_run_config.stdout[0].splitlines() -%}
+      {%-   if line.startswith('interface ') -%}
+      {%-     set ns.cur = line[10:] | trim -%}
+      {%-   elif not line.startswith(' ') -%}
+      {%-     set ns.cur = '' -%}
+      {%-   elif ns.cur and line.strip().startswith('switchport trunk allowed vlan ') -%}
+      {%-     set spec = line.strip().split('vlan ')[-1] | replace('add ', '') -%}
+      {%-     set on_trunk = spec.split(',') | map('trim') | select('match', '^\\d+$')
+                             | map('int') | list -%}
+      {%-     set stale = on_trunk | intersect(gone) -%}
+      {%-     if stale | length > 0 -%}
+      {%-       set _ = out.update({ns.cur: stale}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out }}
+
 # Stale objects are reported per host by 03b_predeploy_summary.yml.
 
 - name: Render the full IOS-XE candidate configuration

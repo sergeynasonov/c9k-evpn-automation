@@ -110,4 +110,18 @@ interface {{ intf }}
 !
 {% endfor %}
 {% endif %}
+{% if trunk_vlan_removals %}
+! --- handoff trunk: VLANs of VRFs this fabric no longer has. Adding a VRF puts
+!     its handoff VLAN here, so removing one has to take it off again --
+!     otherwise a decommissioned VRF stays permitted on the trunk forever.
+!
+!     'remove', never a rewritten allowed list: the underlay VLAN shares this
+!     trunk and is how the automation reaches a border at all. Naming only what
+!     goes makes it impossible to drop by accident, which a full list would not.
+{% for intf, vids in trunk_vlan_removals.items() %}
+interface {{ intf }}
+ switchport trunk allowed vlan remove {{ vids | ios_vlan_range }}
+!
+{% endfor %}
+{% endif %}
 end

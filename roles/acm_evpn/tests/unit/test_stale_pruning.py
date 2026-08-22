@@ -134,3 +134,87 @@ class TestStalePruning(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _trunk_removal_expression():
+    with open(_TASKS) as fh:
+        tasks = yaml.safe_load(fh)
+    for t in tasks:
+        if t.get("name", "").startswith("Work out what to prune"):
+            return t["ansible.builtin.set_fact"]["trunk_vlan_removals"]
+    raise AssertionError("trunk_vlan_removals not found in 02_render_configs.yml")
+
+
+def trunk_removals(running, handoff_vids, fabric_svis, fabric_config="",
+                   host="core1"):
+    """What the render would take OFF the handoff trunk."""
+    env = jinja2.Environment()
+    env.filters["difference"] = lambda a, b: [x for x in a if x not in b]
+    env.filters["intersect"] = lambda a, b: [x for x in a if x in b]
+    env.filters["unique"] = lambda a: list(dict.fromkeys(a))
+    env.filters["regex_findall"] = lambda s, p: re.findall(p, s, re.M)
+    # Ansible provides these; plain jinja2 does not.
+    env.tests["match"] = lambda v, p: bool(re.match(p, str(v)))
+    env.filters["map"] = env.filters["map"]
+    vrfs = {"CORP": {"handoff_vlans": {
+        v: {"tags": [host]} for v in handoff_vids}}}
+    out = env.from_string(_trunk_removal_expression()).render(
+        netbox_vlan_groups={"vrfs": vrfs},
+        inventory_hostname=host,
+        _dev_fabric_svis=fabric_svis,
+        fabric_config=fabric_config,
+        current_run_config={"stdout": [running]},
+    )
+    return out.strip()
+
+
+class TestAVrfsHandoffLeavesTheTrunk(unittest.TestCase):
+    """Adding a VRF puts its handoff VLAN on the border trunk, so removing one
+    has to take it off again.
+
+    Nothing did. The addition logic computes only what is MISSING from the
+    trunk, so a decommissioned VRF left its handoff VLAN permitted there for
+    good -- the same one-way door as the TRM loopbacks and the DHCP snooping
+    list, where the render stops emitting something and preserve-by-default
+    keeps it.
+    """
+
+    # 98 is underlay and shares this trunk. It is the path the automation
+    # reaches a border by, and it must never appear in a removal.
+    TRUNK = ("interface GigabitEthernet1/0/1\n"
+             " switchport trunk allowed vlan 98,197,297,397\n"
+             " switchport mode trunk\n")
+
+    def test_a_handoff_whose_vrf_is_gone_is_removed(self):
+        out = trunk_removals(self.TRUNK, handoff_vids=[197, 297],
+                             fabric_svis=[197, 297, 397],
+                             fabric_config="vlan 197\nvlan 297\n")
+        self.assertIn("397", out)
+
+    def test_a_handoff_still_rendered_is_never_removed(self):
+        out = trunk_removals(self.TRUNK, handoff_vids=[197, 297, 397],
+                             fabric_svis=[197, 297, 397],
+                             fabric_config="vlan 197\nvlan 297\nvlan 397\n")
+        self.assertEqual(out, "{}")
+
+    def test_the_underlay_vlan_is_never_removed(self):
+        """98 has no fabric SVI on a border, so it cannot enter the set. This
+        is the assertion that makes automatic removal safe at all: that trunk
+        is how the automation reaches the border."""
+        out = trunk_removals(self.TRUNK, handoff_vids=[],
+                             fabric_svis=[197, 297, 397], fabric_config="")
+        self.assertNotIn("98", out)
+
+    def test_a_vlan_the_fabric_never_owned_is_never_removed(self):
+        """A hand-configured VLAN on the same trunk carries no fabric SVI, so
+        it is outside the ownership test entirely."""
+        running = ("interface GigabitEthernet1/0/1\n"
+                   " switchport trunk allowed vlan 98,150,197\n")
+        out = trunk_removals(running, handoff_vids=[197], fabric_svis=[197],
+                             fabric_config="vlan 197\n")
+        self.assertNotIn("150", out)
+
+    def test_nothing_to_remove_yields_an_empty_map(self):
+        out = trunk_removals("", handoff_vids=[197], fabric_svis=[197],
+                             fabric_config="vlan 197\n")
+        self.assertEqual(out, "{}")
