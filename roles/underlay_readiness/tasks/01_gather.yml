@@ -72,6 +72,13 @@
 # it. See readiness_syslog_trap_line in defaults/main.yml for the measurement
 # that forced this.
 #
+# FILTERED ON THE DEVICE, not here. Unfiltered 'show logging' returns the entire
+# buffer, and this fabric runs 'logging buffered 1000000' -- up to a megabyte
+# per switch, fetched twice per run because 01_gather.yml is imported again
+# after configuring. dist3-1 alone had 321,101 message lines. The filter leaves
+# the status line and a handful of %SYS-4-LOG_CONFIG_CHANGE messages, which is
+# why the derive step below still has to tell those apart.
+#
 # Its own task, non-fatal and enrolment-gated, for the three reasons the SNMPv3
 # read above is: ios_command raises on the first command that errors and returns
 # no stdout at all, so sharing a task would take an unrelated read down with it;
@@ -84,7 +91,7 @@
 - name: Readiness — read the syslog trap level
   cisco.ios.ios_command:
     commands:
-      - "show logging"
+      - "show logging | include Trap logging"
   register: _readiness_syslog_show
   check_mode: false
   ignore_unreachable: true
