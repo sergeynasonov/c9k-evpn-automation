@@ -348,6 +348,53 @@ class TestDhcpSnoopingVlanList(unittest.TestCase):
             self.snooping_line(self.out({105: self.VLANS[105]}, vrfs={})))
 
 
+class TestTrmMdtBlock(unittest.TestCase):
+    """The MDT lines, which nothing rendered-side asserted before.
+
+    test_trm.py checks the DATA -- which VRF is enabled, which group, which data
+    range -- and stops there. What actually reaches the switch was untested, and
+    that is where a word went missing.
+    """
+
+    VRFS = {
+        "CORP": {
+            "l3vni": 20003, "core_vlans": {}, "edge_vlans": {},
+            "trm": {"enabled": True, "mdt_default_group": "239.3.2.1",
+                    "mdt_data_network": "239.3.3.0",
+                    "mdt_data_wildcard": "0.0.0.255"},
+        },
+    }
+
+    def block(self):
+        out = _render("leaf_config.j2", {}, vrfs=self.VRFS)
+        return [ln.strip() for ln in out.splitlines() if "mdt " in ln]
+
+    def test_overlay_use_bgp_carries_spt_only(self):
+        """'spt-only' selects the MVPN profile in which receivers move to the
+        shortest-path tree. Without it the shared-tree state an RP hands out is
+        never completed, so an ASM (*,G) join is accepted and delivers nothing
+        while SSM -- which consults no RP -- works perfectly.
+
+        Part 6 measured exactly that in CORP on 2026-08-22: control passing, SSM
+        routed at 10/10, ASM 0/10, and the conclusion drawn at the time was that
+        the anycast RP had failed. The RP was fine. This word was missing, and
+        no test looked at the rendered line.
+        """
+        self.assertIn("mdt overlay use-bgp spt-only", self.block())
+        self.assertNotIn("mdt overlay use-bgp", self.block())
+
+    def test_the_rest_of_the_mdt_block_is_intact(self):
+        block = self.block()
+        self.assertIn("mdt auto-discovery vxlan", block)
+        self.assertIn("mdt default vxlan 239.3.2.1", block)
+        self.assertIn("mdt data vxlan 239.3.3.0 0.0.0.255", block)
+
+    def test_a_vrf_without_trm_renders_no_mdt_at_all(self):
+        vrfs = {"CORP": {"l3vni": 20003, "core_vlans": {}, "edge_vlans": {}}}
+        out = _render("leaf_config.j2", {}, vrfs=vrfs)
+        self.assertNotIn("mdt ", out)
+
+
 class TestCandidateOwnsTheSnoopingList(unittest.TestCase):
     """The candidate must never carry two 'ip dhcp snooping vlan' lines.
 

@@ -24,13 +24,24 @@ vrf definition {{ vrf_name }}
 {# TRM. Enabled by DATA, not a flag: an ACTIVE 'default_mdt' prefix inside
     this VRF's own 239.<index>.0.0/16. See filter_plugins/netbox_evpn_data.py.
     'mdt overlay use-bgp' is what lets MVPN Source-Active routes carry source
-    discovery, which is why this fabric needs no MSDP between anycast RPs. #}
+    discovery, which is why this fabric needs no MSDP between anycast RPs.
+
+    'spt-only' is NOT optional decoration. It selects the MVPN profile in which
+    receivers move to the shortest-path tree, which is the mode this fabric is
+    built for -- without it the shared-tree state the RP hands out is never
+    completed, so an ASM (*,G) join can be accepted and still deliver nothing
+    while SSM, which never consults an RP, works perfectly.
+
+    That is exactly the shape Part 6 measured on 2026-08-22 in VRF CORP:
+    control passing, SSM routed across subnets at 10/10, ASM 0/10. The reading
+    at the time was "the anycast RP is at fault". The RP was fine; the profile
+    was missing. #}
   mdt auto-discovery vxlan
   mdt default vxlan {{ vrf_data.trm.mdt_default_group }}
 {% if vrf_data.trm.mdt_data_network is defined %}
   mdt data vxlan {{ vrf_data.trm.mdt_data_network }} {{ vrf_data.trm.mdt_data_wildcard }}
 {% endif %}
-  mdt overlay use-bgp
+  mdt overlay use-bgp spt-only
 {% endif %}
  exit-address-family
 !
