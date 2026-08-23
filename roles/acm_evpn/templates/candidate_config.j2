@@ -15,8 +15,24 @@
       on the device but no longer in the render -- are stripped too, so that
       preserve-by-default does not become preserve-forever. Computed in
       tasks/02_render_configs.yml.
-    * a trailer for config that must land AFTER the preserved block, currently
-      the handoff trunk's allowed-VLAN additions.
+    * CHILD-line ownership, SUBSTITUTED IN PLACE. Everything above decides
+      ownership per STANZA, on the unindented header. That is too coarse for
+      the handoff trunk: we own one line inside an interface whose other lines
+      (mode, description, port security) are the operator's. So the owned line
+      is rewritten where it stands and the rest of the stanza is preserved --
+      scoped to the interfaces in trunk_vlan_final and to nothing else, so an
+      unmanaged trunk elsewhere on the box keeps its allowed list untouched.
+
+      IN PLACE, not appended as a trailer, and this is not a style choice.
+      A trailer was tried and measured on 2026-08-23: it put 'interface
+      GigabitEthernet1/0/1' in the candidate TWICE -- once preserved with the
+      owned line stripped, once at the foot carrying the computed list. ACM
+      did not honour the second occurrence. Its applied diff on both borders
+      was 'no switchport trunk allowed vlan <exactly the list we asked for>',
+      emptying the allowed list on the very trunk the automation reaches a
+      border by. A stanza split across two places in the file is ambiguous to
+      a configuration REPLACEMENT, which parses a tree rather than replaying
+      lines; every interface must appear once, with a complete body.
     * candidate_omit_regex: stanzas 'acm replace' looks after by itself and
       which therefore only add noise to the candidate -- the Cisco licensing
       trustpoint and its certificate chain. ACM keeps these whether or not the
@@ -59,7 +75,10 @@
 {%   endfor %}
 {% endfor %}
 {% set kept = [] %}
-{% set ns = namespace(skip=false) %}
+{% set ns = namespace(skip=false, intf='') %}
+{# Interfaces whose allowed list has already been written, so a wrapped
+   '...allowed vlan add ...' continuation collapses into the one line. #}
+{% set trunk_done = [] %}
 {% for line in current_run_config.stdout[0].splitlines() %}
 {%   if line == '!' or not line.strip() %}
 {#     stanza separator: keep one, never a run of them #}
@@ -72,6 +91,10 @@
 {#     running-config preamble, comments and trailing 'end': never emitted #}
 {%   else %}
 {%     if not line.startswith(' ') %}
+{#       Track the stanza we are inside, for the child-line test below. Set on
+         every unindented line, so leaving an interface clears it. #}
+{%       set ns.intf = (line | trim)[10:] | trim
+                       if (line | trim).startswith('interface ') else '' %}
 {%       set prefix_hit = [] %}
 {%       for p in managed_prefixes %}
 {%         if (line | trim).startswith(p) %}{% set _ = prefix_hit.append(p) %}{% endif %}
@@ -92,22 +115,28 @@
                         or (candidate_omit_regex | length > 0
                             and line | trim is match(candidate_omit_regex)) %}
 {%     endif %}
-{%     if not ns.skip %}
+{#     A child line we render ourselves. The device's copy is replaced by ours
+       AT THIS POSITION, so the interface keeps a single complete body and the
+       candidate carries one allowed-VLAN statement rather than two relying on
+       last-one-wins -- the failure 'ip dhcp snooping vlan' hit.
+
+       The line is also the anchor: 02_render_configs only recognises a handoff
+       trunk BY this line, so an interface in trunk_vlan_final always has one
+       to substitute and there is no insert-into-an-empty-stanza case. #}
+{%     set child_owned = ns.intf in (trunk_vlan_final | default({}))
+                         and line.startswith(' ')
+                         and (line | trim).startswith('switchport trunk allowed vlan ') %}
+{%     if not ns.skip and not child_owned %}
 {%       set _ = kept.append(line) %}
+{%     elif not ns.skip and ns.intf not in trunk_done %}
+{%       set _ = kept.append(' switchport trunk allowed vlan '
+                             ~ (trunk_vlan_final[ns.intf] | ios_vlan_range)) %}
+{%       set _ = trunk_done.append(ns.intf) %}
 {%     endif %}
 {%   endif %}
 {% endfor %}
 {{ kept | join('\n') }}
 {% if kept and kept[-1] != '!' %}
 !
-{% endif %}
-{% if trunk_vlan_additions %}
-! --- handoff trunk: VLANs this border must carry. Emitted after the preserved
-!     interface so the 'add' is not overwritten by the base allowed list ---
-{% for intf, vids in trunk_vlan_additions.items() %}
-interface {{ intf }}
- switchport trunk allowed vlan add {{ vids | ios_vlan_range }}
-!
-{% endfor %}
 {% endif %}
 end
