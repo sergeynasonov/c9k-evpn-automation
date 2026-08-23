@@ -504,6 +504,74 @@ class TestCandidateOwnsTheTrunkAllowedList(unittest.TestCase):
         self.assertEqual(self._allowed(out, "GigabitEthernet1/0/1"),
                          ["switchport trunk allowed vlan 98,197,297"])
 
+    def test_the_interface_appears_exactly_once(self):
+        """One interface, one configuration subtree. Anything else is invalid
+        input to a configuration replacement, whatever it then does with it.
+
+        Emitting the computed list as a TRAILER produced exactly that: read off
+        core1's bootflash on 2026-08-23, the candidate held
+
+            interface GigabitEthernet1/0/1
+             switchport mode trunk
+
+        near the top and
+
+            interface GigabitEthernet1/0/1
+             switchport trunk allowed vlan 98,197,297
+
+        at the foot. Two subtrees for one interface. ACM's applied diff was 'no
+        switchport trunk allowed vlan 98,197,297' and the allowed list came off
+        the trunk the automation reaches a border by -- on both borders.
+
+        'The right line is somewhere in the output' passed throughout that
+        failure. The structure is the thing to assert."""
+        out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 297]})
+        headers = [ln for ln in out.splitlines()
+                   if ln == "interface GigabitEthernet1/0/1"]
+        self.assertEqual(len(headers), 1, out)
+
+    def test_no_interface_is_ever_emitted_twice(self):
+        """The invariant generalised. It is not specific to the handoff trunk:
+        any future line the render owns inside a preserved stanza has to be
+        substituted in place for the same reason."""
+        out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 297]})
+        heads = [ln for ln in out.splitlines() if ln.startswith("interface ")]
+        dupes = sorted({h for h in heads if heads.count(h) > 1})
+        self.assertEqual(dupes, [], out)
+
+    def test_the_list_is_written_where_the_device_had_it(self):
+        """In place, so the subtree stays one contiguous body."""
+        out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 297]})
+        lines = out.splitlines()
+        i = lines.index("interface GigabitEthernet1/0/1")
+        self.assertEqual(lines[i:i + 4], [
+            "interface GigabitEthernet1/0/1",
+            " description handoff",
+            " switchport trunk allowed vlan 98,197,297",
+            " switchport mode trunk",
+        ])
+
+    def test_a_wrapped_list_collapses_to_one_line(self):
+        """IOS splits a long list over continuation lines. Every one of them is
+        owned, but only ONE replacement may be written or the subtree gains the
+        duplicates back in another form."""
+        saved = self.DEVICE
+        self.DEVICE = "\n".join([
+            "hostname core1",
+            "interface GigabitEthernet1/0/1",
+            " switchport trunk allowed vlan 98,197",
+            " switchport trunk allowed vlan add 800,801",
+            " switchport mode trunk",
+            "!",
+            "end",
+        ])
+        try:
+            out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 800, 801]})
+        finally:
+            self.DEVICE = saved
+        self.assertEqual(self._allowed(out, "GigabitEthernet1/0/1"),
+                         ["switchport trunk allowed vlan 98,197,800-801"])
+
     def test_the_rest_of_the_interface_is_preserved(self):
         out = self.candidate({"GigabitEthernet1/0/1": [98, 197, 297]})
         self.assertIn(" description handoff", out)
