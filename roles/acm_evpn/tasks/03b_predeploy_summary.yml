@@ -70,7 +70,7 @@
       {%- for h in _hosts -%}
       {%-   set stale = hostvars[h].stale_headers | default([]) -%}
       {%-   set viol = hostvars[h]._acm_violations | default([]) -%}
-      {%-   set trunks = hostvars[h].trunk_vlan_additions | default({}) -%}
+      {%-   set trunks = hostvars[h].trunk_vlan_delta | default({}) -%}
       {%-   set d = hostvars[h].acm_census_delta | default({}) -%}
       {%-   set ns = namespace(add=0, rem=0) -%}
       {%-   for _k, v in d.items() -%}
@@ -84,8 +84,14 @@
       {%-   if stale -%}
       {%-     set _ = bits.append('PRUNE ' ~ (stale | join(', '))) -%}
       {%-   endif -%}
-      {%-   for intf, vids in trunks.items() -%}
-      {%-     set _ = bits.append('trunk ' ~ intf ~ ' += ' ~ (vids | join(','))) -%}
+      {#- Only trunks that change. The render emits a full allowed list every
+          run, so printing that list would put an identical line on every border
+          on every deploy. -#}
+      {%-   for intf, d in trunks.items() -%}
+      {%-     set parts = [] -%}
+      {%-     if d.add -%}{% set _ = parts.append('+' ~ (d.add | join(','))) %}{%- endif -%}
+      {%-     if d.drop -%}{% set _ = parts.append('-' ~ (d.drop | join(','))) %}{%- endif -%}
+      {%-     set _ = bits.append('trunk ' ~ intf ~ ' ' ~ (parts | join(' '))) -%}
       {%-   endfor -%}
       {%-   for v in viol -%}
       {%-     set _ = bits.append('BLAST RADIUS ' ~ v.klass ~ ' -' ~ v.removed_count
