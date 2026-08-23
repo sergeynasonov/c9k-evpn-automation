@@ -81,11 +81,16 @@ CARVE = [
 
 # 397/398 are the handoffs and 399 the core VLAN, following CORP's 197/198/199
 # and MEDICAL's 297/298/299.
+
+# The role the fabric classifies a handoff by; named so the pin check below
+# cannot drift from the table.
+HANDOFF_ROLE = "vrf_l3_handoff_vlan"
+
 VLANS = [
     (300, "SECURITY_DATA_CAMPUS", "edge",
      ["dag_routed", "multicast_enabled"]),
-    (397, "VRF_SECURITY_HANDOFF397", "vrf_l3_handoff_vlan", ["core1"]),
-    (398, "VRF_SECURITY_HANDOFF398", "vrf_l3_handoff_vlan", ["core2"]),
+    (397, "VRF_SECURITY_HANDOFF397", HANDOFF_ROLE, ["core1"]),
+    (398, "VRF_SECURITY_HANDOFF398", HANDOFF_ROLE, ["core2"]),
     (399, "VRF_SECURITY_CORE_VLAN", "core_vlan", []),
 ]
 
@@ -297,12 +302,72 @@ def enrol(nb: NetBox, ids: dict, plan: list, apply: bool) -> None:
             nb.post("ipam/prefixes/", body)
 
     # --- 3. VLANs ------------------------------------------------------------
+    #
+    # An existing VLAN is RECONCILED, not skipped. Skipping it is what broke the
+    # SECURITY enrolment: 397 and 398 were already in NetBox un-enrolled, so the
+    # script recorded their ids and moved on, and the device tags that pin a
+    # handoff to its border were only ever written on CREATE. With no tag, the
+    # role renders the handoff on no border at all -- 'inventory_hostname in
+    # vlan.tags' is false everywhere. Nothing failed and nothing warned; core1
+    # simply came up without VLAN 397, without interface Vlan397 and without the
+    # eBGP peering that handoff carries. Confirmed afterwards in the teardown
+    # diff, which removed 399 and had nothing to say about 397.
+    #
+    # It is not only the handoffs. VLAN 300 carries 'dag_routed' and
+    # 'multicast_enabled', which are what make it a routed anycast-gateway
+    # segment and what put it in the TRM carve; the same skip meant an existing
+    # 300 got neither. Every tag in the table above is reconciled.
+    #
+    # Tags are added, never removed: a VLAN may legitimately carry tags this
+    # script knows nothing about. The one case that cannot be left alone is a
+    # handoff pinned to the WRONG border, so a device tag belonging to another
+    # handoff in this table is reported as a CONFLICT for a human to resolve.
+    pinned = {t for _v, _n, r, tg in VLANS if r == HANDOFF_ROLE for t in tg}
     vlan_ids = {}
     for vid, name, role, tags in VLANS:
         existing = nb.one("ipam/vlans/", vid=vid, group_id=ids["vlan_group"])
         if existing:
             vlan_ids[vid] = existing["id"]
-            plan.append(("exists", "vlan %d %s" % (vid, existing["name"])))
+            have = {t["slug"] for t in existing.get("tags", [])}
+            missing = [t for t in tags if t not in have]
+            wrong = sorted((have & pinned) - set(tags)) if role == HANDOFF_ROLE else []
+            have_role = (existing.get("role") or {}).get("slug")
+
+            if wrong:
+                # No write. Adding this enrolment's tag on top would leave the
+                # handoff pinned to BOTH borders and rendered on both, which is
+                # worse than the un-enrolled state it started in.
+                plan.append(("CONFLICT", "vlan %d %s is pinned to %s, which this "
+                                         "enrolment does not claim -- resolve by "
+                                         "hand before applying"
+                             % (vid, existing["name"], ",".join(wrong))))
+                continue
+            if have_role and have_role != role:
+                plan.append(("CONFLICT", "vlan %d %s has role %s, expected %s -- "
+                                         "the fabric classifies a VLAN by its "
+                                         "role, so this one would be enrolled as "
+                                         "the wrong kind of object"
+                             % (vid, existing["name"], have_role, role)))
+                continue
+
+            body = {}
+            if missing:
+                # PATCH replaces the whole tag list, so the existing ones are
+                # carried over explicitly. Their ids come straight back from the
+                # API, which also covers tags outside this script's vocabulary.
+                body["tags"] = ([{"id": t["id"]} for t in existing.get("tags", [])]
+                                + [{"id": ids["tag"][t]} for t in missing])
+                plan.append(("UPDATE", "vlan %d %s += tags %s"
+                             % (vid, existing["name"], ",".join(missing))))
+            if not have_role:
+                body["role"] = ids["role"][role]
+                plan.append(("UPDATE", "vlan %d %s := role %s"
+                             % (vid, existing["name"], role)))
+            if not body:
+                plan.append(("exists", "vlan %d %s (tags and role already correct)"
+                             % (vid, existing["name"])))
+            elif apply:
+                nb.patch("ipam/vlans/%d/" % existing["id"], body)
             continue
         body = {"vid": vid, "name": name, "status": "active",
                 "group": ids["vlan_group"], "role": ids["role"][role],

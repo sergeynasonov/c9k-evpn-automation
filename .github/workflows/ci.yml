@@ -68,6 +68,13 @@ jobs:
       - name: Unit tests — underlay_readiness
         run: python -m unittest discover -s roles/underlay_readiness/tests/unit -v
 
+      # The NetBox provisioning scripts have no live API here, so their tests
+      # fake the client. They still catch the class of bug that shipped the
+      # SECURITY enrolment half-done: an object that already exists being
+      # skipped rather than reconciled.
+      - name: Unit tests — scripts
+        run: python -m unittest discover -s scripts/tests -v
+
       # 'ansible-playbook --syntax-check' does NOT validate the inventory: a
       # netbox_inv.yml corrupted into invalid YAML produces a WARNING and an
       # exit code of 0, so the step below would pass a file that cannot load.
