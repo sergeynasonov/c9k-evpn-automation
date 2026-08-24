@@ -58,9 +58,10 @@ class FakeNetBox:
         return {}
 
 
-def vlan(vid, name, tags=(), role="vrf_l3_handoff_vlan"):
+def vlan(vid, name, tags=(), role="vrf_l3_handoff_vlan", asn=None):
     return {"id": vid, "vid": vid, "name": name,
             "role": {"slug": role} if role else None,
+            "custom_fields": {"upstream_asn": asn},
             "tags": [{"id": 500 + i, "slug": t} for i, t in enumerate(tags)]}
 
 
@@ -116,8 +117,11 @@ class TestAnExistingVlanIsReconciled(unittest.TestCase):
         self.assertIn(500, sent)                      # the pre-existing tag
         self.assertIn(ids["tag"]["core1"], sent)
 
-    def test_a_correctly_tagged_vlan_is_left_alone(self):
-        nb, plan, ids = run([vlan(397, "H397", tags=("core1",))])
+    def test_a_fully_enrolled_vlan_is_left_alone(self):
+        """Tag AND role AND upstream_asn. A handoff missing any one of them is
+        incomplete, and each of the three has broken a render in turn."""
+        nb, plan, ids = run([vlan(397, "H397", tags=("core1",),
+                                  asn=enrol_mod.UPSTREAM_ASN)])
         self.assertNotIn("ipam/vlans/397/", nb.patched)
         self.assertTrue(any("already correct" in w
                             for w in entries(plan, "exists")))
@@ -141,6 +145,59 @@ class TestAnExistingVlanIsReconciled(unittest.TestCase):
         nb, plan, ids = run([vlan(397, "VRF_SECURITY_HANDOFF397")], apply=False)
         self.assertNotIn("ipam/vlans/397/", nb.patched)
         self.assertTrue(entries(plan, "UPDATE"))
+
+
+class TestAHandoffCarriesItsUpstreamAsn(unittest.TestCase):
+    """'upstream_asn' is the remote-as of a real eBGP session.
+
+    There is nothing to derive it from -- the peer is a router this project does
+    not manage -- so the render REFUSES a handoff without it rather than
+    guessing. The enrolment did not set it, which stopped the first render after
+    VRF SECURITY was provisioned: 18 objects created, both handoffs pinned to
+    the right border, and generate_evpn.yml still failed on access2-2 with
+    'VLAN 397 ... is an L3 handoff in VRF SECURITY with no upstream_asn'.
+
+    The failure is loud, which is the one good thing about it. It is also the
+    third object this enrolment has been incomplete about -- after the device
+    tags and the core VLAN binding -- so what the render REQUIRES of a handoff
+    is what these tests pin down.
+    """
+
+    def test_a_new_handoff_is_created_with_it(self):
+        nb, plan, _ids = run([])
+        created = [d for p, d in nb.posted if p == "ipam/vlans/"]
+        for vid in (397, 398):
+            body = next(b for b in created if b["vid"] == vid)
+            self.assertEqual(body["custom_fields"]["upstream_asn"],
+                             enrol_mod.UPSTREAM_ASN)
+
+    def test_a_non_handoff_does_not_get_one(self):
+        """VLAN 300 is an edge segment with no eBGP session. The field is
+        scoped to ipam.vlan, so nothing stops it being set on the wrong VLAN."""
+        nb, _plan, _ids = run([])
+        body = next(b for p, b in nb.posted
+                    if p == "ipam/vlans/" and b["vid"] == 300)
+        self.assertNotIn("custom_fields", body)
+
+    def test_an_existing_handoff_without_it_is_updated(self):
+        nb, plan, _ids = run([vlan(397, "H397", tags=("core1",))])
+        self.assertEqual(nb.patched["ipam/vlans/397/"]["custom_fields"],
+                         {"upstream_asn": enrol_mod.UPSTREAM_ASN})
+        self.assertTrue(any("upstream_asn" in w for w in entries(plan, "UPDATE")))
+
+    def test_a_different_asn_is_a_conflict_and_is_not_overwritten(self):
+        """Someone else's session. Changing the remote-as of a live peering to
+        a router nobody here controls is worse than leaving it un-enrolled."""
+        nb, plan, _ids = run([vlan(397, "H397", tags=("core1",), asn=65000)])
+        self.assertTrue(any("65000" in c for c in entries(plan, "CONFLICT")))
+        self.assertNotIn("ipam/vlans/397/", nb.patched)
+
+    def test_a_correct_asn_is_left_alone(self):
+        nb, plan, _ids = run([vlan(397, "H397", tags=("core1",),
+                                   asn=enrol_mod.UPSTREAM_ASN)])
+        self.assertNotIn("ipam/vlans/397/", nb.patched)
+        self.assertTrue(any("already correct" in w
+                            for w in entries(plan, "exists")))
 
 
 class TestTheVrfItselfIsCreatedWhenAbsent(unittest.TestCase):

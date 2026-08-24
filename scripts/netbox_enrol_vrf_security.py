@@ -86,6 +86,20 @@ CARVE = [
 # cannot drift from the table.
 HANDOFF_ROLE = "vrf_l3_handoff_vlan"
 
+# THE eBGP PEER ASN FOR BOTH HANDOFFS, and it has to be stated because there is
+# nothing to derive it from: it is the remote-as of a real session with a router
+# this project does not manage. The render REFUSES a handoff without it rather
+# than guessing, which is right -- 'neighbor <ip> remote-as' with nothing after
+# it is not a config anyone can debug.
+#
+# Omitting it here is what stopped the first render after this VRF was
+# provisioned: 18 objects created, both handoffs pinned correctly, and
+# generate_evpn.yml still failed on access2-2 with 'VLAN 397 ... is an L3
+# handoff in VRF SECURITY with no upstream_asn'. Per handoff by design (a border
+# can face a different upstream per tenant), the same 64512 for both here --
+# CORP and MEDICAL peer with it too.
+UPSTREAM_ASN = 64512
+
 VLANS = [
     (300, "SECURITY_DATA_CAMPUS", "edge",
      ["dag_routed", "multicast_enabled"]),
@@ -393,15 +407,32 @@ def enrol(nb: NetBox, ids: dict, plan: list, apply: bool) -> None:
                 body["role"] = ids["role"][role]
                 plan.append(("UPDATE", "vlan %d %s := role %s"
                              % (vid, existing["name"], role)))
+            if role == HANDOFF_ROLE:
+                cur = (existing.get("custom_fields") or {}).get("upstream_asn")
+                if cur in (None, "", 0):
+                    body["custom_fields"] = {"upstream_asn": UPSTREAM_ASN}
+                    plan.append(("UPDATE", "vlan %d %s := upstream_asn %d"
+                                 % (vid, existing["name"], UPSTREAM_ASN)))
+                elif int(cur) != UPSTREAM_ASN:
+                    # Someone else's session. Overwriting it would change the
+                    # remote-as of a live eBGP peering to a router nobody here
+                    # controls, so it is named and left alone.
+                    plan.append(("CONFLICT", "vlan %d %s has upstream_asn %s, "
+                                             "this enrolment expects %d -- "
+                                             "resolve by hand before applying"
+                                 % (vid, existing["name"], cur, UPSTREAM_ASN)))
+                    continue
             if not body:
-                plan.append(("exists", "vlan %d %s (tags and role already correct)"
-                             % (vid, existing["name"])))
+                plan.append(("exists", "vlan %d %s (tags, role and upstream_asn "
+                                       "already correct)" % (vid, existing["name"])))
             elif apply:
                 nb.patch("ipam/vlans/%d/" % existing["id"], body)
             continue
         body = {"vid": vid, "name": name, "status": "active",
                 "group": ids["vlan_group"], "role": ids["role"][role],
                 "tags": [{"id": ids["tag"][t]} for t in tags]}
+        if role == HANDOFF_ROLE:
+            body["custom_fields"] = {"upstream_asn": UPSTREAM_ASN}
         plan.append(("CREATE", "vlan %d %s role=%s tags=%s"
                      % (vid, name, role, ",".join(tags) or "-")))
         # None on a dry run: the VLAN is not created, so it has no id, but the
