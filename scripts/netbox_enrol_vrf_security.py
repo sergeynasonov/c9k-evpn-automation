@@ -253,11 +253,17 @@ def resolve(nb: NetBox, plan: list) -> dict:
         plan.append(("MISSING", "vlan group %s" % VLAN_GROUP))
     ids["vlan_group"] = grp["id"] if grp else None
 
-    vrf = nb.one("ipam/vrfs/", name=VRF_NAME)
-    if not vrf:
-        plan.append(("MISSING", "VRF %s -- create it first, this script enrols "
-                                "an existing VRF" % VRF_NAME))
-    ids["vrf"] = vrf
+    # An ABSENT VRF is not a blocker, it is the first thing to create. This used
+    # to refuse -- "create it first, this script enrols an existing VRF" -- which
+    # was true of the original hand-made SECURITY VRF and false of every run
+    # since the teardown script existed: the teardown deletes the VRF itself, so
+    # refusing here broke the delete-and-restore round trip the pair is for.
+    #
+    # The VRF is the ONE object this script may invent, and only because the
+    # whole script is about this one VRF: its name, l3vni and multicast index
+    # are declared at the top. netbox_provision_schema.py still refuses to
+    # create VRFs, and should -- it does not know which VRF you mean.
+    ids["vrf"] = nb.one("ipam/vrfs/", name=VRF_NAME)
 
     dh = nb.one("ipam/ip-addresses/", address=DHCP_SERVER)
     if not dh:
@@ -268,10 +274,34 @@ def resolve(nb: NetBox, plan: list) -> dict:
 
 def enrol(nb: NetBox, ids: dict, plan: list, apply: bool) -> None:
     vrf = ids["vrf"]
-    vrf_id = vrf["id"]
+
+    # --- 0. the VRF itself, if the teardown took it ---------------------------
+    #
+    # Created with its custom fields in one POST: 'l3vni' is what ENROLS a VRF in
+    # the fabric, so a VRF that exists without it renders nothing and reports no
+    # error. No 'rd' -- the switch-side RD is derived per device as
+    # <loopback0>:<l3vni> (common_base.j2), so NetBox's rd field is not the
+    # source and inventing one would only look authoritative.
+    #
+    # vrf_id stays None on a dry run, exactly as vlan_ids does below. Every
+    # lookup that would take it is skipped rather than issued: querying NetBox
+    # with vrf_id=None does not mean "in this VRF", it means "in the global
+    # table", and would report the carve prefixes as already present in a VRF
+    # that does not exist yet.
+    if not vrf:
+        plan.append(("CREATE", "VRF %s  l3vni=%d  mcast_base_group=%s"
+                     % (VRF_NAME, L3VNI, MCAST_BASE_GROUP)))
+        vrf = nb.post("ipam/vrfs/", {
+            "name": VRF_NAME,
+            "description": "EVPN tenant VRF, L3VNI %d" % L3VNI,
+            "custom_fields": {"l3vni": L3VNI,
+                              "mcast_base_group": MCAST_BASE_GROUP},
+        }) if apply else None
+        ids["vrf"] = vrf
+    vrf_id = vrf["id"] if vrf else None
 
     # --- 1. the VRF's own custom fields -- the only PATCH in the script -------
-    cf = vrf.get("custom_fields") or {}
+    cf = (vrf or {}).get("custom_fields") or {}
     want = {"l3vni": L3VNI, "mcast_base_group": MCAST_BASE_GROUP}
     change = {}
     for k, v in want.items():
@@ -283,7 +313,7 @@ def enrol(nb: NetBox, ids: dict, plan: list, apply: bool) -> None:
                                      "with %r" % (VRF_NAME, k, cur, v)))
         else:
             plan.append(("exists", "VRF %s.%s = %r" % (VRF_NAME, k, cur)))
-    if change:
+    if change and vrf_id:
         plan.append(("CREATE", "VRF %s custom fields %s" % (VRF_NAME, change)))
         if apply:
             nb.patch("ipam/vrfs/%d/" % vrf_id, {"custom_fields": change})
@@ -381,7 +411,8 @@ def enrol(nb: NetBox, ids: dict, plan: list, apply: bool) -> None:
 
     # --- 4. prefixes in the VRF ----------------------------------------------
     for prefix, vid, tags, descr, dhcp in PREFIXES + [CORE_VLAN_BINDING]:
-        if nb.one("ipam/prefixes/", prefix=prefix, vrf_id=vrf_id):
+        # vrf_id=None would ask NetBox for the GLOBAL table, not this VRF.
+        if vrf_id and nb.one("ipam/prefixes/", prefix=prefix, vrf_id=vrf_id):
             plan.append(("exists", "prefix %s (%s)" % (prefix, VRF_NAME)))
             continue
         body = {"prefix": prefix, "status": "active", "vrf": vrf_id,
@@ -404,7 +435,7 @@ def enrol(nb: NetBox, ids: dict, plan: list, apply: bool) -> None:
             nb.post("ipam/prefixes/", body)
 
     # --- 5. the external RP --------------------------------------------------
-    if nb.one("ipam/ip-addresses/", address=EXTERNAL_RP, vrf_id=vrf_id):
+    if vrf_id and nb.one("ipam/ip-addresses/", address=EXTERNAL_RP, vrf_id=vrf_id):
         plan.append(("exists", "ip %s (%s)" % (EXTERNAL_RP, VRF_NAME)))
     else:
         plan.append(("CREATE", "ip %s (%s) tag=trm_external_rp"

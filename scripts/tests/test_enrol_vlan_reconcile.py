@@ -38,6 +38,15 @@ class FakeNetBox:
     def one(self, path, branch=True, **params):
         if path == "ipam/vlans/":
             return self._vlans.get(params.get("vid"))
+        # NetBox reads a missing vrf_id as "the GLOBAL table", so a query built
+        # with vrf_id=None answers about global objects. 169.254.255.0/30 and
+        # 10.67.118.0/32 both exist there -- other VRFs' core bindings and the
+        # underlay RP -- so an unguarded lookup finds them and reports the VRF's
+        # own objects as already present. Modelled here, or the guard against it
+        # cannot be tested: without this the fake answers None either way and a
+        # missing guard looks identical to a working one.
+        if path in ("ipam/prefixes/", "ipam/ip-addresses/"):
+            return {"id": 1} if params.get("vrf_id") is None else None
         return None          # nothing else exists, so it is planned as CREATE
 
     def post(self, path, data, branch=True):
@@ -64,9 +73,9 @@ class Ids(dict):
         return self[key]
 
 
-def run(vlans, apply=True):
+def run(vlans, apply=True, vrf={"id": 3, "name": "SECURITY"}):
     ids = {"role": Ids(), "tag": Ids(), "vlan_group": 1, "dhcp": 2,
-           "vrf": {"id": 3, "name": "SECURITY"}}
+           "vrf": vrf}
     nb, plan = FakeNetBox(vlans), []
     enrol_mod.enrol(nb, ids, plan, apply)
     return nb, plan, ids
@@ -132,6 +141,63 @@ class TestAnExistingVlanIsReconciled(unittest.TestCase):
         nb, plan, ids = run([vlan(397, "VRF_SECURITY_HANDOFF397")], apply=False)
         self.assertNotIn("ipam/vlans/397/", nb.patched)
         self.assertTrue(entries(plan, "UPDATE"))
+
+
+class TestTheVrfItselfIsCreatedWhenAbsent(unittest.TestCase):
+    """The teardown deletes the VRF, so the enrolment has to be able to make it.
+
+    This used to refuse -- "create it first, this script enrols an existing
+    VRF" -- which was true of the original hand-made SECURITY VRF and false of
+    every run after the teardown script existed. It broke the delete-and-restore
+    round trip the pair is for: the teardown removes the VRF, and nothing could
+    put it back. netbox_provision_schema.py still refuses to create VRFs and
+    should; it does not know which VRF you mean, whereas this script is about
+    exactly one.
+    """
+
+    def test_an_absent_vrf_is_created_with_its_l3vni(self):
+        """'l3vni' is what ENROLS a VRF in the fabric. A VRF created without it
+        renders nothing and reports no error, which is the failure mode this
+        whole script exists to avoid."""
+        nb, plan, _ids = run([], vrf=None)
+        posted = dict(nb.posted)["ipam/vrfs/"]
+        self.assertEqual(posted["name"], "SECURITY")
+        self.assertEqual(posted["custom_fields"]["l3vni"], enrol_mod.L3VNI)
+        self.assertEqual(posted["custom_fields"]["mcast_base_group"],
+                         enrol_mod.MCAST_BASE_GROUP)
+
+    def test_no_rd_is_invented(self):
+        """The switch-side RD is derived per device as <loopback0>:<l3vni>, so
+        NetBox's rd field is not the source. Writing one would look
+        authoritative and be read by nothing."""
+        nb, _plan, _ids = run([], vrf=None)
+        self.assertNotIn("rd", dict(nb.posted)["ipam/vrfs/"])
+
+    def test_the_vrf_is_named_in_the_plan(self):
+        _nb, plan, _ids = run([], vrf=None)
+        self.assertTrue(any("VRF SECURITY" in w and "l3vni" in w
+                            for k, w in plan if k == "CREATE"), plan)
+
+    def test_a_dry_run_creates_nothing_but_still_plans_the_vrf(self):
+        nb, plan, _ids = run([], apply=False, vrf=None)
+        self.assertEqual(nb.posted, [])
+        self.assertTrue(any(k == "CREATE" and "VRF SECURITY" in w
+                            for k, w in plan))
+
+    def test_a_dry_run_never_reports_vrf_objects_as_already_present(self):
+        """With no VRF yet there is no vrf_id, and querying NetBox with
+        vrf_id=None asks about the GLOBAL table rather than this VRF. Issuing
+        those lookups would report the VRF's own prefixes and its external RP as
+        'exists' inside a VRF that does not exist, and the plan would understate
+        what an --apply is about to write."""
+        _nb, plan, _ids = run([], apply=False, vrf=None)
+        wrong = [w for k, w in plan
+                 if k == "exists" and ("(SECURITY)" in w or "prefix" in w)]
+        self.assertEqual(wrong, [], plan)
+
+    def test_an_existing_vrf_is_not_recreated(self):
+        nb, _plan, _ids = run([])
+        self.assertNotIn("ipam/vrfs/", dict(nb.posted))
 
 
 if __name__ == "__main__":
