@@ -327,6 +327,44 @@ class TestTheHandoffTrunkIsRenderedAsAFinalList(unittest.TestCase):
                             fabric_config="vlan 197\n")
         self.assertEqual(out, [98, 197, 800, 801])
 
+    def test_a_comma_separated_vlan_database_is_read(self):
+        """IOS collapses unnamed VLANs onto one line on some releases. Reading
+        only 'vlan <n>' would match none of them, empty 'keep', and collapse the
+        list to the handoffs alone -- emitting a trunk WITHOUT the underlay VLAN
+        the border is managed over. The one path from render logic to a lost
+        management path, so it is parsed rather than assumed."""
+        running = ("vlan 98,197,800\n!\n"
+                   "interface GigabitEthernet1/0/1\n"
+                   " switchport trunk allowed vlan 98,197,800\n"
+                   "!\n"
+                   "interface Vlan98\n ip address 10.0.0.1 255.255.255.0\n")
+        out = trunk_desired(running, handoff_vids=[197], fabric_svis=[197],
+                            fabric_config="vlan 197\n")
+        self.assertEqual(out, [98, 197, 800])
+
+    def test_a_vlan_range_in_the_database_is_expanded(self):
+        running = ("vlan 98\nvlan 197\nvlan 800-802\n!\n"
+                   "interface GigabitEthernet1/0/1\n"
+                   " switchport trunk allowed vlan 98,197,801\n"
+                   "!\n"
+                   "interface Vlan98\n ip address 10.0.0.1 255.255.255.0\n")
+        out = trunk_desired(running, handoff_vids=[197], fabric_svis=[197],
+                            fabric_config="vlan 197\n")
+        self.assertEqual(out, [98, 197, 801])
+
+    def test_vlan_configuration_is_not_a_database_entry(self):
+        """'vlan configuration 399' is VNI mapping, not the VLAN database. It
+        must not widen 'keep' -- a VLAN with a vlan-configuration stanza but no
+        database entry does not exist as a forwarding VLAN."""
+        running = ("vlan 98\nvlan 197\nvlan configuration 900\n!\n"
+                   "interface GigabitEthernet1/0/1\n"
+                   " switchport trunk allowed vlan 98,197,900\n"
+                   "!\n"
+                   "interface Vlan98\n ip address 10.0.0.1 255.255.255.0\n")
+        out = trunk_desired(running, handoff_vids=[197], fabric_svis=[197],
+                            fabric_config="vlan 197\n")
+        self.assertEqual(out, [98, 197])
+
     def test_a_trunk_with_no_underlay_vlan_is_left_alone(self):
         """Only a trunk carrying an underlay SVI's VLAN is a handoff trunk.
         Every other trunk on the box belongs to the operator."""

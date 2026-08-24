@@ -311,10 +311,36 @@
       {%- endfor -%}
       {%- set _new_defs = fabric_config | regex_findall('(?m)^vlan ([0-9]+)$')
                           | map('int') | list -%}
-      {#- IOS writes 'vlan 98 ' with a trailing space on some releases. -#}
-      {%- set _dev_defs = current_run_config.stdout[0]
-                          | regex_findall('(?m)^vlan ([0-9]+)\\s*$')
-                          | map('int') | list -%}
+      {#- THE VLAN DATABASE, and it is not one VLAN per line on every release.
+          IOS writes 'vlan 98 ' with a trailing space on some, and collapses
+          unnamed VLANs into 'vlan 98,700,701' or 'vlan 100-102' on others.
+          Only the first form was parsed.
+
+          This list is what KEEPS a VLAN on the trunk, so a spec it fails to
+          read is a VLAN dropped from the allowed list. Fail to read them all
+          -- which one comma would do -- and 'keep' is empty, 'desired'
+          collapses to the handoff VLANs alone, and the render emits a trunk
+          without the underlay VLAN the border is managed over. Not observed on
+          C9300/IOS-XE 17.x, where every VLAN gets its own line; parsed properly
+          because the cost of being wrong is the management path.
+
+          'vlan configuration 399' cannot match -- it has letters. The '-' sits
+          first in the class so it needs no escaping. -#}
+      {%- set _dev_defs = [] -%}
+      {%- for spec in current_run_config.stdout[0]
+                      | regex_findall('(?m)^vlan ([0-9][-0-9, ]*?)\\s*$') -%}
+      {%-   for part in spec.split(',') -%}
+      {%-     set bounds = part | trim -%}
+      {%-     if '-' in bounds -%}
+      {%-       for v in range(bounds.split('-')[0] | int,
+                               (bounds.split('-')[1] | int) + 1) -%}
+      {%-         set _ = _dev_defs.append(v) -%}
+      {%-       endfor -%}
+      {%-     elif bounds -%}
+      {%-       set _ = _dev_defs.append(bounds | int) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endfor -%}
       {%- set gone = _dev_fabric_svis | map('int') | list
                      | difference(handoff) | difference(_new_defs) -%}
       {%- set underlay_svis = (current_run_config.stdout[0]
