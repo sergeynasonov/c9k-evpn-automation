@@ -25,6 +25,13 @@
 - name: Resolve the fabric's anycast RP
   ansible.builtin.import_tasks: fabric_anycast_rp.yml
 
+# After fabric_resolve.yml, so only switches this run actually checks lose their
+# recorded key -- a server or a WAN router in the same site is dropped there,
+# and its key is left alone. Before 01_gather.yml, which is the first task that
+# connects to the switch.
+- name: Forget recorded SSH host keys (onboarding re-learns them)
+  ansible.builtin.import_tasks: 00_host_keys.yml
+
 - name: Gather underlay state
   ansible.builtin.import_tasks: 01_gather.yml
 

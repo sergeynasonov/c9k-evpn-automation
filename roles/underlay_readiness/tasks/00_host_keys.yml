@@ -1,0 +1,27 @@
+---
+# Forget this switch's SSH host key on the control node, so the connection
+# that follows accepts whatever key it presents and records it. Imported by
+# main.yml only -- readiness.yml, never the acm_evpn pre-flight. See
+# readiness_refresh_host_keys in defaults/main.yml for why this exists rather
+# than 'host_key_checking = False'.
+#
+# The key is re-recorded by the connection itself: with the key now unknown,
+# network_cli's host_key_auto_add (default true) accepts it, and record_host_keys
+# writes it back to ~/.ssh/known_hosts when the connection closes.
+#
+# Keyed by ansible_host, because that is the name paramiko connects to and
+# records the key under -- the switch's NetBox primary address, not its
+# hostname. A non-standard port is recorded as '[address]:port'.
+- name: Forget this switch's recorded SSH host key
+  ansible.builtin.known_hosts:
+    name: >-
+      {{ ansible_host if (ansible_port | default(22) | int) == 22
+         else '[' ~ ansible_host ~ ']:' ~ ansible_port }}
+    state: absent
+  delegate_to: localhost
+  # Every host edits the same file. known_hosts rewrites it in place, so two
+  # forks at once can lose each other's removals.
+  throttle: 1
+  when:
+    - readiness_refresh_host_keys | bool
+    - ansible_host is defined

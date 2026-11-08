@@ -368,6 +368,28 @@ snmp_v3_priv_password: "{{ lookup('env', 'ios_snmp_priv') }}"
 # 'readiness_apply_baseline: false' already covers it.
 readiness_apply_snmp: true
 
+# Forget each targeted switch's recorded SSH host key before connecting, so
+# readiness.yml accepts whatever key the switch presents now and records it.
+#
+# readiness.yml is the onboarding step, and onboarding is exactly when a key
+# legitimately changes: a switch wiped and re-added, an RMA, a re-image, an
+# address reused by a different switch. Without this, the first contact fails
+# with "host key mismatch" and the only remedy is ssh-keygen -R by hand.
+#
+# Why not 'host_key_checking = False' in ansible.cfg? Because with
+# ansible.netcommon 8.5.3 over paramiko it has no effect: network_cli's
+# get_options() merges its paramiko layer's built-in defaults --
+# host_key_checking True -- over the configured value, and the persistent
+# connection is started with that. Config, environment and inventory vars were
+# all tried against a real SSH server; every one still raised the mismatch.
+#
+# Only readiness.yml does this. generate_evpn.yml and deploy_evpn.yml do not
+# import this role's main.yml, so they keep checking against the key readiness
+# recorded -- a key that changes between onboarding and a deploy still stops
+# the deploy, which is the point of checking at all. Set false to keep a
+# switch's recorded key through a readiness run.
+readiness_refresh_host_keys: true
+
 # Fail on an unready switch (the deploy path). generate_evpn.yml sets this
 # false so it reports the same findings and still produces the candidate.
 readiness_enforce: true

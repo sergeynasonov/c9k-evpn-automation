@@ -214,6 +214,11 @@ some of it is load-bearing:
   switch does not gate 500. The playbooks override this to `linear` where they
   need `run_once`.
 - `gathering = explicit` — no implicit fact gathering; these are network devices.
+- `host_key_checking = False` — **ineffective for the switches.** With
+  `ansible.netcommon` 8.5.3 over paramiko the plugin's own default overrides it.
+  A switch whose key changed (wiped, RMA'd, re-added) is handled by running
+  `readiness.yml` against it first, which forgets the old key and records the
+  new one. See the README's *SSH host keys* section.
 - `result_format = yaml` — readable multi-line output instead of JSON blobs.
 
 ### 2. `netbox_inv.yml` (Dynamic Inventory)
