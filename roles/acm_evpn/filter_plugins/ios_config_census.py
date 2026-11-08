@@ -44,6 +44,14 @@ _PATTERNS = {
     # NOT match the "member evpn-instance N vni M" form, which is counted by
     # evpn_instances instead.
     "vni_members": r"(?m)^\s+member vni (\d+)",
+    # BGP peer-group members -- on a route reflector, its EVPN clients. Tracked
+    # because a decommissioned leaf's session is now ALLOWED to disappear
+    # (ios_underlay.bgp_unrendered_neighbours) when its address has left the
+    # inventory -- which is also exactly what a NetBox outage or an over-tight
+    # inventory filter looks like. One leaf of six leaving is 17% and passes;
+    # every client vanishing at once is 100% and blocks. Without this class
+    # nothing would have counted them at all.
+    "bgp_peer_group_members": r"(?m)^\s+neighbor (\S+) peer-group \S+\s*$",
 }
 
 _ALWAYS_PRESENT = {"vrfs": {"Mgmt-vrf"}}

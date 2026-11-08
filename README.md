@@ -897,6 +897,7 @@ the evicted files. Set `acm_checkpoint: false` to disable, or point
 | New VRF | Set `l3vni` and `mcast_base_group`; create its multicast carve; deploy |
 | New VRF handoff | Add the handoff VLAN with role `vrf_l3_handoff_vlan`, tagged with the border switch's hostname. The trunk list updates itself |
 | New switch | Day 0 by hand, then onboard in NetBox, then `readiness.yml`, then deploy — both scoped to its fabric |
+| Remove a leaf | Delete it from NetBox (or set it anything but Active), then deploy its fabric. The spines drop its EVPN session and report it as `BGP PEER GONE FROM NETBOX`. A border's mesh session is not removed this way — that still blocks, on purpose |
 | Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a scoped `trm_allocate.yml` run |
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
 | Admin or SNMPv3 password | Change it in your secret store — they are read from the environment, never stored here — then re-run `readiness.yml` |
@@ -920,7 +921,8 @@ front-loads its checks. All of these run **before a switch is touched**:
 | Multicast validation | A missing, malformed or out-of-carve replication group; two segments of one fabric claiming the same group |
 | Anycast RP assertions | RP loopback disagreeing with the fabric's anycast RP, a spine switch missing it, or two spine switches in one fabric carrying **different** addresses |
 | Peer addressing assertion | `Loopback0` disagreeing with the device's NetBox primary IP |
-| Blast-radius guard | Removing >50% of any tracked object class, or **any** underlay object (zero tolerance). Strictly greater: one of two members passes, the last member of a class does not |
+| Unrendered fabric-ASN neighbour | A neighbour in the fabric ASN that the candidate no longer renders, so `acm replace` would delete the session. Allowed only for a member of `EVPN-PEERS` whose address belongs to no device in NetBox — a decommissioned leaf. Anything else blocks: a border-mesh peer, a hand-built session, or a peer whose device is still in NetBox |
+| Blast-radius guard | Removing >50% of any tracked object class, or **any** underlay object (zero tolerance). Strictly greater: one of two members passes, the last member of a class does not. EVPN peer-group members are a class, so the leaf-decommission allowance above cannot turn an empty NetBox inventory into a spine with no clients |
 
 The blast-radius guard is the backstop for bad input: if NetBox returns nothing,
 the candidate config is small and valid, and without the guard `acm replace`

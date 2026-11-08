@@ -19,6 +19,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + "/filter_plugins")
 
 from ios_underlay import (  # noqa: E402
+    bgp_unrendered_neighbours,
     render_vlan_spec,
     underlay_config,
 )
@@ -141,7 +142,8 @@ class TestBgpOwnershipByAsn(unittest.TestCase):
     def test_no_bgp_at_all(self):
         bgp = underlay_config("hostname x\n!\n")["bgp"]
         self.assertEqual(bgp, {"asn": "", "direct": [], "af_ipv4": [],
-                               "fabric_asn_stripped": []})
+                               "fabric_asn_stripped": [],
+                               "peer_group_members": []})
 
     def test_indented_separator_does_not_truncate_the_stanza(self):
         """'router bgp' uses an indented '!' between address families; treating
@@ -211,6 +213,112 @@ class TestVlanSpecRendering(unittest.TestCase):
 
     def test_empty_list(self):
         self.assertEqual(render_vlan_spec([]), "")
+
+
+
+# ---------------------------------------------------------------------------
+# A stripped neighbour the candidate no longer renders
+#
+# The case that motivated the split: leaf 10.67.118.73 was deleted from NetBox,
+# so both route reflectors stopped rendering it as a client -- correctly -- and
+# the check that guards the border mesh refused to render either of them.
+# ---------------------------------------------------------------------------
+
+RR_BGP = """\
+router bgp 64513
+ neighbor EVPN-PEERS peer-group
+ neighbor EVPN-PEERS remote-as 64513
+ neighbor 10.67.118.71 peer-group EVPN-PEERS
+ neighbor 10.67.118.72 peer-group EVPN-PEERS
+ neighbor 10.67.118.73 peer-group EVPN-PEERS
+ neighbor 10.67.118.74 peer-group EVPN-PEERS
+ neighbor 10.67.118.75 peer-group EVPN-PEERS
+ neighbor 10.67.118.65 remote-as 64513
+ neighbor 10.67.118.65 update-source Loopback0
+ neighbor 10.67.118.99 remote-as 64513
+ neighbor 10.67.118.2 remote-as 64512
+ !
+ address-family ipv4
+  neighbor 10.67.118.65 activate
+  neighbor 10.67.118.2 activate
+ exit-address-family
+!
+"""
+
+# What the render emits once .73 is gone from NetBox: the peer group, the four
+# remaining clients and the border mesh. 10.67.118.99 is a hand-built session
+# no template renders.
+RR_CANDIDATE = """\
+router bgp 64513
+ neighbor EVPN-PEERS peer-group
+ neighbor EVPN-PEERS remote-as 64513
+ neighbor 10.67.118.71 peer-group EVPN-PEERS
+ neighbor 10.67.118.72 peer-group EVPN-PEERS
+ neighbor 10.67.118.74 peer-group EVPN-PEERS
+ neighbor 10.67.118.75 peer-group EVPN-PEERS
+ neighbor 10.67.118.65 remote-as 64513
+ neighbor 10.67.118.2 remote-as 64512
+"""
+
+# Primary addresses of everything still in the inventory -- .73 is not.
+INVENTORY = ["10.67.118.64", "10.67.118.65", "10.67.118.71", "10.67.118.72",
+             "10.67.118.74", "10.67.118.75"]
+
+
+class TestPeerGroupMembersAreRecorded(unittest.TestCase):
+
+    def test_members_of_the_evpn_peer_group(self):
+        bgp = underlay_config(RR_BGP, fabric_asn=64513)["bgp"]
+        self.assertEqual(bgp["peer_group_members"],
+                         ["10.67.118.71", "10.67.118.72", "10.67.118.73",
+                          "10.67.118.74", "10.67.118.75"])
+
+    def test_another_peer_group_is_not_ours(self):
+        cfg = RR_BGP.replace("neighbor 10.67.118.73 peer-group EVPN-PEERS",
+                             "neighbor 10.67.118.73 peer-group SOMEONE-ELSE")
+        bgp = underlay_config(cfg, fabric_asn=64513)["bgp"]
+        self.assertNotIn("10.67.118.73", bgp["peer_group_members"])
+
+
+class TestUnrenderedNeighboursAreClassified(unittest.TestCase):
+
+    def classify(self, device=RR_BGP, candidate=RR_CANDIDATE, inventory=INVENTORY):
+        bgp = underlay_config(device, fabric_asn=64513)["bgp"]
+        return bgp_unrendered_neighbours(bgp, candidate, inventory)
+
+    def test_a_decommissioned_leaf_is_departed_not_missing(self):
+        out = self.classify()
+        self.assertIn("10.67.118.73", out["departed"])
+        self.assertNotIn("10.67.118.73", out["missing"])
+
+    def test_a_hand_built_fabric_asn_session_is_still_missing(self):
+        """.99 is in the fabric ASN but not in the peer group, and no template
+        renders it. Deleting it silently is the thing this check prevents."""
+        self.assertEqual(self.classify()["missing"], ["10.67.118.99"])
+
+    def test_a_leaf_still_in_netbox_that_did_not_render_is_missing(self):
+        """The render-bug case: the device is still there, so its session
+        disappearing is not a decommission."""
+        out = self.classify(inventory=INVENTORY + ["10.67.118.73"])
+        self.assertIn("10.67.118.73", out["missing"])
+        self.assertEqual(out["departed"], [])
+
+    def test_a_border_mesh_peer_is_never_departed(self):
+        """Outside the peer group, so absence from the inventory alone does
+        not make it the automation's to delete."""
+        candidate = RR_CANDIDATE.replace(" neighbor 10.67.118.65 remote-as 64513\n", "")
+        out = self.classify(candidate=candidate,
+                            inventory=[a for a in INVENTORY if a != "10.67.118.65"])
+        self.assertIn("10.67.118.65", out["missing"])
+
+    def test_addresses_with_a_mask_still_match(self):
+        out = self.classify(inventory=[a + "/32" for a in INVENTORY] + ["10.67.118.73/32"])
+        self.assertIn("10.67.118.73", out["missing"])
+
+    def test_everything_rendered_is_neither(self):
+        cand = RR_CANDIDATE + " neighbor 10.67.118.73 peer-group EVPN-PEERS\n" \
+                              " neighbor 10.67.118.99 remote-as 64513\n"
+        self.assertEqual(self.classify(candidate=cand), {"departed": [], "missing": []})
 
 
 if __name__ == "__main__":

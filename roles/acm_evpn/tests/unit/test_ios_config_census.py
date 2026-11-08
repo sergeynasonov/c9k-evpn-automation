@@ -158,7 +158,7 @@ class TestCensusDelta(unittest.TestCase):
         self.assertEqual(
             set(delta),
             {"vrfs", "svis", "evpn_instances", "vni_members", "other_interfaces",
-             *UNDERLAY_CLASSES},
+             "bgp_peer_group_members", *UNDERLAY_CLASSES},
         )
         for d in delta.values():
             self.assertEqual(
@@ -341,6 +341,32 @@ class TestUnderlayZeroTolerance(unittest.TestCase):
         vrfs = next(x for x in v if x["klass"] == "vrfs")
         self.assertFalse(vrfs["underlay"])
         self.assertIn("threshold", vrfs["reason"])
+
+
+
+class TestPeerGroupMembersAreABlastRadiusClass(unittest.TestCase):
+    """A decommissioned leaf's session is allowed to disappear once its address
+    has left the inventory -- and so is every leaf's when NetBox returns an
+    empty inventory. The proportion is what tells the two apart."""
+
+    RR = "router bgp 64513\n neighbor EVPN-PEERS peer-group\n" + "".join(
+        " neighbor 10.67.118.7%d peer-group EVPN-PEERS\n" % i for i in range(1, 7))
+
+    def test_one_client_of_six_leaving_passes(self):
+        fewer = self.RR.replace(" neighbor 10.67.118.73 peer-group EVPN-PEERS\n", "")
+        self.assertEqual(ios_config_census_violations(self.RR, fewer), [])
+        delta = ios_config_census_delta(self.RR, fewer)["bgp_peer_group_members"]
+        self.assertEqual(delta["removed"], ["10.67.118.73"])
+
+    def test_every_client_vanishing_blocks(self):
+        empty = "router bgp 64513\n neighbor EVPN-PEERS peer-group\n"
+        klasses = [v["klass"] for v in ios_config_census_violations(self.RR, empty)]
+        self.assertIn("bgp_peer_group_members", klasses)
+
+    def test_the_peer_group_definition_is_not_a_member(self):
+        census = ios_config_census(self.RR)
+        self.assertNotIn("EVPN-PEERS", census["bgp_peer_group_members"])
+        self.assertEqual(len(census["bgp_peer_group_members"]), 6)
 
 
 if __name__ == "__main__":

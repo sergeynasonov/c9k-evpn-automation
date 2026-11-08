@@ -85,6 +85,10 @@
       {%-   if stale -%}
       {%-     set _ = bits.append('PRUNE ' ~ (stale | join(', '))) -%}
       {%-   endif -%}
+      {%-   set departed = (hostvars[h].acm_bgp_unrendered | default({})).departed | default([]) -%}
+      {%-   if departed -%}
+      {%-     set _ = bits.append('BGP PEER GONE FROM NETBOX ' ~ (departed | join(', '))) -%}
+      {%-   endif -%}
       {#- Only trunks that change. The render emits a full allowed list every
           run, so printing that list would put an identical line on every border
           on every deploy. -#}
