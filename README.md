@@ -650,6 +650,28 @@ Two consequences worth knowing: **rotating the local admin password is a
 should report **no baseline change at all** — anything it does report is real
 drift.
 
+#### SSH host keys
+
+One more thing readiness changes, on the **control node** rather than the
+switch: before it connects, it forgets each targeted switch's entry in
+`~/.ssh/known_hosts`, so it accepts whatever key the switch presents and records
+it afresh. Onboarding is exactly when a key legitimately changes — a switch
+wiped and re-added, an RMA, a re-image, an address reused — and without this the
+first contact fails with `host key mismatch for <address>`.
+
+Only `readiness.yml` does this. `generate_evpn.yml` and `deploy_evpn.yml` keep
+checking against the key readiness recorded, so a key that changes between
+onboarding and a deploy still stops the deploy. Set
+`readiness_refresh_host_keys: false` to keep recorded keys through a readiness
+run. Only switches the run actually checks are touched; a server or WAN router
+selected by a site-wide `deploy_target` keeps its entry.
+
+`host_key_checking = False` in `ansible.cfg` does **not** do this, despite
+appearances. With `ansible.netcommon` 8.5.3 over paramiko, `network_cli` merges
+its paramiko layer's built-in default (`True`) over the configured value, and
+config, environment and inventory variables were all tried against a real SSH
+server: every one still raised the mismatch.
+
 Set `readiness_apply_baseline: false` or `readiness_apply_snmp: false` to check
 without configuring anything. Neither decides *enrolment* — an unenrolled
 deployment is not checked either, whereas these leave the checks running against
@@ -897,6 +919,7 @@ the evicted files. Set `acm_checkpoint: false` to disable, or point
 | New VRF | Set `l3vni` and `mcast_base_group`; create its multicast carve; deploy |
 | New VRF handoff | Add the handoff VLAN with role `vrf_l3_handoff_vlan`, tagged with the border switch's hostname. The trunk list updates itself |
 | New switch | Day 0 by hand, then onboard in NetBox, then `readiness.yml`, then deploy — both scoped to its fabric |
+| Switch wiped, re-imaged, RMA'd or re-added | `readiness.yml` first, scoped to it. It forgets the old SSH host key and records the new one; generate and deploy then check against that. Run generate or deploy first and they fail with `host key mismatch` — by design |
 | Remove a leaf | Delete it from NetBox (or set it anything but Active), then deploy its fabric. The spines drop its EVPN session and report it as `BGP PEER GONE FROM NETBOX`. A border's mesh session is not removed this way — that still blocks, on purpose |
 | Enable multicast on a VRF | Set its `239.<index>.2.0/24` (`default_mdt`) to **Active**, tag its edge VLANs `multicast_enabled`, add an RP address. External RP also needs a pool and a scoped `trm_allocate.yml` run |
 | Underlay change | On the device. Ansible will pick it up and carry it forward |
