@@ -55,8 +55,9 @@
 # use it -- but it validates it, which catches the data error at onboarding
 # rather than on the first render.
 
-# Fabric identity is resolved in its own file: deploy_evpn.yml needs the same
-# answer before its device-facing play forms, to pick the spines that belong in
+# Fabric identity is resolved in its own file: resolve_deploy_scope.yml (the
+# scope play of generate_evpn.yml and deploy_evpn.yml) needs the same answer
+# before the device-facing play forms, to pick the spines that belong in
 # a narrowly scoped run. Imported rather than duplicated.
 - name: Resolve fabric identity from inventory
   ansible.builtin.import_tasks: fabric_map.yml

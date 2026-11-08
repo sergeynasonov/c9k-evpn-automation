@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Sergey Nasonov, Cisco Systems <snasonov@cisco.com>
-"""Which devices a deploy actually touches, and which spines come with them.
+"""Which devices a generate or deploy actually touches, and which spines come
+with them.
 
-deploy_evpn.yml resolves its own scope before the play that opens a session to
-anything. That resolution is the whole safety boundary of a scoped run: get it
-wrong in one direction and a fabric's spines keep a stale EVPN peer list after a
+resolve_deploy_scope.yml resolves the scope before the play that opens a
+session to anything, and both generate_evpn.yml and deploy_evpn.yml import it.
+That resolution is the whole safety boundary of a scoped run: get it wrong in
+one direction and a fabric's spines keep a stale EVPN peer list after a
 leaf is added; wrong in the other and a deploy scoped to one building contacts
 switches in a different lab.
 
@@ -15,9 +17,13 @@ discard them is not a boundary, it is a filter with an off-by-one waiting to
 happen, and it cannot be narrowed in the pattern because ':&' consumes
 everything to its left.
 
-Like test_fabric_resolve.py this runs the REAL play out of deploy_evpn.yml,
-lifted at run time so the test cannot drift from the playbook, against a static
-two-fabric inventory. No NetBox and no device is in the path: scope is decided
+generate_evpn.yml kept that union after deploy_evpn.yml dropped it, so a
+preview contacted different switches from the deploy it previewed. The tests
+at the bottom pin both playbooks to the one shared play.
+
+Like test_fabric_resolve.py this runs the REAL play out of
+resolve_deploy_scope.yml, lifted at run time so the test cannot drift from the
+playbook, against a static two-fabric inventory. No NetBox and no device is in the path: scope is decided
 entirely from inventory groups.
 """
 
@@ -35,12 +41,15 @@ ROLE = os.path.dirname(TESTS)
 ROLES = os.path.dirname(ROLE)
 REPO = os.path.dirname(ROLES)
 FIXTURES = os.path.join(TESTS, "fixtures")
-PLAYBOOK = os.path.join(REPO, "deploy_evpn.yml")
+PLAYBOOK = os.path.join(REPO, "resolve_deploy_scope.yml")
+# Every playbook that renders for the fabric. Each must take its scope from the
+# shared play and nowhere else.
+SCOPED_PLAYBOOKS = ("generate_evpn.yml", "deploy_evpn.yml")
 ANSIBLE = shutil.which("ansible-playbook")
 
 
 def _scope_play():
-    """The scope-resolution play, lifted from deploy_evpn.yml.
+    """The scope-resolution play, lifted from resolve_deploy_scope.yml.
 
     Identified by the fact it sets, not by position: a play added above it must
     not silently make this test check the wrong one.
@@ -58,7 +67,7 @@ def _scope_play():
     wanted = [p for p in plays if sets_the_scope(p)]
     if len(wanted) != 1:
         raise AssertionError(
-            "expected exactly one scope-resolving play in deploy_evpn.yml, "
+            "expected exactly one scope-resolving play in resolve_deploy_scope.yml, "
             "found {}".format([p.get("name") for p in wanted])
         )
     return wanted[0]
@@ -155,6 +164,54 @@ class TestDeployScope(unittest.TestCase):
         rc, out, result = resolve("access1-1")
         self.assertEqual(rc, 0, out[-3000:])
         self.assertEqual(result["addresses"], ["10.0.0.11", "10.0.0.1", "10.0.0.2"])
+
+    def test_a_target_that_matches_nothing_is_refused(self):
+        """A typo used to reach task 14 by way of the unioned spines. With the
+        union gone it would leave the next play empty, which Ansible reports as
+        a warning and exit 0 -- a typo indistinguishable from 'nothing to do'."""
+        rc, out, result = resolve("acess1-1")
+        self.assertNotEqual(rc, 0, out[-3000:])
+        self.assertIsNone(result)
+        self.assertIn("matches no device", out)
+        self.assertIn("site_group_evpn_campus", out)
+
+
+class TestBothPlaybooksShareTheScope(unittest.TestCase):
+    """generate_evpn.yml is a preview of deploy_evpn.yml, so the two must act on
+    the same switches. Asserted structurally rather than by running both:
+    'the same play' is a stronger guarantee than 'the same answer today'."""
+
+    def plays(self, name):
+        with open(os.path.join(REPO, name)) as fh:
+            return yaml.safe_load(fh)
+
+    def test_each_imports_the_shared_scope_play_first(self):
+        for name in SCOPED_PLAYBOOKS:
+            with self.subTest(playbook=name):
+                first = self.plays(name)[0]
+                imported = (first.get("ansible.builtin.import_playbook")
+                            or first.get("import_playbook"))
+                self.assertEqual(imported, "resolve_deploy_scope.yml")
+
+    def test_each_renders_only_for_the_resolved_group(self):
+        """A host pattern of its own -- the old ':tags_fabric_spine' union, or
+        anything else -- would put back a second definition of scope."""
+        for name in SCOPED_PLAYBOOKS:
+            with self.subTest(playbook=name):
+                rest = self.plays(name)[1:]
+                self.assertTrue(rest)
+                for play in rest:
+                    self.assertEqual(play.get("hosts"), "acm_deploy_scope",
+                                     play.get("name"))
+
+    def test_no_playbook_resolves_scope_on_its_own(self):
+        for name in SCOPED_PLAYBOOKS:
+            with self.subTest(playbook=name):
+                for play in self.plays(name):
+                    for task in play.get("tasks") or []:
+                        fact = (task.get("ansible.builtin.set_fact")
+                                or task.get("set_fact") or {})
+                        self.assertNotIn("acm_deploy_scope", fact)
 
 
 if __name__ == "__main__":

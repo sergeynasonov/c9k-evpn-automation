@@ -46,11 +46,12 @@
     #
     # THE SPINES ARE THE SAME MISTAKE ONE LAYER OUT, and the first fix missed
     # them because they ARE fabric nodes -- of a fabric this run is not
-    # targeting. deploy_evpn.yml unions tags_fabric_spine in estate-wide on
-    # purpose (a spine left out of the play keeps a stale peer list), so a
-    # campus deploy always selects the CML spines, and 01_gather_data.yml task
-    # 15a always drops them. Reporting that as a failure meant every single
-    # campus run printed two switches as broken when nothing was wrong.
+    # targeting. deploy_evpn.yml used to union tags_fabric_spine in
+    # estate-wide (a spine left out of the play keeps a stale peer list), so a
+    # campus deploy always selected the CML spines, and 01_gather_data.yml task
+    # 15a always dropped them. Reporting that as a failure meant every single
+    # campus run printed two switches as broken when nothing was wrong. The
+    # scope play no longer selects them, but a hand-written pattern still can.
     # 'acm_fabric_not_targeted' is set by the task that makes the decision.
     _missing: >-
       {%- set out = [] -%}

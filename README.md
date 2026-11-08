@@ -128,6 +128,7 @@ role also refuses, for a different reason. See [Deploying](#deploying) for both.
 |---|---|
 | `deploy_evpn.yml` | Render and deploy to the fabric |
 | `generate_evpn.yml` | Render only — no device changes |
+| `resolve_deploy_scope.yml` | The scope play both of the above import: `deploy_target` plus its fabrics' spines. Not run on its own |
 | `readiness.yml` | Check a switch's hand-built underlay is fit to provision |
 | `trm_allocate.yml` | Allocate TRM PIM register sources in NetBox — the only playbook that writes to it |
 | `netbox_inv.yml` | NetBox dynamic inventory |
@@ -798,8 +799,10 @@ means every fabric node in the estate, which nobody intends by omitting a flag;
 **Scope with `deploy_target`, never `--limit`.** `--limit` is refused by the
 role's first task. It can drop spine switches out of the play, and a spine
 switch that is not in the play keeps a stale EVPN peer list on the device;
-`deploy_target` goes through the playbook's host pattern, which always unions
-the spine switches back in.
+`deploy_target` is resolved by `resolve_deploy_scope.yml`, which adds back the
+spine switches of every fabric the target names, and none from any other
+fabric. `generate_evpn.yml` imports the same play, so a preview acts on exactly
+the switches the deploy would.
 
 Per device the deploy: uploads the candidate over SCP → `acm replace … validate`
 → `acm replace … timeout <n>` → waits → `acm confirm-commit` →
