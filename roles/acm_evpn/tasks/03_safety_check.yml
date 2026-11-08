@@ -51,22 +51,61 @@
 
 # BGP ownership is by ASN: a neighbour in the fabric ASN is stripped from the
 # preserved config because the templates are expected to render it. If one is
-# stripped and NOT rendered, the session is silently deleted -- which is how the
-# border-to-border iBGP mesh would have been lost. Verified per device rather
-# than assumed.
+# stripped and NOT rendered, acm replace deletes the session.
+#
+# That is sometimes the intent and sometimes a disaster, and this check used
+# to treat both as the disaster. Decommissioning a leaf takes it out of NetBox,
+# so the route reflectors stop rendering it as a client -- correctly -- and
+# every spine in the fabric then refused to render because its session to the
+# departed leaf was "missing".
+#
+# bgp_unrendered_neighbours (filter_plugins/ios_underlay.py) splits them:
+#
+#   departed  in the EVPN peer group on the device AND no longer any inventory
+#             device's address. Deleting it is the point. Reported, and counted
+#             by the bgp_peer_group_members blast-radius class above, so an
+#             outage that empties the inventory still blocks.
+#   missing   everything else -- a border-mesh peer, a hand-built fabric-ASN
+#             session, or a peer whose device is still in NetBox and did not
+#             render. Still fatal: this is how the border-to-border mesh would
+#             have been lost.
+- name: Classify fabric-ASN BGP neighbours the candidate no longer renders
+  ansible.builtin.set_fact:
+    acm_bgp_unrendered: >-
+      {{ underlay.bgp | bgp_unrendered_neighbours(_bgp_candidate, _inventory_addresses | from_json) }}
+  vars:
+    _bgp_candidate: "{{ lookup('file', playbook_dir ~ '/switch-configuration/' ~ inventory_hostname ~ '-candidate-config.cfg') }}"
+    # Every device NetBox still has, not only this fabric's: an address that
+    # moved to another fabric or another role is still somebody's, and a
+    # session to it is not this run's to delete.
+    _inventory_addresses: >-
+      {%- set out = [] -%}
+      {%- for host in groups['all'] -%}
+      {%-   set addr = hostvars[host].get('ansible_host') -%}
+      {%-   if addr -%}{%- set _ = out.append(addr | string) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out | to_json }}
+
+- name: Report EVPN peers removed because their switch has left NetBox
+  ansible.builtin.debug:
+    msg:
+      - "{{ inventory_hostname }}: removing BGP session(s) to {{ acm_bgp_unrendered.departed | join(', ') }}"
+      - "No device in the inventory has that address any more, so the peer is treated as decommissioned."
+  when: acm_bgp_unrendered.departed | length > 0
+
 - name: Verify every fabric-ASN BGP neighbour stripped from the device is rendered
   ansible.builtin.assert:
     that:
-      - _bgp_missing | length == 0
+      - acm_bgp_unrendered.missing | length == 0
     fail_msg: >-
-      {{ inventory_hostname }}: BGP neighbour(s) {{ _bgp_missing | join(', ') }}
-      are in the fabric ASN {{ fabric_asn }}, so they were removed from the
-      preserved configuration on the assumption a template renders them - but
-      they do not appear in the candidate. Deploying this would delete those
-      sessions. Either render them, or exclude them from fabric ownership.
+      {{ inventory_hostname }}: BGP neighbour(s)
+      {{ acm_bgp_unrendered.missing | join(', ') }} are in the fabric ASN
+      {{ fabric_asn }}, so they were removed from the preserved configuration on
+      the assumption a template renders them - but they do not appear in the
+      candidate. Deploying this would delete those sessions. A neighbour is only
+      removed silently when it was in {{ evpn_peer_group_name }} AND its address
+      belongs to no device in NetBox (a decommissioned switch); these are not
+      that. If the address is still a device in NetBox, its peering did not
+      render - find out why. If it is a session outside the peer group, either
+      render it or move it out of the fabric ASN.
     quiet: true
-  vars:
-    _candidate: "{{ lookup('file', playbook_dir ~ '/switch-configuration/' ~ inventory_hostname ~ '-candidate-config.cfg') }}"
-    _bgp_missing: >-
-      {{ underlay.bgp.fabric_asn_stripped
-         | reject('in', _candidate | regex_findall('(?m)^\s*neighbor (\S+)')) | list }}

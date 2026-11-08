@@ -154,7 +154,8 @@ def underlay_config(
           "bgp": {"asn": "64513",
                    "direct":  [...],   # neighbours outside the fabric ASN
                    "af_ipv4": [...],   # global address-family, same filter
-                   "fabric_asn_stripped": [...]},
+                   "fabric_asn_stripped": [...],
+                   "peer_group_members": [...]},  # in bgp_peer_group
           "addresses": {"Loopback0": "10.67.118.64", ...},
         }
 
@@ -162,11 +163,17 @@ def underlay_config(
     template renders them. That assumption is load-bearing -- if one is stripped
     and NOT rendered the session is silently deleted, which is how the
     border-to-border iBGP mesh would have been lost -- so 03_safety_check.yml
-    verifies each of them appears in the candidate.
+    verifies each of them appears in the candidate, via
+    bgp_unrendered_neighbours below.
+
+    ``peer_group_members`` lists the neighbours the DEVICE has in the EVPN
+    peer group. Membership of that group is something only the automation
+    creates, which is what lets a member that has stopped being rendered be
+    told apart from a session nobody renders.
     """
     addresses: Dict[str, str] = {}
     bgp: Dict[str, Any] = {"asn": "", "direct": [], "af_ipv4": [],
-                           "fabric_asn_stripped": []}
+                           "fabric_asn_stripped": [], "peer_group_members": []}
 
     for header, children in _iter_blocks(config_text):
         if header.startswith("interface "):
@@ -202,8 +209,64 @@ def underlay_config(
                 for line in list(direct) + list(families_ipv4)
                 if _fabric_neighbour(line)
             })
+            member = re.compile(r"neighbor (\S+) peer-group %s\s*$"
+                                % re.escape(bgp_peer_group))
+            bgp["peer_group_members"] = sorted({
+                m.group(1) for m in (member.match(line.strip()) for line in direct)
+                if m
+            })
 
     return {"bgp": bgp, "addresses": addresses}
+
+
+def bgp_unrendered_neighbours(
+    bgp: Dict[str, Any],
+    candidate_text: str,
+    inventory_addresses: Optional[Sequence[Any]] = None,
+) -> Dict[str, List[str]]:
+    """Fabric-ASN neighbours stripped from the device but absent from the
+    candidate, split by whether deleting them is the intent.
+
+    Returns ``{"departed": [...], "missing": [...]}``.
+
+    Ownership by ASN strips every fabric-ASN neighbour on the promise that a
+    template renders it again. One that is NOT rendered is deleted by ``acm
+    replace``, and there are two very different reasons that can happen:
+
+      * DEPARTED -- an EVPN peer whose switch has left NetBox. A route
+        reflector's client list is rendered from inventory, so decommissioning
+        a leaf removes it from the render, and deleting its session is exactly
+        what should happen. This used to fail the run like any other missing
+        neighbour, so decommissioning a leaf blocked every spine in its fabric.
+
+      * MISSING -- anything else: a border-mesh peer, an iBGP session someone
+        built by hand in the fabric ASN, or a peer whose device is still in the
+        inventory but did not render. That last one is a render bug, and this
+        check exists for it -- it is how the border-to-border mesh would have
+        been lost.
+
+    A neighbour is departed only if BOTH hold: the device had it in the EVPN
+    peer group, which only the automation creates, and its address is no
+    longer any inventory device's primary address. Either alone is not enough.
+    Membership alone would forgive a render bug that dropped a live leaf;
+    absence alone would delete a hand-built session to something NetBox has
+    never modelled.
+
+    Absence from the inventory is also what a NetBox outage looks like, so
+    departures are not left to this check alone: peer-group members are a
+    blast-radius class in ios_config_census.py, judged by proportion. Losing
+    one leaf of six passes; losing all of them blocks.
+    """
+    rendered = set(re.findall(r"(?m)^\s*neighbor (\S+)", candidate_text or ""))
+    known = {str(a).split("/")[0] for a in (inventory_addresses or []) if a}
+    members = set(bgp.get("peer_group_members") or [])
+
+    departed, missing = [], []
+    for ip in bgp.get("fabric_asn_stripped") or []:
+        if ip in rendered:
+            continue
+        (departed if ip in members and ip not in known else missing).append(ip)
+    return {"departed": sorted(departed), "missing": sorted(missing)}
 
 
 def render_vlan_spec(vids: Sequence[Any]) -> str:
@@ -234,5 +297,6 @@ class FilterModule(object):
     def filters(self):
         return {
             "ios_underlay_config": underlay_config,
+            "bgp_unrendered_neighbours": bgp_unrendered_neighbours,
             "ios_vlan_range": render_vlan_spec,
         }
