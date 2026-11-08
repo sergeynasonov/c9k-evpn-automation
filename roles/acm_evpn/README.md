@@ -29,22 +29,26 @@ omitting a flag — `-e deploy_target=all` says it deliberately. A run that name
 one leaf still re-renders that leaf's own fabric's spines, so their peer lists
 cannot go stale; see below.
 
-`--limit` is refused too, by task 0, and for a different reason. It can drop spine switches out of the play,
-leaving their EVPN peer lists stale on the device; the playbooks union
-`tags_fabric_spine` into
-the host pattern so that cannot happen. Peer *addresses* come from inventory
+`--limit` is refused too, by task 0, and for a different reason. It can drop
+spine switches out of the play, leaving their EVPN peer lists stale on the
+device. `deploy_target` cannot: both playbooks import
+`resolve_deploy_scope.yml`, which resolves the target through the inventory and
+adds the spines of exactly the fabrics it names — no others — before the play
+that renders forms. A generate therefore previews precisely the switches the
+matching deploy would touch. Peer *addresses* come from inventory
 (`fabric_peers.py`), so a narrowly scoped run still renders correct peer lists.
 
-Two consequences of `deploy_target` being a **host pattern**, where `:` is a
-union. Neither can be fixed in the pattern itself — Ansible applies `:&`
-intersections *after* every union regardless of where they appear, so
-intersecting would also remove the spines the union just added — so both are
-enforced as tasks, before anything touches a device:
+`deploy_target` is still a **host pattern**, where `:` is a union, so a target
+can select devices this role must not render for. That cannot be fixed in the
+pattern itself — Ansible applies `:&` intersections *after* every union
+regardless of where they appear — so it is enforced as tasks, before anything
+touches a device:
 
 | What the pattern selects | What happens |
 |---|---|
 | `deploy_target=<site>` also selects that site's **distribution switches**, which have the site like any other device | Their underlay **is** checked — see below. Whether anything is *rendered* depends on the `fabric_spine` tag: an untagged one gets nothing and is named in the output, a tagged one is a fabric node and is rendered as a spine. The render step picks its template as border / spine / *else leaf*, so without this an untagged distribution switch would be handed a full EVPN **leaf** configuration |
-| The spine union is estate-wide, so it also pulls in **other fabrics' spines** | Dropped. The run works out which fabrics `deploy_target` actually names; the targeted fabric's own spines always stay, which is the whole point of the union |
+| A target that matches **no device at all** — a typo | Refused by `resolve_deploy_scope.yml`, listing the fabrics. Otherwise the render play would have no hosts, which Ansible reports as a warning and exit 0 |
+| A hand-written pattern that reaches **another fabric's spine** | Dropped by `01_gather_data.yml` task 15. The playbooks no longer produce one — the scope play adds only the targeted fabrics' spines — so this is a backstop |
 
 ---
 

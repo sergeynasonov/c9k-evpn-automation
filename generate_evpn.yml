@@ -1,11 +1,24 @@
 ---
 # Scope a run with  -e deploy_target=<pattern>  rather than --limit.
-# See the note in deploy_evpn.yml for why the spines are always included, and
-# for the two things the host pattern deliberately leaves to tasks.
+#
+#   one fabric  : ansible-playbook generate_evpn.yml -e deploy_target=site_group_evpn_campus
+#   one building: ansible-playbook generate_evpn.yml -e deploy_target=sites_evpn_building_a
+#   one leaf    : ansible-playbook generate_evpn.yml -e deploy_target=access1-1
+#   every fabric: ansible-playbook generate_evpn.yml -e deploy_target=all
+#
+# Same scope as deploy_evpn.yml, from the same play: a generate is a preview of
+# a deploy, so it has to render for -- and ask -- exactly the switches that
+# deploy would touch. It used to union ':tags_fabric_spine' into its own host
+# pattern instead, which selected every fabric's spines estate-wide and dropped
+# the foreign ones in a task. See resolve_deploy_scope.yml.
+#
+# deploy_target is REQUIRED. Omitting it is refused before anything is
+# contacted -- see fabric_resolve.yml task 2.
+- name: Resolve the deploy scope
+  ansible.builtin.import_playbook: resolve_deploy_scope.yml
+
 - name: Generate EVPN Configurations (Check Mode)
-  hosts: >-
-    {{ deploy_target
-       | default('device_roles_fabric_border:device_roles_fabric_leaf:tags_fabric_spine') }}:tags_fabric_spine
+  hosts: acm_deploy_scope
   gather_facts: false
   strategy: linear
   tasks:

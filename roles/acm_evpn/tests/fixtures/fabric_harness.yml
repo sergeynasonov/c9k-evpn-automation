@@ -42,8 +42,8 @@
         tasks_from: fabric_resolve.yml
       when: reentry | default(false) | bool
 
-    # Tasks 13-15: which fabrics this run targets, and dropping the spines the
-    # playbooks' unscoped ':tags_fabric_spine' union pulls in from the others.
+    # Tasks 13-15: which fabrics this run targets, and dropping any spine from
+    # another fabric that a hand-written pattern pulls in.
     #
     # Skippable because it is acm_evpn's, not the resolver's, and it drops some
     # of the same hosts for a different reason -- which masked the resolver's

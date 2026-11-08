@@ -1,9 +1,10 @@
 ---
 # Fabric identity, resolved from inventory groups alone.
 #
-# Split out of fabric_resolve.yml so that deploy_evpn.yml can work out which
-# fabrics a deploy_target names -- and therefore which spines belong in the run
-# -- BEFORE the play that touches devices forms. Both callers must agree on
+# Split out of fabric_resolve.yml so that resolve_deploy_scope.yml (imported by
+# generate_evpn.yml and deploy_evpn.yml) can work out which fabrics a
+# deploy_target names -- and therefore which spines belong in the run -- BEFORE
+# the play that touches devices forms. Both callers must agree on
 # what a fabric is; two implementations of that would drift, and the one that
 # drifted would pick the wrong spines for a BGP peer list.
 #
