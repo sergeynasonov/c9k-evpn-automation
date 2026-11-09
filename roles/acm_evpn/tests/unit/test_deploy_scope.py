@@ -78,19 +78,20 @@ def resolve(deploy_target, inventory="fabric_multi.ini"):
     workdir = tempfile.mkdtemp(prefix="deploy-scope-")
     try:
         result_file = os.path.join(workdir, "result.json")
+        # On localhost and reading the GROUP, not a play over the group: a
+        # scope can legitimately be empty (a target naming only servers), and
+        # a play over an empty group never runs a task to record that.
         probe = {
             "name": "probe",
-            "hosts": "acm_deploy_scope",
+            "hosts": "localhost",
             "gather_facts": False,
             "strategy": "linear",
             "tasks": [{
                 "name": "record",
-                "run_once": True,
-                "delegate_to": "localhost",
                 "ansible.builtin.copy": {
                     "dest": "{{ result_file }}",
-                    "content": ("{{ {'scope': ansible_play_hosts_all | sort,"
-                                " 'addresses': ansible_play_hosts_all | sort"
+                    "content": ("{{ {'scope': groups.get('acm_deploy_scope', []) | sort,"
+                                " 'addresses': groups.get('acm_deploy_scope', []) | sort"
                                 " | map('extract', hostvars, 'ansible_host')"
                                 " | list} | to_json }}"),
                 },
@@ -125,8 +126,8 @@ class TestDeployScope(unittest.TestCase):
     """fabric A = site_group_evpn_campus, spines core1/core2.
     fabric B = sites_evpn_remote, spine rcore1."""
 
-    def scope(self, target):
-        rc, out, result = resolve(target)
+    def scope(self, target, inventory="fabric_multi.ini"):
+        rc, out, result = resolve(target, inventory)
         self.assertEqual(rc, 0, out[-3000:])
         self.assertIsNotNone(result, out[-3000:])
         return result["scope"]
@@ -147,11 +148,12 @@ class TestDeployScope(unittest.TestCase):
         a session to the remote fabric."""
         self.assertEqual(self.scope("raccess1"), ["raccess1", "rcore1"])
 
-    def test_a_site_that_is_not_a_fabric_contributes_no_spines(self):
-        """sites_wan_edge holds WAN kit and a server. It is in fabric_map but
-        not in fabric_ids, so it names no fabric and must pull in nothing."""
-        scope = self.scope("sites_wan_edge")
-        self.assertEqual(scope, ["fileserver", "wan-rtr-1"])
+    def test_a_site_that_is_not_a_fabric_contributes_nothing(self):
+        """sites_wan_edge holds WAN kit and a server. It names no fabric, so
+        it pulls in no spines -- and since neither device is in a fabric role,
+        neither reaches the device play. It is a real target, not a typo, so
+        it ends quietly with an empty scope rather than being refused."""
+        self.assertEqual(self.scope("sites_wan_edge"), [])
 
     def test_a_spine_is_not_added_twice_when_already_targeted(self):
         scope = self.scope("core1")
@@ -164,6 +166,37 @@ class TestDeployScope(unittest.TestCase):
         rc, out, result = resolve("access1-1")
         self.assertEqual(rc, 0, out[-3000:])
         self.assertEqual(result["addresses"], ["10.0.0.11", "10.0.0.1", "10.0.0.2"])
+
+    def test_servers_sharing_a_fabric_site_do_not_reach_the_device_play(self):
+        """The ubuntu hosts in a real deploy recap: a site-scoped target
+        selects everything in the site. Only fabric roles go on."""
+        scope = self.scope("site_group_evpn_campus", "fabric_servers.ini")
+        for host in ("ubuntu1", "printer1", "edge-wan"):
+            self.assertNotIn(host, scope)
+        self.assertEqual(scope, ["access1-1", "access2-1", "core1", "core2", "dist1"])
+
+    def test_a_wan_router_tagged_fabric_spine_is_not_added_as_a_spine(self):
+        """The spine union adds tagged devices of the targeted fabric. The tag
+        alone makes nothing a fabric node, so the role filter must apply to
+        what the union adds, not only to what the target matched."""
+        self.assertEqual(self.scope("access1-1", "fabric_servers.ini"),
+                         ["access1-1", "core1", "core2"])
+
+    def test_the_skipped_devices_are_named_once(self):
+        rc, out, _ = resolve("site_group_evpn_campus", "fabric_servers.ini")
+        self.assertEqual(rc, 0, out[-3000:])
+        self.assertIn("scope: skipped 3 device(s) not in a fabric role", out)
+        self.assertIn("edge-wan, printer1, ubuntu1", out)
+
+    def test_switches_are_untouched_by_the_role_filter(self):
+        """Every fabric-role device the target selected is still in scope:
+        the filter removes non-switches and nothing else."""
+        for target in ("site_group_evpn_campus", "sites_building_a", "sites_building_b"):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    [h for h in self.scope(target, "fabric_servers.ini")],
+                    [h for h in self.scope(target, "fabric_multi.ini")
+                     if h not in ("fileserver", "wan-rtr-1")])
 
     def test_a_target_that_matches_nothing_is_refused(self):
         """A typo used to reach task 14 by way of the unioned spines. With the

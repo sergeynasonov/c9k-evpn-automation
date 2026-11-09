@@ -30,13 +30,83 @@
 # fabric traffic -- a wrong MTU or a missing PIM on it breaks the overlay exactly
 # as it would on a leaf. acm_evpn renders nothing for them; that is a separate
 # question, decided in that role.
-- name: Verify underlay readiness
+#
+# The scope is resolved first, on localhost, like generate and deploy do --
+# but without adding spines. It keeps only devices in a role this automation
+# acts on (fabric_managed_groups), so a site-scoped target no longer pulls the
+# servers and printers sharing the site into the play, its recap and the CSV;
+# they are named once instead. And a target matching nothing at all -- a typo,
+# or an inventory that failed to load -- is refused rather than ending as a
+# successful run with no hosts.
+- name: Resolve the readiness scope
+  hosts: localhost
+  gather_facts: false
+  # add_host bypasses the host loop, which the 'free' strategy refuses.
+  strategy: linear
   vars:
     readiness_default_target: >-
       device_roles_fabric_border:device_roles_fabric_leaf:tags_fabric_spine:device_roles_distribution_switch
-  hosts: >-
-    {{ deploy_target
-       | default(readiness_default_target) }}
+  tasks:
+    - name: Resolve fabric identity from inventory
+      ansible.builtin.import_role:
+        name: underlay_readiness
+        tasks_from: fabric_map.yml
+
+    - name: Work out the scope
+      ansible.builtin.set_fact:
+        readiness_scope: "{{ (_resolved | from_json).scope }}"
+        readiness_matched: "{{ (_resolved | from_json).matched }}"
+        readiness_skipped: "{{ (_resolved | from_json).skipped }}"
+      vars:
+        _resolved: >-
+          {%- set targeted = query('ansible.builtin.inventory_hostnames',
+                                   deploy_target | default(readiness_default_target)) -%}
+          {%- set managed = [] -%}
+          {%- for g in fabric_managed_groups -%}
+          {%-   set _ = managed.extend(groups.get(g, [])) -%}
+          {%- endfor -%}
+          {{ {'scope': targeted | select('in', managed) | unique | sort,
+              'skipped': targeted | reject('in', managed) | unique | sort,
+              'matched': targeted | list | sort} | to_json }}
+
+    # Ansible only WARNS on a pattern matching nothing, and the next play then
+    # ends with 'no hosts matched' and exit 0. Judged on what the target
+    # matched, so a target of only servers still ends quietly, as before.
+    - name: Refuse a deploy_target that matches nothing
+      ansible.builtin.assert:
+        that:
+          - readiness_matched | length > 0
+        fail_msg: |-
+          deploy_target={{ deploy_target | default('') }} matches no device in the inventory.
+
+          Fabrics in this inventory: {{ fabric_ids | join(', ') or 'none' }}
+
+          Give a fabric above, a sites_<slug> within one, or a hostname. If
+          every name looks right, check the inventory loaded at all -- an
+          unset NETBOX_API leaves only localhost.
+        quiet: true
+
+    - name: Report devices the target selected that this automation does not act on
+      ansible.builtin.debug:
+        msg: >-
+          scope: skipped {{ readiness_skipped | length }} device(s) not in a
+          fabric role ({{ fabric_managed_groups | join(', ') }}):
+          {{ readiness_skipped | join(', ') }}. A switch in the fabric
+          transit path listed here needs its device role adding to
+          fabric_managed_groups.
+      when: readiness_skipped | length > 0
+
+    # Existing inventory names, so this adds group membership and nothing
+    # else -- ansible_host and every NetBox-derived var are untouched.
+    - name: Put the resolved scope in a group the next play can name
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: readiness_scope
+      loop: "{{ readiness_scope }}"
+      changed_when: false
+
+- name: Verify underlay readiness
+  hosts: readiness_scope
   gather_facts: false
   # LOAD-BEARING. ansible.cfg sets 'strategy = free' globally, and run_once is
   # NOT supported under it -- Ansible warns and runs the task for every host.
