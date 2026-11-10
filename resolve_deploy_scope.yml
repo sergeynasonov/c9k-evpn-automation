@@ -62,9 +62,20 @@
                                    deploy_target | default('all')) -%}
           {#- fabric_ids is the subset of sites/site groups that actually hold a
               fabric node, so a target naming a site of WAN kit or servers
-              contributes no fabrics and therefore no spines. -#}
-          {%- set fabrics = targeted | map('extract', fabric_map)
-                            | select('in', fabric_ids) | unique | list -%}
+              contributes no fabrics and therefore no spines.
+
+              fabric_map.get, not map('extract', fabric_map): a device with no
+              site has no entry at all, and 'extract' raised on it, so any
+              target selecting one -- deploy_target=all, in any NetBox holding
+              a single siteless device -- failed here before the run began.
+              Such a device names no fabric; fabric_resolve.yml task 4 reports
+              it and task 7 skips it, as for any other target. -#}
+          {%- set fabrics = [] -%}
+          {%- for h in targeted
+                if fabric_map.get(h, '') in fabric_ids
+                   and fabric_map[h] not in fabrics -%}
+          {%-   set _ = fabrics.append(fabric_map[h]) -%}
+          {%- endfor -%}
           {%- set out = targeted | list -%}
           {%- for s in groups.get('tags_fabric_spine', [])
                 if fabric_map.get(s) in fabrics and s not in out -%}
@@ -134,5 +145,14 @@
         msg: >-
           deploy_target={{ deploy_target | default('(unset)') }} resolves to
           {{ acm_deploy_scope | length }} device(s) in
-          {{ acm_deploy_scope | map('extract', fabric_map)
-             | unique | list | sort | join(', ') or 'no fabric' }}
+          {{ _fabric_names | from_json | join(', ') or 'no fabric' }}
+      vars:
+        # fabric_map.get for the same reason as above: a siteless fabric-role
+        # device is in scope here, and is reported and skipped later.
+        _fabric_names: >-
+          {%- set names = [] -%}
+          {%- for h in acm_deploy_scope
+                if fabric_map.get(h, '') and fabric_map[h] not in names -%}
+          {%-   set _ = names.append(fabric_map[h]) -%}
+          {%- endfor -%}
+          {{ names | sort | to_json }}

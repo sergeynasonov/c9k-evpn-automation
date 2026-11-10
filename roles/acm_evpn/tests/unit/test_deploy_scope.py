@@ -90,10 +90,13 @@ def resolve(deploy_target, inventory="fabric_multi.ini"):
                 "name": "record",
                 "ansible.builtin.copy": {
                     "dest": "{{ result_file }}",
-                    "content": ("{{ {'scope': groups.get('acm_deploy_scope', []) | sort,"
-                                " 'addresses': groups.get('acm_deploy_scope', []) | sort"
-                                " | map('extract', hostvars, 'ansible_host')"
-                                " | list} | to_json }}"),
+                    # .get: a siteless fixture device has no ansible_host.
+                    "content": ("{% set addrs = [] %}"
+                                "{% for h in groups.get('acm_deploy_scope', []) | sort %}"
+                                "{% set _ = addrs.append(hostvars[h].get('ansible_host')) %}"
+                                "{% endfor %}"
+                                "{{ {'scope': groups.get('acm_deploy_scope', []) | sort,"
+                                " 'addresses': addrs} | to_json }}"),
                 },
             }],
         }
@@ -197,6 +200,27 @@ class TestDeployScope(unittest.TestCase):
                     [h for h in self.scope(target, "fabric_servers.ini")],
                     [h for h in self.scope(target, "fabric_multi.ini")
                      if h not in ("fileserver", "wan-rtr-1")])
+
+    def test_all_is_resolved_even_with_a_siteless_device(self):
+        """deploy_target=all used to fail before the run began --
+        "object of type 'dict' has no attribute 'orphan1'" -- because a device
+        with no site has no fabric_map entry and map('extract') raised on it.
+        Now it resolves: orphan1 is a fabric leaf, so it is in scope, and the
+        resolver reports and skips it like any other siteless device."""
+        rc, out, result = resolve("all")
+        self.assertEqual(rc, 0, out[-3000:])
+        self.assertIn("orphan1", result["scope"])
+        for spine in ("core1", "core2", "rcore1"):
+            self.assertIn(spine, result["scope"])
+        self.assertNotIn("fileserver", result["scope"])
+        # The report names the fabrics and does not choke on orphan1 either.
+        self.assertIn("in site_group_evpn_campus, sites_evpn_remote", out)
+
+    def test_a_siteless_device_named_alone_contributes_no_spines(self):
+        rc, out, result = resolve("orphan1")
+        self.assertEqual(rc, 0, out[-3000:])
+        self.assertEqual(result["scope"], ["orphan1"])
+        self.assertIn("resolves to 1 device(s) in no fabric", out)
 
     def test_a_target_that_matches_nothing_is_refused(self):
         """A typo used to reach task 14 by way of the unioned spines. With the
