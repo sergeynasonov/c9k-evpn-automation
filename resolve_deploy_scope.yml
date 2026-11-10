@@ -53,7 +53,11 @@
 
     - name: Work out the scope, and which spines belong in it
       ansible.builtin.set_fact:
-        acm_deploy_scope: >-
+        acm_deploy_scope: "{{ (_resolved | from_json).scope }}"
+        acm_deploy_matched: "{{ (_resolved | from_json).matched }}"
+        acm_deploy_skipped: "{{ (_resolved | from_json).skipped }}"
+      vars:
+        _resolved: >-
           {%- set targeted = query('ansible.builtin.inventory_hostnames',
                                    deploy_target | default('all')) -%}
           {#- fabric_ids is the subset of sites/site groups that actually hold a
@@ -66,17 +70,33 @@
                 if fabric_map.get(s) in fabrics and s not in out -%}
           {%-   set _ = out.append(s) -%}
           {%- endfor -%}
-          {{ out | sort | to_json }}
+          {#- Only devices in a role this automation acts on reach the next
+              play. A site-scoped target also selects the servers, printers
+              and WAN kit that share the site; fabric_resolve.yml task 8 would
+              drop them anyway, but only after they had entered the device play
+              and appeared in its recap as though they had been deployed to.
+              Same list, same test as task 8, which stays as the backstop. -#}
+          {%- set managed = [] -%}
+          {%- for g in fabric_managed_groups -%}
+          {%-   set _ = managed.extend(groups.get(g, [])) -%}
+          {%- endfor -%}
+          {{ {'scope': out | select('in', managed) | unique | sort,
+              'skipped': out | reject('in', managed) | unique | sort,
+              'matched': targeted | list | sort} | to_json }}
 
     # A deploy_target that matches no host leaves the next play with no hosts,
     # and Ansible treats that as a WARNING and exit 0 -- so a typo reads exactly
     # like a successful run that had nothing to do. While the spine union was
     # in the pattern a typo at least selected the spines and tripped
     # 01_gather_data.yml task 14; without it, nothing would. Refuse here.
+    #
+    # Judged on what the target MATCHED, not on what survived the role filter
+    # above: a target naming only servers is a real target that this
+    # automation has nothing to do for, not a typo, and ends quietly as before.
     - name: Refuse a deploy_target that matches nothing
       ansible.builtin.assert:
         that:
-          - acm_deploy_scope | from_json | length > 0
+          - acm_deploy_matched | length > 0
         fail_msg: |-
           deploy_target={{ deploy_target | default('') }} matches no device in the inventory.
 
@@ -84,6 +104,16 @@
 
           Give a fabric above, a sites_<slug> within one, or a hostname.
         quiet: true
+
+    - name: Report devices the target selected that this automation does not act on
+      ansible.builtin.debug:
+        msg: >-
+          scope: skipped {{ acm_deploy_skipped | length }} device(s) not in a
+          fabric role ({{ fabric_managed_groups | join(', ') }}):
+          {{ acm_deploy_skipped | join(', ') }}. A switch in the fabric
+          transit path listed here needs its device role adding to
+          fabric_managed_groups.
+      when: acm_deploy_skipped | length > 0
 
     # add_host rather than templating the next play's 'hosts:' from a fact:
     # 'hosts' is validated when the playbook is PARSED, before this play has
@@ -96,13 +126,13 @@
       ansible.builtin.add_host:
         name: "{{ item }}"
         groups: acm_deploy_scope
-      loop: "{{ acm_deploy_scope | from_json }}"
+      loop: "{{ acm_deploy_scope }}"
       changed_when: false
 
     - name: Report the scope this run resolved to
       ansible.builtin.debug:
         msg: >-
           deploy_target={{ deploy_target | default('(unset)') }} resolves to
-          {{ acm_deploy_scope | from_json | length }} device(s) in
-          {{ acm_deploy_scope | from_json | map('extract', fabric_map)
-             | unique | list | sort | join(', ') }}
+          {{ acm_deploy_scope | length }} device(s) in
+          {{ acm_deploy_scope | map('extract', fabric_map)
+             | unique | list | sort | join(', ') or 'no fabric' }}

@@ -560,14 +560,22 @@ not a fourth: it is one of those three carrying the `fabric_spine` tag, which is
 why the tag never appears in this list. A run scoped by site or site group
 selects everything in that site — servers, printers, wireless controllers —
 because `deploy_target` replaces the playbook's role-scoped default pattern
-rather than intersecting with it. Anything outside those roles is dropped before
-a single device is contacted, and **named while it is dropped**:
+rather than intersecting with it. Anything outside those roles is dropped by
+the playbook's scope play, on localhost, before the device play even forms — so
+it never appears in the play recap or in `readiness-summary.csv` — and it is
+**named while it is dropped**:
 
 ```
-scope: 2 device(s) selected by the target but skipped — not a fabric role:
-  fileserver, wan-rtr-1. A switch in the fabric transit path listed here needs
-  its device role adding to fabric_managed_groups.
+scope: skipped 2 device(s) not in a fabric role (device_roles_fabric_leaf,
+  device_roles_fabric_border, device_roles_distribution_switch): fileserver,
+  wan-rtr-1. A switch in the fabric transit path listed here needs its device
+  role adding to fabric_managed_groups.
 ```
+
+The same scope play refuses a `deploy_target` that matches **no device at all**
+— a typo, or an inventory that did not load because `NETBOX_API` was unset —
+instead of ending as a successful run with no hosts. A target that matches only
+non-switches is not refused: it ends quietly, with nothing to do.
 
 That report is the point. A transit switch modelled under a role name
 `fabric_managed_groups` does not list is indistinguishable from a printer here,
