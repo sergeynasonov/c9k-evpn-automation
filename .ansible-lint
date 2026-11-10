@@ -36,10 +36,12 @@ skip_list:
   # unprefixed variable can collide with an unrelated role in the same play.
   # These two roles are halves of one system and share a vocabulary on purpose:
   # 'readiness_enforce' is defined in underlay_readiness/defaults and SET by
-  # acm_evpn/tasks/generate_only.yml, and site values arrive unprefixed from
-  # group_vars/all/fabric.yml (evpn_bgp_asn, vtep_source_intf,
-  # underlay_rp_address). Prefixing would split one coherent namespace in three
-  # and stutter every name, while colliding with nothing.
+  # acm_evpn/tasks/generate_only.yml; the per-fabric values both roles read
+  # (fabric_asn, fabric_rp_address, fabric_rp_interface) are resolved from
+  # NetBox by underlay_readiness and consumed by acm_evpn; and the conventions
+  # arrive unprefixed from group_vars/all/main.yml (vtep_source_intf). Prefixing
+  # would split one coherent namespace in three and stutter every name, while
+  # colliding with nothing.
   #
   # Only this sub-rule is skipped. var-naming's other checks -- reserved names,
   # invalid identifiers, writing to read-only vars -- stay on, because those
